@@ -10,7 +10,7 @@ from neural_transport.tools.metrics import ManyMetrics
 from neural_transport.tools.plot import plots_val_step_v2
 
 
-class CarbonFM(pl.LightningModule):
+class NeuralTransport(pl.LightningModule):
     def __init__(
         self,
         model="gnn",
