@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neural_transport"
+authors = [
+    {name = "Vitus Benson", email = "vbenson@bgc-jena.mpg.de"},
+]
+requires-python = ">=3.10"
+version = "0.0.1"
+dependencies = [
+    "numpy",
+]
+
+[tool.setuptools.packages.find]
+include = ["neural_transport"]
+exclude = ["experiments*"]
