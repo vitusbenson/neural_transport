@@ -13,7 +13,7 @@ dependencies = [
     "numpy",
     "xarray",
     "dask",
-    "ecmwfapi",
+    "ecmwf-api-client",
     "tqdm",
     "xesmf",
     "cdo",

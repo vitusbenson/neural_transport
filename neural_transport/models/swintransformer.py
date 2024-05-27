@@ -1010,8 +1010,6 @@ class SwinTransformer(RegularGridModel):
         interpolation_mode="nearest",
     ) -> None:
 
-        super().__init__()
-
         self.swintransformer = SwinTransformerV2Cr(
             img_size=img_size,
             patch_size=patch_size,
