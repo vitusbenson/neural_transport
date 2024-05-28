@@ -11,6 +11,32 @@ requires-python = ">=3.10"
 version = "0.0.1"
 dependencies = [
     "numpy",
+    "xarray",
+    "dask",
+    "ecmwf-api-client",
+    "tqdm",
+    "xesmf",
+    "cdo",
+    "numcodecs",
+    "zarr",
+    "pandas",
+    "xskillscore",
+    "tensorboard",
+    "torch",
+    "cartopy",
+    "matplotlib",
+    "seaborn",
+    "xrft",
+    "xmovie",
+    "torch_geometric",
+    "scipy",
+    "trimesh",
+    "torch_advection",
+    "tensorly",
+    "torch_harmonics",
+    "timm",
+    "einops",
+    "pyarrow",
 ]
 
 [tool.setuptools.packages.find]

@@ -1,4 +1,4 @@
-# NeuralTransport
+![#](logo.png)
 
 *A Python library to train neural network emulators of atmospheric transport models.*
 

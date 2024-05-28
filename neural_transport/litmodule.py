@@ -7,10 +7,10 @@ import torch
 from neural_transport.models import MODELS
 from neural_transport.tools.loss import LOSSES
 from neural_transport.tools.metrics import ManyMetrics
-from neural_transport.tools.plot import plots_val_step_v2
+from neural_transport.tools.plot import plots_val_step
 
 
-class CarbonFM(pl.LightningModule):
+class NeuralTransport(pl.LightningModule):
     def __init__(
         self,
         model="gnn",
@@ -115,7 +115,7 @@ class CarbonFM(pl.LightningModule):
 
     def plots(self, preds, batch, batch_idx, dataloader_idx):
         if (batch_idx < 1) and (dataloader_idx == 0) and (self.global_rank == 0):
-            plots_val_step_v2(
+            plots_val_step(
                 self.logger.experiment,
                 self.current_epoch,
                 preds,
