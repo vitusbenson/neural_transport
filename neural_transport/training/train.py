@@ -245,10 +245,20 @@ def train_and_eval_singlestep(
     num_workers=multiprocessing.cpu_count() // 2,
 ):
     train_singlestep(run_dir, data_kwargs, lit_module_kwargs, trainer_kwargs)
-    predict(run_dir, data_path_forecast, data_kwargs, device=device, freq=freq)
+    predict(
+        run_dir / "singlestep",
+        data_path_forecast,
+        data_kwargs,
+        device=device,
+        freq=freq,
+    )
     target_path = data_path_forecast / f"{data_kwargs['dataset']}_latlon4.zarr"
-    pred_path = run_dir / "preds" / "last" / f"co2_pred_rollout_{freq}.zarr"
-    obs_pred_path = run_dir / "preds" / "last" / f"obs_co2_pred_rollout_{freq}.zarr"
+    pred_path = (
+        run_dir / "singlestep" / "preds" / "last" / f"co2_pred_rollout_{freq}.zarr"
+    )
+    obs_pred_path = (
+        run_dir / "singlestep" / "preds" / "last" / f"obs_co2_pred_rollout_{freq}.zarr"
+    )
     score(target_path, pred_path, obs_pred_path)
     plot(
         target_path,
@@ -284,10 +294,14 @@ def train_and_eval_rollout(
         rollout_constant_lr=rollout_constant_lr,
         timesteps=timesteps,
     )
-    predict(run_dir, data_path_forecast, data_kwargs, device=device, freq=freq)
+    predict(
+        run_dir / "rollout", data_path_forecast, data_kwargs, device=device, freq=freq
+    )
     target_path = data_path_forecast / f"{data_kwargs['dataset']}_latlon4.zarr"
-    pred_path = run_dir / "preds" / "last" / f"co2_pred_rollout_{freq}.zarr"
-    obs_pred_path = run_dir / "preds" / "last" / f"obs_co2_pred_rollout_{freq}.zarr"
+    pred_path = run_dir / "rollout" / "preds" / "last" / f"co2_pred_rollout_{freq}.zarr"
+    obs_pred_path = (
+        run_dir / "rollout" / "preds" / "last" / f"obs_co2_pred_rollout_{freq}.zarr"
+    )
     score(target_path, pred_path, obs_pred_path)
     plot(
         target_path,
