@@ -8,17 +8,41 @@ DIMS = {
     "icosaL5": dict(cell=20480, height=19),
     "icosaL4": dict(cell=5120, height=19),
     "icosaL3": dict(cell=1280, height=19),
+    "latlon4x5": dict(lat=45, lon=72, height=19),
+    "latlon2x2.5": dict(lat=90, lon=144, height=19),
+    "latlon1.5": dict(lat=120, lon=240, height=19),
+    "latlon5.625": dict(lat=32, lon=64, height=10),
+    "latlon2.8125": dict(lat=64, lon=128, height=19),
+    "latlon2x3": dict(lat=90, lon=120, height=34),
 }
 
 DEFAULT_GRIDS = dict(
-    carboscope="latlon4", egg4="latlon1", camsfc="latlon1", carbontracker="latlon2"
+    carboscope="latlon4", egg4="latlon1", camsfc="latlon1", carbontracker="latlon2x3"
 )
 
 LATLON_PROTOTYPE_COORDS = {
-    "latlon4": dict(lat=np.linspace(-88, 88, 45), lon=np.linspace(-180, 175, 72)),
-    "latlon2": dict(lat=np.linspace(-89, 89, 90), lon=np.linspace(-178.5, 178.5, 144)),
+    "latlon4x5": dict(lat=np.linspace(-88, 88, 45), lon=np.linspace(-180, 175, 72)),
+    "latlon2x2.5": dict(
+        lat=np.linspace(-89, 89, 90), lon=np.linspace(-180, 180, 144, endpoint=False)
+    ),
     "latlon1": dict(lat=np.linspace(-90, 90, 181), lon=np.linspace(0, 359, 360)),
+    "latlon5.625": dict(
+        lat=np.linspace(-90 + 90 / 32, 90 - 90 / 32, 32),
+        lon=np.linspace(0, 360, 64, endpoint=False),
+    ),
+    "latlon2.8125": dict(
+        lat=np.linspace(-90 + 90 / 64, 90 - 90 / 64, 64),
+        lon=np.linspace(0, 360, 128, endpoint=False),
+    ),
+    "latlon1.5": dict(
+        lat=np.linspace(-90 + 90 / 120, 90 - 90 / 120, 120),
+        lon=np.linspace(0, 360, 240, endpoint=False),
+    ),
+    "latlon2x3": dict(
+        lat=np.linspace(-89, 89, 90), lon=np.linspace(-178.5, 178.5, 120)
+    ),
 }
+
 
 # fmt: off
 EGG4_HEIGHT = [
@@ -37,6 +61,16 @@ CARBONTRACKER_HEIGHT = [
     9.6205969e02, 9.5344867e02, 9.3724054e02, 9.1289655e02, 8.7725018e02, 8.3036420e02, 7.7615771e02, 7.1108643e02, 6.4732275e02, 5.7938220e02, 5.2086908e02, 4.8320065e02, 4.4741156e02, 4.1372739e02, 3.8207999e02, 3.4553558e02, 3.1128784e02, 2.8607285e02, 2.5710156e02, 2.2520422e02, 2.0088553e02, 1.7908185e02, 1.5524625e02, 1.3402344e02, 1.1521425e02, 9.6265671e01, 7.9630470e01, 6.7339714e01, 5.0337818e01, 2.8204695e01, 1.2295965e01, 5.2308245e00, 2.1191823e00, 5.3707880e-01,
 ]
 # fmt: on
+
+VERTICAL_LAYERS_PROTOTYPE_COORDS = {
+    "l10": dict(
+        level=np.array(
+            [1013.0, 1005.0, 995.0, 971.0, 943.0, 843.0, 642.0, 441.0, 243.0, 73.0]
+        )
+    ),
+    "l19": dict(level=np.array(CARBOSCOPE_HEIGHT)),
+}
+
 
 HEIGHTS = {
     "carboscope": CARBOSCOPE_HEIGHT,

@@ -44,4 +44,3 @@ def density_to_mass(density, V, eps = 1e-12):
 
 def mass_to_density(mass, V, eps = 1e-12):
     return mass / (V + eps)
-

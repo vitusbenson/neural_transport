@@ -19,6 +19,9 @@ from neural_transport.datasets.grids import (
     CARBOSCOPE_79_LONLAT,
     OBSPACK_287_LONLAT,
 )
+from neural_transport.neural_transport.datasets.solar_radiation import (
+    get_toa_incident_solar_radiation_for_xarray,
+)
 from neural_transport.models.gnn.mesh import ICONGrid
 from neural_transport.tools.conversion import *
 
@@ -768,7 +771,7 @@ def latlon_to_zarr(save_dir, higher_res=False):
         Pv = RH / 100 * Psat
         Pd = gph.height - 10 * Pv
 
-        rho = 100 * Pd / (287.050676 * T)
+        rho = 100 * Pd / (287.050676 * T) # THIS USES THE WRONG PRESSURE FIELD !
 
         midpoints = (
             gph.isel(height=slice(-1)).assign_coords(
@@ -790,7 +793,6 @@ def latlon_to_zarr(save_dir, higher_res=False):
 
         all_vars["airdensity"] = rho.assign_attrs(
             {
-                "CDI_grid_type": "unstructured",
                 "long_name": "Dry Air Density",
                 "standard_name": "dry_air_density",
                 "units": "kg m^-3",
@@ -798,7 +800,6 @@ def latlon_to_zarr(save_dir, higher_res=False):
         )
         all_vars["volume"] = V.assign_attrs(
             {
-                "CDI_grid_type": "unstructured",
                 "long_name": "Grid Cell Volume",
                 "standard_name": "grid_cell_volume",
                 "units": "m^3",
@@ -809,7 +810,6 @@ def latlon_to_zarr(save_dir, higher_res=False):
         co2density = (co2 * 44.009e-3 / 28.9652e-3 * 1e-6) * rho
         all_vars["co2density"] = co2density.assign_attrs(
             {
-                "CDI_grid_type": "unstructured",
                 "long_name": "Carbon dioxide density",
                 "standard_name": "co2_density",
                 "units": "kg m^-3",
@@ -819,9 +819,11 @@ def latlon_to_zarr(save_dir, higher_res=False):
     ds = xr.Dataset(all_vars_train).chunk(
         {"time": 1, "height": -1, "lat": -1, "lon": -1}
     )
+    ds["tisr"] = get_toa_incident_solar_radiation_for_xarray(ds)
     ds_test = xr.Dataset(all_vars_test).chunk(
         {"time": 1, "height": -1, "lat": -1, "lon": -1}
     )
+    ds_test["tisr"] = get_toa_incident_solar_radiation_for_xarray(ds_test)
 
     ds_train = ds.sel(time=slice(None, "2014-12-31"))
     ds_val = ds.sel(time=slice("2015-01-01", "2016-12-31"))

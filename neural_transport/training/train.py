@@ -120,20 +120,37 @@ def load_dataset(data_path, data_kwargs):
     return dataset
 
 
-def predict(log_path, data_path_forecast, data_kwargs, device="cuda", freq="QS"):
+def predict(
+    log_path,
+    data_path_forecast,
+    data_kwargs,
+    device="cuda",
+    freq="QS",
+    ckpt="last",
+    lit_module_kwargs={},
+):
     log_path = Path(log_path)
 
+    ckptdir = log_path / "checkpoints"
+    bestckptpath = sorted(
+        [p for p in ckptdir.glob("*.ckpt") if "LossVal" in p.name],
+        key=lambda p: float(p.name.split("=")[-1].split(".c")[0]),
+    )[0]
+
     lastckptpath = log_path / "checkpoints/last.ckpt"
-    lastoutpath = log_path / "preds" / "last"
+    outpath = log_path / "preds" / ckpt
+
+    ckptpath = bestckptpath if ckpt == "best" else lastckptpath
 
     dataset = load_dataset(data_path_forecast, data_kwargs)
 
-    print(f"Forecasting {lastckptpath} Last CKPT")
-    model = NeuralTransport.load_from_checkpoint(lastckptpath)
+    print(f"Forecasting {ckptpath} {ckpt} CKPT")
+    model = NeuralTransport.load_from_checkpoint(ckptpath, **lit_module_kwargs)
+    outpath.mkdir(parents=True, exist_ok=True)
     iterative_forecast(
         model,
         dataset,
-        lastoutpath,
+        outpath,
         rollout=(freq != "singlestep"),
         device=device,
         verbose=True,
@@ -160,10 +177,10 @@ def load_pred_targ(target_path, pred_path):
 def score(target_path, pred_path, obs_pred_path=None):
     co2targ, co2pred = load_pred_targ(target_path, pred_path)
 
-    score_path = pred_path.parent.parent.parent / "scores"
     model_name = pred_path.parent.parent.parent.parent.name
     singlestep_or_rollout = pred_path.parent.parent.parent.name
     ckpt_name = pred_path.parent.name
+    score_path = pred_path.parent.parent.parent / "scores" / ckpt_name
 
     metrics = {}
     metrics[f"{model_name}_{singlestep_or_rollout}_{ckpt_name}"] = compute_score_df(
@@ -171,7 +188,7 @@ def score(target_path, pred_path, obs_pred_path=None):
     )
 
     df = pd.DataFrame(metrics).T
-
+    score_path.mkdir(parents=True, exist_ok=True)
     df.to_csv(score_path / "metrics.csv")
 
     if obs_pred_path:
@@ -196,12 +213,14 @@ def plot(
 ):
     co2targ, co2pred = load_pred_targ(target_path, pred_path)
 
-    plot_path = pred_path.parent.parent.parent / "plots"
+    ckpt_name = pred_path.parent.name
+    plot_path = pred_path.parent.parent.parent / "plots" / ckpt_name
 
     co2pred = co2pred.isel(time=slice(1, None))
     co2targ = co2targ.isel(time=slice(1, None))
     co2targ = co2targ.isel(time=slice(None, len(co2pred.time)))
 
+    plot_path.mkdir(parents=True, exist_ok=True)
     plot_metrics(co2pred, co2targ, plot_path)
 
     t0, tend = movie_interval
@@ -243,21 +262,26 @@ def train_and_eval_singlestep(
     obs_compare_path=None,
     movie_interval=["2018-01-01", "2018-03-31"],
     num_workers=multiprocessing.cpu_count() // 2,
+    train=True,
+    ckpt="last",
 ):
-    train_singlestep(run_dir, data_kwargs, lit_module_kwargs, trainer_kwargs)
+    if train:
+        train_singlestep(run_dir, data_kwargs, lit_module_kwargs, trainer_kwargs)
     predict(
         run_dir / "singlestep",
         data_path_forecast,
         data_kwargs,
         device=device,
         freq=freq,
+        ckpt=ckpt,
+        lit_module_kwargs=lit_module_kwargs,
     )
     target_path = data_path_forecast / f"{data_kwargs['dataset']}_latlon4.zarr"
     pred_path = (
-        run_dir / "singlestep" / "preds" / "last" / f"co2_pred_rollout_{freq}.zarr"
+        run_dir / "singlestep" / "preds" / ckpt / f"co2_pred_rollout_{freq}.zarr"
     )
     obs_pred_path = (
-        run_dir / "singlestep" / "preds" / "last" / f"obs_co2_pred_rollout_{freq}.zarr"
+        run_dir / "singlestep" / "preds" / ckpt / f"obs_co2_pred_rollout_{freq}.zarr"
     )
     score(target_path, pred_path, obs_pred_path)
     plot(
@@ -285,23 +309,32 @@ def train_and_eval_rollout(
     num_workers=multiprocessing.cpu_count() // 2,
     rollout_constant_lr=1e-5,
     timesteps=[3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31],
+    train=True,
+    ckpt="last",
 ):
-    train_rollout(
-        run_dir,
-        data_kwargs,
-        lit_module_kwargs,
-        rollout_trainer_kwargs,
-        rollout_constant_lr=rollout_constant_lr,
-        timesteps=timesteps,
-    )
+    if train:
+        train_rollout(
+            run_dir,
+            data_kwargs,
+            lit_module_kwargs,
+            rollout_trainer_kwargs,
+            rollout_constant_lr=rollout_constant_lr,
+            timesteps=timesteps,
+        )
     predict(
-        run_dir / "rollout", data_path_forecast, data_kwargs, device=device, freq=freq
+        run_dir / "rollout",
+        data_path_forecast,
+        data_kwargs,
+        device=device,
+        freq=freq,
+        ckpt=ckpt,
     )
     target_path = data_path_forecast / f"{data_kwargs['dataset']}_latlon4.zarr"
-    pred_path = run_dir / "rollout" / "preds" / "last" / f"co2_pred_rollout_{freq}.zarr"
+    pred_path = run_dir / "rollout" / "preds" / ckpt / f"co2_pred_rollout_{freq}.zarr"
     obs_pred_path = (
-        run_dir / "rollout" / "preds" / "last" / f"obs_co2_pred_rollout_{freq}.zarr"
+        run_dir / "rollout" / "preds" / ckpt / f"obs_co2_pred_rollout_{freq}.zarr"
     )
+    print("Starting Scoring")
     score(target_path, pred_path, obs_pred_path)
     plot(
         target_path,

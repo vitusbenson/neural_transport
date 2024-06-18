@@ -1364,8 +1364,6 @@ class SFNO(RegularGridModel):
         out_chans=19,
     ) -> None:
 
-        super().__init__()
-
         self.sfnonet = SphericalFourierNeuralOperatorNet(
             embed_dim=embed_dim,
             num_layers=num_layers,

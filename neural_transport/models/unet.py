@@ -86,10 +86,16 @@ class UNet(RegularGridModel):
         norm="batch",
         enc_filters=[[7], [3, 3], [3, 3], [3, 3]],
         dec_filters=[[3, 3], [3, 3], [3, 3], [3, 3]],
+        in_interpolation="bilinear",
+        out_interpolation="nearest-exact",
+        out_clip=None,
     ):
 
         self.in_chans = in_chans
         self.out_chans = out_chans
+        self.in_interpolation = in_interpolation
+        self.out_interpolation = out_interpolation
+        self.out_clip = out_clip
 
         depth = len(enc_filters)
         assert depth == len(dec_filters)
@@ -145,7 +151,7 @@ class UNet(RegularGridModel):
             x_in,
             size=(self.resc_lat, self.resc_lon),
             align_corners=True,
-            mode="bilinear",
+            mode=self.in_interpolation,
         )
 
         skips = []
@@ -159,9 +165,12 @@ class UNet(RegularGridModel):
             x = stage(x + skip)
 
         x = nn.functional.interpolate(
-            x, size=(self.nlat, self.nlon), mode="nearest-exact"
+            x, size=(self.nlat, self.nlon), mode=self.out_interpolation
         )
 
         x_out = self.readout(x)
+
+        if self.out_clip:
+            x_out = x_out.clamp(-self.out_clip, self.out_clip)
 
         return x_out

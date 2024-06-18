@@ -20,8 +20,12 @@ mplstyle.use("fast")
 warnings.filterwarnings("ignore", category=UserWarning)
 
 
-def create_val_step_dataset(preds, batch, dataset="egg4", grid="latlon1"):
-    to_xarray = partial(tensor_to_xarray, dataset=dataset, grid=grid)
+def create_val_step_dataset(
+    preds, batch, dataset="egg4", grid="latlon1", vertical_levels="l10"
+):
+    to_xarray = partial(
+        tensor_to_xarray, dataset=dataset, grid=grid, vertical_levels=vertical_levels
+    )
 
     return xr.Dataset(
         {f"{k}_pred": to_xarray(v) for k, v in preds.items() if v[0].numel() > 200}
@@ -67,7 +71,7 @@ def plot_icon_grid(ds, var, vmin=None, vmax=None, nstep=None):
 
 
 def plot_atmospheric_layer_icon(ds, sample_idx, layer_idx, vari_idx=0, time_idx=0):
-    ds = ds.isel(batch=sample_idx, height=layer_idx, vari=vari_idx, time=time_idx)
+    ds = ds.isel(batch=sample_idx, level=layer_idx, vari=vari_idx, time=time_idx)
 
     with mpl.rc_context(
         {
@@ -210,7 +214,7 @@ def plot_atmospheric_layer_icon(ds, sample_idx, layer_idx, vari_idx=0, time_idx=
 
 
 def plot_atmospheric_layer(ds, sample_idx, layer_idx, vari_idx=0, time_idx=0):
-    ds = ds.isel(batch=sample_idx, height=layer_idx, vari=vari_idx, time=time_idx)
+    ds = ds.isel(batch=sample_idx, level=layer_idx, vari=vari_idx, time=time_idx)
 
     with mpl.rc_context(
         {
@@ -315,7 +319,7 @@ def plot_zonal_mean(ds, sample_idx, vari_idx=0, time_idx=0):
 
         targ_kwargs = dict(
             x="lat",
-            y="height",
+            y="level",
             cbar_kwargs=dict(shrink=0.7, label="[ppm]"),
             vmin=(ds.targ_t1.mean("lon").min() // 5) * 5 - 5,
             vmax=(ds.targ_t1.mean("lon").max() // 5) * 5 + 5,
@@ -333,7 +337,7 @@ def plot_zonal_mean(ds, sample_idx, vari_idx=0, time_idx=0):
         )
         delta_kwargs = dict(
             x="lat",
-            y="height",
+            y="level",
             cbar_kwargs=dict(shrink=0.7, label="[ppm]"),
             norm=colors.SymLogNorm(linthresh=0.01),
             vmin=-max_delta,
@@ -353,7 +357,7 @@ def plot_zonal_mean(ds, sample_idx, vari_idx=0, time_idx=0):
 
 
 def plot_zonal_spectrum(ds, layer_idx, time_idx=0, vari_idx=0):
-    ds = ds.isel(height=layer_idx, time=time_idx, vari=vari_idx)
+    ds = ds.isel(level=layer_idx, time=time_idx, vari=vari_idx)
 
     Fpred = xrft.fft(ds.pred_t1, dim="lon", real_dim="lon")
     Ftarg = xrft.fft(ds.targ_t1, dim="lon", real_dim="lon")
@@ -379,9 +383,9 @@ def plot_zonal_spectrum(ds, layer_idx, time_idx=0, vari_idx=0):
     return fig
 
 
-def add_figure_to_logger(ds, sample_idx, layer_idx, name, grid="carboscope_2D"):
+def add_figure_to_logger(ds, sample_idx, layer_idx, name, grid="latlon5.625"):
     try:
-        if grid in ["carboscope_2D", "latlon2", "latlon4", "latlon1"]:
+        if grid.startswith("latlon"):
             return name, figure_to_image(
                 plot_atmospheric_layer(ds, sample_idx=sample_idx, layer_idx=layer_idx),
                 close=True,
@@ -393,7 +397,8 @@ def add_figure_to_logger(ds, sample_idx, layer_idx, name, grid="carboscope_2D"):
                 ),
                 close=True,
             )
-    except:
+    except Exception as e:
+        print(f"Could not plot {name}: {e}")
         return name, None
 
 
@@ -412,10 +417,13 @@ def plots_val_step(
     n_samples=8,
     dataset="egg4",
     grid="latlon1",
+    vertical_levels="l10",
     max_workers=32,
     plot_every_n_epochs=1,
 ):
-    ds = create_val_step_dataset(preds, batch, dataset=dataset, grid=grid)
+    ds = create_val_step_dataset(
+        preds, batch, dataset=dataset, grid=grid, vertical_levels=vertical_levels
+    )
 
     for molecule in ["ch4", "co2"]:
         if f"{molecule}molemix" in variables:
@@ -466,5 +474,4 @@ def plots_val_step(
             name, img = future.result()
             if img is not None:
                 logger_experiment.add_image(name, img, current_epoch)
-            else:
-                print(f"Could not plot {name}")
+            
