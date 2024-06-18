@@ -28,6 +28,8 @@ class CarbonDataset(Dataset):
         data_path="data/",
         dataset="egg4",
         grid="latlon1",
+        vertical_levels="l10",
+        freq="6h",
         n_timesteps=1,
         rename_dims={},
         target_vars=[],
@@ -58,9 +60,14 @@ class CarbonDataset(Dataset):
         self.initial_time_idx = 0
 
         if new_zarr:
-            ds = xr.open_zarr(self.data_path / f"{dataset}_{grid}.zarr")
+            ds = xr.open_zarr(
+                self.data_path / f"{dataset}_{grid}_{vertical_levels}_{freq}.zarr"
+            )
 
-            self.zarr = zarr.open(self.data_path / f"{dataset}_{grid}.zarr", mode="r")
+            self.zarr = zarr.open(
+                self.data_path / f"{dataset}_{grid}_{vertical_levels}_{freq}.zarr",
+                mode="r",
+            )
 
             if time_interval:
                 self.initial_time_idx = (
@@ -77,28 +84,28 @@ class CarbonDataset(Dataset):
 
                 if grid.startswith("latlon"):
                     ds_3d = ds_3d.transpose(
-                        "time", "step", "lat", "lon", "height", "vari_3d"
+                        "time", "step", "lat", "lon", "level", "vari_3d"
                     ).stack({"cell": ["lat", "lon"]})
                     ds_2d = ds_2d.transpose(
                         "time", "step", "lat", "lon", "vari_2d"
                     ).stack({"cell": ["lat", "lon"]})
                     self.grid_ds = None
                 else:
-                    ds_3d = ds_3d.transpose("time", "step", "cell", "height", "vari_3d")
+                    ds_3d = ds_3d.transpose("time", "step", "cell", "level", "vari_3d")
                     ds_2d = ds_2d.transpose("time", "step", "cell", "vari_2d")
                     self.grid_ds = get_gridnc_from_grid(grid)
 
             else:
                 if grid.startswith("latlon"):
                     ds_3d = ds_3d.transpose(
-                        "time", "lat", "lon", "height", "vari_3d"
+                        "time", "lat", "lon", "level", "vari_3d"
                     ).stack({"cell": ["lat", "lon"]})
                     ds_2d = ds_2d.transpose("time", "lat", "lon", "vari_2d").stack(
                         {"cell": ["lat", "lon"]}
                     )
                     self.grid_ds = None
                 else:
-                    ds_3d = ds_3d.transpose("time", "cell", "height", "vari_3d")
+                    ds_3d = ds_3d.transpose("time", "cell", "level", "vari_3d")
                     ds_2d = ds_2d.transpose("time", "cell", "vari_2d")
                     self.grid_ds = get_gridnc_from_grid(grid)
 
@@ -122,12 +129,12 @@ class CarbonDataset(Dataset):
                 ds = ds.isel(time=slice(None, None, subsample_time))
 
             if grid.startswith("latlon"):
-                self.ds = ds.transpose("time", "lat", "lon", "height").stack(
+                self.ds = ds.transpose("time", "lat", "lon", "level").stack(
                     {"cell": ["lat", "lon"]}
                 )
                 self.grid_ds = None
             else:
-                self.ds = ds.transpose("time", "cell", "height")
+                self.ds = ds.transpose("time", "cell", "level")
                 self.grid_ds = get_gridnc_from_grid(grid)
 
             if time_interval:
@@ -136,9 +143,9 @@ class CarbonDataset(Dataset):
             if compute:
                 self.ds = self.ds.compute()
 
-        self.stats_ds = xr.open_dataset(self.data_path / f"{dataset}_stats.nc").rename(
-            rename_dims
-        )
+        self.stats_ds = xr.open_dataset(
+            self.data_path / f"{dataset}_{grid}_{vertical_levels}_{freq}_stats.nc"
+        ).rename(rename_dims)
 
         if load_obspack:
             self.obspack_ds = (
@@ -200,9 +207,9 @@ class CarbonDataset(Dataset):
                             coords=self.ds_3d_coords.isel(
                                 time=startdate_idx, step=step_slice
                             ).coords,
-                            dims=("step", "vari_3d", "height", "lat", "lon"),
+                            dims=("step", "vari_3d", "level", "lat", "lon"),
                         )
-                        .transpose("step", "lat", "lon", "height", "vari_3d")
+                        .transpose("step", "lat", "lon", "level", "vari_3d")
                         .stack({"cell": ["lat", "lon"]})
                         .to_dataset("vari_3d")
                     )
@@ -216,9 +223,9 @@ class CarbonDataset(Dataset):
                             coords=self.ds_3d_coords.isel(
                                 time=startdate_idx, step=step_slice
                             ).coords,
-                            dims=("step", "vari_3d", "height", "cell"),
+                            dims=("step", "vari_3d", "level", "cell"),
                         )
-                        .transpose("step", "cell", "height", "vari_3d")
+                        .transpose("step", "cell", "level", "vari_3d")
                         .to_dataset("vari_3d")
                     )
 
@@ -241,9 +248,9 @@ class CarbonDataset(Dataset):
                         xr.DataArray(
                             self.zarr["variables_3d"][timeslice_zarr],
                             coords=self.ds_3d_coords.isel(time=timeslice).coords,
-                            dims=("time", "vari_3d", "height", "lat", "lon"),
+                            dims=("time", "vari_3d", "level", "lat", "lon"),
                         )
-                        .transpose("time", "lat", "lon", "height", "vari_3d")
+                        .transpose("time", "lat", "lon", "level", "vari_3d")
                         .stack({"cell": ["lat", "lon"]})
                         .to_dataset("vari_3d")
                     )
@@ -253,9 +260,9 @@ class CarbonDataset(Dataset):
                         xr.DataArray(
                             self.zarr["variables_3d"][timeslice_zarr],
                             coords=self.ds_3d_coords.isel(time=timeslice).coords,
-                            dims=("time", "vari_3d", "height", "cell"),
+                            dims=("time", "vari_3d", "level", "cell"),
                         )
-                        .transpose("time", "cell", "height", "vari_3d")
+                        .transpose("time", "cell", "level", "vari_3d")
                         .to_dataset("vari_3d")
                     )
 
@@ -286,7 +293,11 @@ class CarbonDataset(Dataset):
         for molecule in ["ch4", "co2"]:
             density_var = f"{molecule}density"
             massmix_var = f"{molecule}massmix"
-            if density_var in self.vars_curr and massmix_var not in data:
+            if (
+                density_var in self.vars_curr
+                and massmix_var not in data
+                and "airdensity" in ds.data_vars
+            ):
                 massmix = density_to_massmix(
                     ds[density_var],
                     ds["airdensity"],
@@ -296,7 +307,11 @@ class CarbonDataset(Dataset):
                 data[massmix_var] = torch.from_numpy(
                     self.expand_dims(massmix).values.astype("float32")
                 )
-            if density_var in self.vars_next and f"{massmix_var}_next" not in data:
+            if (
+                density_var in self.vars_next
+                and f"{massmix_var}_next" not in data
+                and "airdensity" in ds.data_vars
+            ):
                 massmix_next = density_to_massmix(
                     ds_next[density_var],
                     ds_next["airdensity"],
@@ -307,7 +322,11 @@ class CarbonDataset(Dataset):
                     self.expand_dims(massmix_next).values.astype("float32")
                 )
 
-            if massmix_var in self.vars_curr and density_var not in data:
+            if (
+                massmix_var in self.vars_curr
+                and density_var not in data
+                and "airdensity" in ds.data_vars
+            ):
                 density = massmix_to_density(
                     ds[massmix_var],
                     ds["airdensity"],
@@ -317,7 +336,11 @@ class CarbonDataset(Dataset):
                 data[density_var] = torch.from_numpy(
                     self.expand_dims(density).values.astype("float32")
                 )
-            if massmix_var in self.vars_next and f"{density_var}_next" not in data:
+            if (
+                massmix_var in self.vars_next
+                and f"{density_var}_next" not in data
+                and "airdensity" in ds.data_vars
+            ):
                 density_next = massmix_to_density(
                     ds_next[massmix_var],
                     ds_next["airdensity"],
@@ -355,8 +378,8 @@ class CarbonDataset(Dataset):
     @staticmethod
     def expand_dims(arr):
         return arr.expand_dims(
-            [d for d in ["time", "cell", "height"] if d not in arr.dims]
-        ).transpose("time", "cell", "height")
+            [d for d in ["time", "cell", "level"] if d not in arr.dims]
+        ).transpose("time", "cell", "level")
 
     def readout_stations(self, ds, grid=None):
         grid = (
@@ -381,34 +404,34 @@ class CarbonDataset(Dataset):
         )
         if grid.startswith("latlon"):
             coords = {} | LATLON_PROTOTYPE_COORDS[grid]
-            coords["height"] = HEIGHTS[self.dataset]
+            coords["level"] = HEIGHTS[self.dataset]
             coords["time"] = self.ds.time
             if "step" in self.ds.coords:
                 coords["step"] = self.ds.step
-                dims = ("time", "step", "lat", "lon", "height")
-                chunking = {"time": 1, "step": 1, "lat": -1, "lon": -1, "height": -1}
+                dims = ("time", "step", "lat", "lon", "level")
+                chunking = {"time": 1, "step": 1, "lat": -1, "lon": -1, "level": -1}
             else:
-                dims = ("time", "lat", "lon", "height")
-                chunking = {"time": 10, "lat": -1, "lon": -1, "height": -1}
+                dims = ("time", "lat", "lon", "level")
+                chunking = {"time": 10, "lat": -1, "lon": -1, "level": -1}
             nparr = np.NaN
 
         else:
             coords = dict(
                 clon=self.ds.clon,
                 clat=self.ds.clat,
-                height=HEIGHTS[self.dataset],
+                level=HEIGHTS[self.dataset],
                 time=self.ds.time,
             )
             if "step" in self.ds.coords:
                 coords["step"] = self.ds.step
-                dims = ("time", "step", "cell", "height")
-                chunking = {"time": 1, "step": 1, "cell": -1, "height": -1}
+                dims = ("time", "step", "cell", "level")
+                chunking = {"time": 1, "step": 1, "cell": -1, "level": -1}
             else:
-                dims = ("time", "cell", "height")
-                chunking = {"time": 10, "cell": -1, "height": -1}
+                dims = ("time", "cell", "level")
+                chunking = {"time": 10, "cell": -1, "level": -1}
 
             nparr = np.full(
-                (len(coords["time"]), len(coords["clon"]), len(coords["height"])),
+                (len(coords["time"]), len(coords["clon"]), len(coords["level"])),
                 np.NaN,
             )
 
@@ -436,7 +459,7 @@ class CarbonDataset(Dataset):
 
         prototype_zarr = xr.Dataset(
             {
-                v: arr if v in target_vars_3d else arr.isel(height=0, drop=True)
+                v: arr if v in target_vars_3d else arr.isel(level=0, drop=True)
                 for v in target_vars
             },
             coords=coords,
@@ -460,6 +483,8 @@ class CarbonDataModule(pl.LightningDataModule):
         data_path,
         dataset,
         grid,
+        vertical_levels,
+        freq,
         n_timesteps,
         batch_size_train,
         batch_size_pred,
@@ -473,6 +498,8 @@ class CarbonDataModule(pl.LightningDataModule):
         self.data_path = Path(data_path)
         self.dataset = dataset
         self.grid = grid
+        self.vertical_levels = vertical_levels
+        self.freq = freq
         self.n_timesteps = n_timesteps
         self.val_rollout_n_timesteps = val_rollout_n_timesteps
         self.batch_size_train = batch_size_train
@@ -488,6 +515,8 @@ class CarbonDataModule(pl.LightningDataModule):
                 data_path=self.data_path / "train",
                 dataset=self.dataset,
                 grid=self.grid,
+                vertical_levels=self.vertical_levels,
+                freq=self.freq,
                 n_timesteps=self.n_timesteps,
                 new_zarr=True,
                 forcing_vars=self.forcing_vars,
@@ -499,6 +528,8 @@ class CarbonDataModule(pl.LightningDataModule):
                 data_path=self.data_path / "val",
                 dataset=self.dataset,
                 grid=self.grid,
+                vertical_levels=self.vertical_levels,
+                freq=self.freq,
                 n_timesteps=self.n_timesteps,
                 new_zarr=True,
                 forcing_vars=self.forcing_vars,
@@ -510,6 +541,8 @@ class CarbonDataModule(pl.LightningDataModule):
                     data_path=self.data_path / "val",
                     dataset=self.dataset,
                     grid=self.grid,
+                    vertical_levels=self.vertical_levels,
+                    freq=self.freq,
                     n_timesteps=self.val_rollout_n_timesteps,
                     new_zarr=True,
                     forcing_vars=self.forcing_vars,
@@ -521,6 +554,8 @@ class CarbonDataModule(pl.LightningDataModule):
                 data_path=self.data_path / "test",
                 dataset=self.dataset,
                 grid=self.grid,
+                vertical_levels=self.vertical_levels,
+                freq=self.freq,
                 n_timesteps=self.n_timesteps,
                 new_zarr=True,
                 forcing_vars=self.forcing_vars,

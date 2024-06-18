@@ -137,6 +137,23 @@ class Mass_RMSE(nn.Module):
             f"mass_rrmse_{self.molecule}": rmse / mass_targ.sum([-1, -2]).mean(),
         }
 
+class Mass_RMSEv2(nn.Module):
+    def __init__(self, molecule = "co2"):
+
+        super().__init__()
+        self.molecule = molecule
+
+    def forward(self, preds, batch):
+
+        mass_pred = (preds[f"{self.molecule}massmix"] / 1e6) * batch["airmass_next"]
+        mass_targ = (batch[f"{self.molecule}massmix_next"] / 1e6) * batch["airmass_next"]
+
+        se = (mass_pred.sum([-1, -2]) - mass_targ.sum([-1, -2])) ** 2
+        rmse = torch.sqrt(torch.mean(se))
+        return {
+            f"mass_rmse_{self.molecule}": rmse,
+            f"mass_rrmse_{self.molecule}": rmse / mass_targ.sum([-1, -2]).mean(),
+        }
 
 METRICS = {
     "rmse": RMSE,
@@ -145,6 +162,7 @@ METRICS = {
     "rabsbias": RelAbsBias,
     "rrmse": RRMSE,
     "mass_rmse": Mass_RMSE,
+    "mass_rmsev2": Mass_RMSEv2,
 }
 
 
