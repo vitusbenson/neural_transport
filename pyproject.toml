@@ -37,6 +37,8 @@ dependencies = [
     "timm",
     "einops",
     "pyarrow",
+    "h5netcdf",
+    "netcdf4",
 ]
 
 [tool.setuptools.packages.find]

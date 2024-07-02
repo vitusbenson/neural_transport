@@ -54,6 +54,8 @@ class CarbonDataset(Dataset):
         self.data_path = Path(data_path)
         self.dataset = dataset
         self.grid = grid
+        self.vertical_levels = vertical_levels
+        self.freq = freq
 
         self.new_zarr = new_zarr
         self.use_fastaccess = use_fastaccess
@@ -64,9 +66,15 @@ class CarbonDataset(Dataset):
                 self.data_path / f"{dataset}_{grid}_{vertical_levels}_{freq}.zarr"
             )
 
-            self.zarr = zarr.open(
-                self.data_path / f"{dataset}_{grid}_{vertical_levels}_{freq}.zarr",
-                mode="r",
+            self.zarr = (
+                zarr.load(
+                    self.data_path / f"{dataset}_{grid}_{vertical_levels}_{freq}.zarr"
+                )
+                if compute
+                else zarr.open(
+                    self.data_path / f"{dataset}_{grid}_{vertical_levels}_{freq}.zarr",
+                    mode="r",
+                )
             )
 
             if time_interval:
@@ -110,7 +118,7 @@ class CarbonDataset(Dataset):
                     self.grid_ds = get_gridnc_from_grid(grid)
 
             if compute:
-                ds_3d = ds_3d.compute()
+                ds_2d = ds_2d.compute()
 
             ds = xr.merge(
                 [
@@ -143,17 +151,29 @@ class CarbonDataset(Dataset):
             if compute:
                 self.ds = self.ds.compute()
 
-        self.stats_ds = xr.open_dataset(
-            self.data_path / f"{dataset}_{grid}_{vertical_levels}_{freq}_stats.nc"
+        # with xr.open_dataset(
+        #     self.data_path / f"{dataset}_{grid}_{vertical_levels}_{freq}_stats.nc",
+        #     # engine="h5netcdf",
+        # ) as stats_ds:
+        #     self.stats_ds = stats_ds.copy(deep=True).rename(rename_dims)
+
+        # self.stats_ds = xr.open_dataset(
+        #     self.data_path / f"{dataset}_{grid}_{vertical_levels}_{freq}_stats.nc",
+        #     engine="h5netcdf",
+        # ).rename(rename_dims)
+
+        self.stats_ds = xr.open_zarr(
+            self.data_path / f"{dataset}_{grid}_{vertical_levels}_{freq}_stats.zarr",
         ).rename(rename_dims)
 
         if load_obspack:
+
             self.obspack_ds = (
                 xr.open_zarr(self.data_path.parent.parent / "Obspack" / "obspack.zarr")
-                .interp_like(self.ds.time, method="linear")
-                .sel(time=self.ds.time)
+                .sel(time=ds.time, method="nearest")
                 .compute()
             )
+
             self.obspack_ds["lat"] = self.obspack_ds.lat.interpolate_na(
                 dim="time", method="nearest", fill_value="extrapolate"
             )
@@ -395,6 +415,7 @@ class CarbonDataset(Dataset):
         target_vars_3d=None,
         target_vars_2d=None,
         grid=None,
+        vertical_levels=None,
         overwrite=True,
     ):
         grid = (
@@ -402,9 +423,13 @@ class CarbonDataset(Dataset):
             if grid is None
             else (DEFAULT_GRIDS[self.dataset] if grid == "default" else grid)
         )
+        vertical_levels = (
+            self.vertical_levels if vertical_levels is None else vertical_levels
+        )
+
         if grid.startswith("latlon"):
             coords = {} | LATLON_PROTOTYPE_COORDS[grid]
-            coords["level"] = HEIGHTS[self.dataset]
+            coords["level"] = VERTICAL_LAYERS_PROTOTYPE_COORDS[vertical_levels]["level"]
             coords["time"] = self.ds.time
             if "step" in self.ds.coords:
                 coords["step"] = self.ds.step
@@ -419,7 +444,7 @@ class CarbonDataset(Dataset):
             coords = dict(
                 clon=self.ds.clon,
                 clat=self.ds.clat,
-                level=HEIGHTS[self.dataset],
+                level=VERTICAL_LAYERS_PROTOTYPE_COORDS[vertical_levels]["level"],
                 time=self.ds.time,
             )
             if "step" in self.ds.coords:
@@ -448,11 +473,11 @@ class CarbonDataset(Dataset):
 
         target_vars = (
             self.vars_next
-            + [
-                k.replace("density", "massmix")
-                for k in self.vars_next
-                if ("density" in k) and (k != "airdensity")
-            ]
+            # + [
+            #     k.replace("density", "massmix")
+            #     for k in self.vars_next
+            #     if ("density" in k) and (k != "airdensity")
+            # ]
             if target_vars_3d is None
             else target_vars_3d + target_vars_2d
         )
@@ -473,7 +498,7 @@ class CarbonDataset(Dataset):
 
     def tensor_to_xarray(self, tensor):
         return tensor_to_xarray(
-            tensor, grid=self.grid, dataset=self.dataset, gridnc=self.grid_ds
+            tensor, grid=self.grid, dataset=self.dataset, gridnc=self.grid_ds, vertical_levels=self.vertical_levels
         ).squeeze(drop=True)
 
 
@@ -493,6 +518,7 @@ class CarbonDataModule(pl.LightningDataModule):
         val_rollout_n_timesteps=None,
         num_workers=16,
         time_interval=None,
+        compute=False,
     ):
         super().__init__()
         self.data_path = Path(data_path)
@@ -508,6 +534,7 @@ class CarbonDataModule(pl.LightningDataModule):
         self.target_vars = target_vars
         self.num_workers = num_workers
         self.time_interval = time_interval
+        self.compute = compute
 
     def setup(self, stage):
         if stage == "fit":
@@ -523,6 +550,7 @@ class CarbonDataModule(pl.LightningDataModule):
                 target_vars=self.target_vars,
                 use_fastaccess=False,
                 time_interval=self.time_interval,
+                compute=self.compute,
             )
             self.val_dataset = CarbonDataset(
                 data_path=self.data_path / "val",
@@ -535,6 +563,7 @@ class CarbonDataModule(pl.LightningDataModule):
                 forcing_vars=self.forcing_vars,
                 target_vars=self.target_vars,
                 use_fastaccess=False,
+                compute=self.compute,
             )
             if self.val_rollout_n_timesteps is not None:
                 self.val_rollout_dataset = CarbonDataset(
@@ -548,6 +577,7 @@ class CarbonDataModule(pl.LightningDataModule):
                     forcing_vars=self.forcing_vars,
                     target_vars=self.target_vars,
                     use_fastaccess=False,
+                    compute=self.compute,
                 )
         elif stage == "test":
             self.test_dataset = CarbonDataset(
@@ -560,6 +590,7 @@ class CarbonDataModule(pl.LightningDataModule):
                 new_zarr=True,
                 forcing_vars=self.forcing_vars,
                 target_vars=self.target_vars,
+                compute=self.compute,
             )
 
     def get_dataloader(self, split="train"):

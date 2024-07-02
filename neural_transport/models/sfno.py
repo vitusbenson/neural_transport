@@ -1362,6 +1362,8 @@ class SFNO(RegularGridModel):
         scale_factor=1,
         in_chans=193,
         out_chans=19,
+        normalization_layer="instance_norm",
+        rank=1,
     ) -> None:
 
         self.sfnonet = SphericalFourierNeuralOperatorNet(
@@ -1372,6 +1374,8 @@ class SFNO(RegularGridModel):
             img_size=(self.nlat, self.nlon),
             in_chans=in_chans,
             out_chans=out_chans,
+            normalization_layer=normalization_layer,
+            rank=rank,
         )
 
     def model(self, x_in):

@@ -20,7 +20,7 @@ import scipy
 import trimesh
 import xarray as xr
 
-from neural_transport.datasets.grids import CARBOSCOPE_79_LONLAT, OBSPACK_287_LONLAT
+from neural_transport.datasets.grids import CARBOSCOPE_79_LONLAT, OBSPACK_287_LONLAT, LATLON_PROTOTYPE_COORDS
 
 
 def xyz_to_latlon(x, y, z):
@@ -224,7 +224,7 @@ class ICONGrid:
             cell_area = self._compute_tri_area()
             nodes = np.array(self.tri_vertices)
 
-        cos_lat = np.cos(np.radians(nodes[:, 1]))
+        cos_lat = np.cos(np.radians(90 - nodes[:, 1]))
         cos_lon = np.cos(np.radians(nodes[:, 0]))
         sin_lon = np.sin(np.radians(nodes[:, 0]))
 
@@ -284,8 +284,12 @@ class ICONGrid:
         # TODO: THIS IS CURRENTLY BROKEN!!
         ## NEED TO CHECK WHY IT DOES NOT BUILD EDGES USING ALL GRID NODES !!!
         ## L5 grid should have ~0.07 max radius...
-        grid_latitude = grid.lat.values
-        grid_longitude = grid.lon.values
+        if isinstance(grid, str):
+            grid_latitude = LATLON_PROTOTYPE_COORDS[grid]["lat"]
+            grid_longitude = LATLON_PROTOTYPE_COORDS[grid]["lon"]
+        else:
+            grid_latitude = grid.lat.values
+            grid_longitude = grid.lon.values
 
         grid_positions = _grid_lat_lon_to_coordinates(
             grid_latitude, grid_longitude
@@ -312,7 +316,7 @@ class ICONGrid:
             axis=-1,
         )
 
-        grid_cos_lat = np.cos(np.radians(grid_nodes[:, 0]))
+        grid_cos_lat = np.cos(np.radians(90 - grid_nodes[:, 0]))
         grid_cos_lon = np.cos(np.radians(grid_nodes[:, 1]))
         grid_sin_lon = np.sin(np.radians(grid_nodes[:, 1]))
 
@@ -386,8 +390,12 @@ class ICONGrid:
         if not hex_not_tri:
             raise NotImplementedError
 
-        grid_latitude = grid.lat.values
-        grid_longitude = grid.lon.values
+        if isinstance(grid, str):
+            grid_latitude = LATLON_PROTOTYPE_COORDS[grid]["lat"]
+            grid_longitude = LATLON_PROTOTYPE_COORDS[grid]["lon"]
+        else:
+            grid_latitude = grid.lat.values
+            grid_longitude = grid.lon.values
 
         grid_positions = _grid_lat_lon_to_coordinates(
             grid_latitude, grid_longitude
@@ -404,7 +412,7 @@ class ICONGrid:
             axis=-1,
         )
 
-        grid_cos_lat = np.cos(np.radians(grid_nodes[:, 0]))
+        grid_cos_lat = np.cos(np.radians(90 - grid_nodes[:, 0]))
         grid_cos_lon = np.cos(np.radians(grid_nodes[:, 1]))
         grid_sin_lon = np.sin(np.radians(grid_nodes[:, 1]))
 

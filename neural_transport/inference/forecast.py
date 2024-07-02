@@ -82,7 +82,8 @@ def iterative_forecast(
         with torch.no_grad():
             preds = model(batch)
 
-        preds["gp"] = batch["gp"]
+        preds["gph_bottom"] = batch["gph_bottom"]
+        preds["gph_top"] = batch["gph_top"]
 
         ds = xr.Dataset(
             {k: dataset.tensor_to_xarray(pred) for k, pred in preds.items()}
@@ -91,7 +92,7 @@ def iterative_forecast(
         ds = ds.assign_coords(time=prototype_zarr.isel(time=t + 1).time)
 
         obs = dataset.readout_stations(ds)
-        ds = ds.drop_vars(["gp"])
+        ds = ds.drop_vars(["gph_bottom", "gph_top"])
 
         dss.append(ds)
         obss.append(obs)
@@ -107,7 +108,7 @@ def iterative_forecast(
 
             timeslice = slice(t - (len(ds_remap.time) - 2), t + 2)
 
-            ds_remap.drop_vars(["height", "lat", "lon"]).to_zarr(
+            ds_remap.drop_vars(["level", "lat", "lon"]).to_zarr(
                 zarrpath, region=dict(time=timeslice)
             )
 
@@ -170,4 +171,3 @@ def remap_with_cdo(dataset, prototype_zarr, ds):
 
     cdo.cleanTempDir()
     return ds_remap
-

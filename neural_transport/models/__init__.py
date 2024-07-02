@@ -1,4 +1,5 @@
 from neural_transport.models.gnn.gnn import GraphTM
+from neural_transport.models.gnn.graphcast import GraphCast
 from neural_transport.models.hybridsfno import HybridSFNO
 from neural_transport.models.sfno import SFNO
 from neural_transport.models.sfno_v2 import SFNOv2
@@ -12,4 +13,5 @@ MODELS = {
     "swintransformer": SwinTransformer,
     "hybridsfno": HybridSFNO,
     "sfnov2": SFNOv2,
+    "graphcast": GraphCast,
 }

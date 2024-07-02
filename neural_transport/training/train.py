@@ -23,7 +23,7 @@ def train_singlestep(run_dir, data_kwargs, lit_module_kwargs, trainer_kwargs):
         run_dir, name="", version="singlestep"
     )
     checkpoint_callback = pl.callbacks.ModelCheckpoint(
-        save_top_k=-1,
+        save_top_k=2,  # -1,
         save_last=True,
         monitor="Loss/Val_rollout",
         filename="Epoch={epoch}-Step={step}-LossVal={Loss/Val_rollout:.6f}",
@@ -54,6 +54,7 @@ def train_rollout(
     rollout_trainer_kwargs,
     rollout_constant_lr=1e-5,
     timesteps=[3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31],
+    ckpt="last",
 ):
     run_dir = Path(run_dir)
 
@@ -63,8 +64,19 @@ def train_rollout(
             warmup_steps=1, halfcosine_steps=100000, min_lr=1, max_lr=1
         )
 
+    log_path = run_dir / "singlestep"
+    ckptdir = log_path / "checkpoints"
+    bestckptpath = sorted(
+        [p for p in ckptdir.glob("*.ckpt") if "LossVal" in p.name],
+        key=lambda p: float(p.name.split("=")[-1].split(".c")[0]),
+    )[0]
+
+    lastckptpath = log_path / "checkpoints/last.ckpt"
+
+    ckptpath = bestckptpath if ckpt == "best" else lastckptpath
+
     model = NeuralTransport.load_from_checkpoint(
-        run_dir / "singlestep/checkpoints/last.ckpt",
+        ckptpath,
         map_location="cpu",
         **lit_module_kwargs,
     )
@@ -110,6 +122,8 @@ def load_dataset(data_path, data_kwargs):
         data_path=data_path,
         dataset=data_kwargs["dataset"],
         grid=data_kwargs["grid"],
+        vertical_levels=data_kwargs["vertical_levels"],
+        freq=data_kwargs["freq"],
         n_timesteps=1,
         target_vars=data_kwargs["target_vars"],
         forcing_vars=data_kwargs["forcing_vars"],
@@ -128,6 +142,7 @@ def predict(
     freq="QS",
     ckpt="last",
     lit_module_kwargs={},
+    massfixer="default",
 ):
     log_path = Path(log_path)
 
@@ -138,9 +153,12 @@ def predict(
     )[0]
 
     lastckptpath = log_path / "checkpoints/last.ckpt"
-    outpath = log_path / "preds" / ckpt
 
     ckptpath = bestckptpath if ckpt == "best" else lastckptpath
+
+    if massfixer != "default":
+        lit_module_kwargs["model_kwargs"]["massfixer"] = massfixer
+    outpath = log_path / "preds" / f"ckpt={ckpt}_massfixer={massfixer}"
 
     dataset = load_dataset(data_path_forecast, data_kwargs)
 
@@ -156,7 +174,7 @@ def predict(
         verbose=True,
         freq=freq,
         remap=("latlon" not in data_kwargs["grid"]),
-        target_vars_3d=["co2density", "co2massmix"],
+        target_vars_3d=["co2massmix"],
         target_vars_2d=[],
     )
 
@@ -176,6 +194,8 @@ def load_pred_targ(target_path, pred_path):
 
 def score(target_path, pred_path, obs_pred_path=None):
     co2targ, co2pred = load_pred_targ(target_path, pred_path)
+    co2pred = co2pred.isel(time=slice(1, None))
+    co2targ = co2targ.isel(time=slice(1, None)).isel(time=slice(len(co2pred.time)))
 
     model_name = pred_path.parent.parent.parent.parent.name
     singlestep_or_rollout = pred_path.parent.parent.parent.name
@@ -221,7 +241,7 @@ def plot(
     co2targ = co2targ.isel(time=slice(None, len(co2pred.time)))
 
     plot_path.mkdir(parents=True, exist_ok=True)
-    plot_metrics(co2pred, co2targ, plot_path)
+    plot_metrics(co2pred, co2targ, plot_path, imgformats=["pdf"])
 
     t0, tend = movie_interval
 
@@ -248,6 +268,7 @@ def plot(
             plot_path,
             compare_obs=carboscope_obspred,
             stations="all",
+            imgformats=["pdf"],
         )
 
 
@@ -276,7 +297,10 @@ def train_and_eval_singlestep(
         ckpt=ckpt,
         lit_module_kwargs=lit_module_kwargs,
     )
-    target_path = data_path_forecast / f"{data_kwargs['dataset']}_latlon4.zarr"
+    target_path = (
+        data_path_forecast
+        / f"{data_kwargs['dataset']}_{data_kwargs['grid']}_{data_kwargs['vertical_levels']}_{data_kwargs['freq']}.zarr"
+    )
     pred_path = (
         run_dir / "singlestep" / "preds" / ckpt / f"co2_pred_rollout_{freq}.zarr"
     )
@@ -311,6 +335,7 @@ def train_and_eval_rollout(
     timesteps=[3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31],
     train=True,
     ckpt="last",
+    massfixers=["default"],
 ):
     if train:
         train_rollout(
@@ -320,29 +345,49 @@ def train_and_eval_rollout(
             rollout_trainer_kwargs,
             rollout_constant_lr=rollout_constant_lr,
             timesteps=timesteps,
+            ckpt=ckpt,
         )
-    predict(
-        run_dir / "rollout",
-        data_path_forecast,
-        data_kwargs,
-        device=device,
-        freq=freq,
-        ckpt=ckpt,
-    )
-    target_path = data_path_forecast / f"{data_kwargs['dataset']}_latlon4.zarr"
-    pred_path = run_dir / "rollout" / "preds" / ckpt / f"co2_pred_rollout_{freq}.zarr"
-    obs_pred_path = (
-        run_dir / "rollout" / "preds" / ckpt / f"obs_co2_pred_rollout_{freq}.zarr"
-    )
-    print("Starting Scoring")
-    score(target_path, pred_path, obs_pred_path)
-    plot(
-        target_path,
-        pred_path,
-        obs_pred_path,
-        obs_compare_path,
-        data_path_forecast,
-        data_kwargs,
-        movie_interval,
-        num_workers,
-    )
+
+    for massfixer in massfixers:
+        predict(
+            run_dir / "rollout",
+            data_path_forecast,
+            data_kwargs,
+            device=device,
+            freq=freq,
+            ckpt=ckpt,
+            lit_module_kwargs=lit_module_kwargs,
+            massfixer=massfixer,
+        )
+        target_path = (
+            data_path_forecast
+            / f"{data_kwargs['dataset']}_{data_kwargs['grid']}_{data_kwargs['vertical_levels']}_{data_kwargs['freq']}.zarr"
+        )
+
+        pred_path = (
+            run_dir
+            / "rollout"
+            / "preds"
+            / f"ckpt={ckpt}_massfixer={massfixer}"
+            / f"co2_pred_rollout_{freq}.zarr"
+        )
+        obs_pred_path = (
+            run_dir
+            / "rollout"
+            / "preds"
+            / f"ckpt={ckpt}_massfixer={massfixer}"
+            / f"obs_co2_pred_rollout_{freq}.zarr"
+        )
+
+        print("Starting Scoring")
+        score(target_path, pred_path, obs_pred_path)
+        plot(
+            target_path,
+            pred_path,
+            obs_pred_path,
+            obs_compare_path,
+            data_path_forecast,
+            data_kwargs,
+            movie_interval,
+            num_workers,
+        )

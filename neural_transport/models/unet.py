@@ -2,6 +2,17 @@ import torch.nn as nn
 
 from neural_transport.models.regulargrid import RegularGridModel
 
+
+class Tanh3x(nn.Module):
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.tanh = nn.Tanh()
+
+    def forward(self, x):
+        return self.tanh(x / 2) * 3
+
+
 ACTIVATIONS = {
     "none": nn.Identity,
     "relu": nn.ReLU,
@@ -10,6 +21,7 @@ ACTIVATIONS = {
     "elu": nn.ELU,
     "sigmoid": nn.Sigmoid,
     "tanh": nn.Tanh,
+    "tanh3x": Tanh3x,
     "hardsigmoid": nn.Hardsigmoid,
     "hardtanh": nn.Hardtanh,
     "swish": nn.SiLU,
@@ -22,6 +34,8 @@ def get_norm(norm, n_in, n_groups=8):
         return nn.BatchNorm2d(n_in)
     elif norm == "group":
         return nn.GroupNorm(n_groups, n_in)
+    elif norm == "instance":
+        return nn.InstanceNorm2d(n_in, affine=True)
     else:
         return nn.Identity()
 
@@ -35,10 +49,12 @@ class PeriodicPadding(nn.Module):
     def forward(self, x):
 
         x = nn.functional.pad(
-            x, (0, 0, self.n_pad, self.n_pad), mode="circular"
+            x, (self.n_pad, self.n_pad, 0, 0), mode="circular"
         )  # torch.cat([x[:, :, -self.n_pad:, :], x, x[:, :, :self.n_pad, :]], dim = 2)
 
-        x = nn.functional.pad(x, (self.n_pad, self.n_pad), mode="constant", value=0)
+        x = nn.functional.pad(
+            x, (0, 0, self.n_pad, self.n_pad), mode="constant", value=0
+        )
 
         return x
 
@@ -88,6 +104,7 @@ class UNet(RegularGridModel):
         dec_filters=[[3, 3], [3, 3], [3, 3], [3, 3]],
         in_interpolation="bilinear",
         out_interpolation="nearest-exact",
+        readout_act="none",
         out_clip=None,
     ):
 
@@ -142,7 +159,7 @@ class UNet(RegularGridModel):
         self.dec_stages = nn.ModuleList(dec_stages)
 
         self.readout = ResBlock(
-            embed_dim, out_chans, act="none", norm="none", filter_size=1
+            embed_dim, out_chans, act=readout_act, norm="none", filter_size=1
         )
 
     def model(self, x_in):

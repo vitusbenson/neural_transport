@@ -150,11 +150,23 @@ def temporal_resample(ds, startdate, enddate, freq="6h"):
         / 1e12
     )
 
-    flux_weight = co2_mass_delta / massflux.sum(["lat", "lon"])
+    fluxdiff = (
+        (co2_mass_delta - massflux.sum(["lat", "lon"]))
+        * 1e12
+        / (timedelta.astype("timedelta64[s]").astype(int))
+        / ds.cell_area
+    )
 
-    ds_lin_resample["co2flux_land"] = staggered_fluxes["co2flux_land"] * flux_weight
-    ds_lin_resample["co2flux_ocean"] = staggered_fluxes["co2flux_ocean"] * flux_weight
-    ds_lin_resample["co2flux_anthro"] = staggered_fluxes["co2flux_anthro"] * flux_weight
+    fluxcorr_anthro = fluxdiff * (
+        staggered_fluxes.co2flux_anthro
+        / staggered_fluxes.co2flux_anthro.sum(["lat", "lon"])
+    )
+
+    ds_lin_resample["co2flux_land"] = staggered_fluxes["co2flux_land"]
+    ds_lin_resample["co2flux_ocean"] = staggered_fluxes["co2flux_ocean"]
+    ds_lin_resample["co2flux_anthro"] = (
+        staggered_fluxes["co2flux_anthro"] + fluxcorr_anthro
+    )
 
     return ds_lin_resample
 
