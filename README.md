@@ -36,20 +36,17 @@ pip install -e .
 
 # Cite NeuralTransport
 
-In case you use NeuralTransport in your research or work, it would be highly appreciated if you include a reference to our [paper](https://link.to.paper) in any kind of publication.
+In case you use NeuralTransport in your research or work, it would be highly appreciated if you include a reference to our [paper](https://arxiv.org/abs/2408.XXXXX) in any kind of publication.
 
 ```bibtex
 @article{benson2024neuraltransport,
-  title = {Atmospheric transport modeling with neural networks},
-  author = {Vitus Benson et al},
-  journal = {TBD},
-  publisher = {TBD},
-  year = {2024},
-  volume = {1},
-  number = {1},
-  pages = {1},
-  doi = {XXX.YYY/xxx.yyy},
-  url = {https://doi.org/XXX.YYY/xxx.yyy},
+  title = {Atmospheric Transport Modeling of CO2 with Neural Networks},
+  author = {Vitus Benson, Ana Bastos, Christian Reimers, Alexander J. Winkler,
+ Fanny Yang and Markus Reichstein},
+  eprint={2408.XXXXX},
+  archivePrefix={arXiv},
+  primaryClass={cs.LG},
+  url={https://arxiv.org/abs/2408.XXXXX}, 
 }
 ```
 

@@ -44,6 +44,9 @@ dependencies = [
     "h5netcdf",
     "netcdf4",
 ]
+[project.urls]
+Repository = "https://github.com/vitusbenson/neural_transport.git"
+Issues = "https://github.com/vitusbenson/neural_transport/issues"
 
 [tool.setuptools.packages.find]
 include = ["neural_transport"]
