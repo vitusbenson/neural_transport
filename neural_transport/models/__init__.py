@@ -13,6 +13,6 @@ MODELS = {
     "sfno": SFNO,
     "swintransformer": SwinTransformer,
     "hybridsfno": HybridSFNO,
-    "sfnov2": SFNOv2,
+    # "sfnov2": SFNOv2,
     "graphcast": GraphCast,
 }
