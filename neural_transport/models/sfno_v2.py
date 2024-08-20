@@ -1,3 +1,4 @@
+import torch.nn as nn
 from makani.models.networks.sfnonet import SphericalFourierNeuralOperatorNet
 
 from neural_transport.models.regulargrid import RegularGridModel
@@ -13,6 +14,11 @@ class SFNOv2(RegularGridModel):
         embed_dim=256,
         num_layers=8,
         spectral_layers=3,
+        max_modes=None,
+        encoder_layers=1,
+        outer_skip="linear",
+        activation_function="gelu",
+        bias = False,
     ) -> None:
 
         self.sfnonet = SphericalFourierNeuralOperatorNet(
@@ -33,14 +39,14 @@ class SFNOv2(RegularGridModel):
             mlp_ratio=2.0,
             encoder_ratio=1,
             decoder_ratio=1,
-            activation_function="gelu",
-            encoder_layers=1,
+            activation_function=activation_function,
+            encoder_layers=encoder_layers,
             pos_embed="none",  # "frequency", "direct"
             pos_drop_rate=0.0,
             path_drop_rate=0.0,
             mlp_drop_rate=0.0,
             normalization_layer="instance_norm",
-            max_modes=None,
+            max_modes=max_modes,
             hard_thresholding_fraction=1.0,
             big_skip=False,  # Changed
             rank=1.0,
@@ -48,9 +54,13 @@ class SFNOv2(RegularGridModel):
             separable=False,
             complex_activation="real",
             spectral_layers=spectral_layers,
-            bias=False,
+            bias=bias,
             checkpointing=0,
         )
+
+        if outer_skip == "identity":
+            for block in self.sfnonet.blocks:
+                block.outer_skip = nn.Identity()
 
     def model(self, x_in):
 

@@ -26,6 +26,10 @@ LATLON_PROTOTYPE_COORDS = {
         lat=np.linspace(-89, 89, 90), lon=np.linspace(-180, 180, 144, endpoint=False)
     ),
     "latlon1": dict(lat=np.linspace(-90, 90, 181), lon=np.linspace(0, 359, 360)),
+    "latlon11.25": dict(
+        lat=np.linspace(-90 + 90 / 16, 90 - 90 / 16, 16),
+        lon=np.linspace(0, 360, 32, endpoint=False),
+    ),
     "latlon5.625": dict(
         lat=np.linspace(-90 + 90 / 32, 90 - 90 / 32, 32),
         lon=np.linspace(0, 360, 64, endpoint=False),
@@ -75,6 +79,7 @@ VERTICAL_LAYERS_PROTOTYPE_COORDS = {
     "l19": dict(level=np.array(CARBOSCOPE_HEIGHT)),
     "l34": dict(level=np.array(CARBONTRACKER_HEIGHT)),
     "l20": dict(level=np.array(L20_HEIGHT)),
+    "l3": dict(level=np.array([1013.0, 1005.0, 843.0])),
 }
 
 

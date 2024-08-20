@@ -178,11 +178,23 @@ CARBONTRACKER_LEVEL_AGG = dict(
         [27, 28, 29, 30, 31, 32, 33],
     ],
     l20=[[i] for i in range(6)] + [[i, i + 1] for i in range(6, 34, 2)],
+    l3=[[0], [1, 2, 3, 4, 5], list(range(6, 34, 1))],
 )
 
 
 def regrid_carbontracker(save_dir, gridname="latlon2x3", vertical_levels="l34"):
     save_dir = Path(save_dir)
+
+    out_path = (
+        save_dir
+        / "Carbontracker"
+        / "CT2022_regrid"
+        / f"CT2022_regrid_{gridname}_{vertical_levels}.zarr"
+    )
+    if out_path.is_dir():
+        print(f"Skipping Regridding, {out_path} exists")
+        return
+
     for date in tqdm(np.arange("2000-01-01", "2021-03-01", dtype="datetime64")):
 
         molefraction_path = (
@@ -197,13 +209,6 @@ def regrid_carbontracker(save_dir, gridname="latlon2x3", vertical_levels="l34"):
             / "Carbontracker"
             / "CT2022_flux"
             / f"CT2022.flux1x1.{date.item().strftime('%Y%m%d')}.nc"
-        )
-
-        out_path = (
-            save_dir
-            / "Carbontracker"
-            / "CT2022_regrid"
-            / f"CT2022_regrid_{gridname}_{vertical_levels}.zarr"
         )
 
         if not out_path.is_dir():
@@ -340,7 +345,7 @@ def obspack_carbontracker(
     )[["co2massmix", "gph_bottom", "gph_top"]].compute()
 
     obs = (
-        xr.open_zarr(save_dir / "Obspack" / "obspack.zarr")
+        xr.open_zarr(save_dir / "Obspack" / f"obspack_{freq}.zarr")
         .sel(time=ds.time, method="nearest")
         .compute()
     )

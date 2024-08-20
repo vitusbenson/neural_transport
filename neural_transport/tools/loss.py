@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch_harmonics
 
 
 class MAE(nn.Module):
@@ -45,7 +46,16 @@ class MAE(nn.Module):
 
 
 class MSE(nn.Module):
-    def __init__(self, weights={}, massconserve_weight=0):
+    def __init__(
+        self,
+        weights={},
+        massconserve_weight=0,
+        spectral_power_weight=0,
+        nlat=32,
+        nlon=64,
+        cutoff=None,
+        scale_by_spectral_power=True,
+    ):
         super().__init__()
 
         self.vars = list(weights.keys())
@@ -55,6 +65,12 @@ class MSE(nn.Module):
                 f"weights_{variable}", torch.from_numpy(weight.astype("float32"))
             )  # N, C
         self.massconserve_weight = massconserve_weight
+
+        self.spectral_power_weight = spectral_power_weight
+        self.scale_by_spectral_power = scale_by_spectral_power
+        if self.spectral_power_weight > 0:
+            self.cutoff = cutoff or nlat
+            self.sht = torch_harmonics.RealSHT(nlat, nlon, grid="equiangular")
 
     def forward(self, preds, batch):
         loss = 0
@@ -95,6 +111,40 @@ class MSE(nn.Module):
 
                 losses[f"Loss_Mass/unweighted_{v}"] = mse
                 losses[f"Loss_Mass/weighted_{v}"] = wmse
+
+                loss = loss + wmse
+
+            if self.spectral_power_weight > 0:
+                B, T, N, C = preds[v].shape
+                sh_pred = torch.view_as_real(
+                    self.sht(
+                        preds[v]
+                        .permute(0, 1, 3, 2)
+                        .reshape(B, T, C, self.sht.nlat, self.sht.nlon)
+                    )[..., : self.cutoff, : self.cutoff]
+                )
+
+                sh_targ = torch.view_as_real(
+                    self.sht(
+                        batch[f"{v}_next"]
+                        .permute(0, 1, 3, 2)
+                        .reshape(B, T, C, self.sht.nlat, self.sht.nlon)
+                    )[..., : self.cutoff, : self.cutoff]
+                )
+
+                power_pred = (sh_pred**2).sum([-1, -2])
+                power_targ = (sh_targ**2).sum([-1, -2])
+
+                se = (
+                    ((power_pred - power_targ) ** 2) / power_targ**2
+                    if self.scale_by_spectral_power
+                    else ((power_pred - power_targ) ** 2)
+                )
+                mse = torch.mean(se)
+                wmse = mse * self.spectral_power_weight
+
+                losses[f"Loss_SpectralPower/unweighted_{v}"] = mse
+                losses[f"Loss_SpectralPower/weighted_{v}"] = wmse
 
                 loss = loss + wmse
 

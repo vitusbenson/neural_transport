@@ -1,31 +1,7 @@
 import torch.nn as nn
 
+from neural_transport.models.layers import ACTIVATIONS
 from neural_transport.models.regulargrid import RegularGridModel
-
-
-class Tanh3x(nn.Module):
-
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.tanh = nn.Tanh()
-
-    def forward(self, x):
-        return self.tanh(x / 2) * 3
-
-
-ACTIVATIONS = {
-    "none": nn.Identity,
-    "relu": nn.ReLU,
-    "gelu": nn.GELU,
-    "leakyrelu": nn.LeakyReLU,
-    "elu": nn.ELU,
-    "sigmoid": nn.Sigmoid,
-    "tanh": nn.Tanh,
-    "tanh3x": Tanh3x,
-    "hardsigmoid": nn.Hardsigmoid,
-    "hardtanh": nn.Hardtanh,
-    "swish": nn.SiLU,
-}
 
 
 def get_norm(norm, n_in, n_groups=8):
@@ -61,7 +37,15 @@ class PeriodicPadding(nn.Module):
 
 class ResBlock(nn.Module):
 
-    def __init__(self, n_in, embed_dim, act="leakyrelu", norm="batch", filter_size=3):
+    def __init__(
+        self,
+        n_in,
+        embed_dim,
+        act="leakyrelu",
+        norm="batch",
+        filter_size=3,
+        add_skip=True,
+    ):
         super().__init__()
 
         n_pad = (filter_size - 1) // 2
@@ -75,6 +59,7 @@ class ResBlock(nn.Module):
         self.act = ACTIVATIONS[act]()
 
         self.norm = get_norm(norm, embed_dim)
+        self.add_skip = add_skip
 
     def forward(self, x):
 
@@ -85,7 +70,7 @@ class ResBlock(nn.Module):
         x = self.act(x)
         x = self.norm(x)
 
-        if skip.shape == x.shape:
+        if self.add_skip and (skip.shape == x.shape):
             x = x + skip
 
         return x
@@ -105,6 +90,7 @@ class UNet(RegularGridModel):
         in_interpolation="bilinear",
         out_interpolation="nearest-exact",
         readout_act="none",
+        mlp_as_readout=False,
         out_clip=None,
     ):
 
@@ -158,9 +144,37 @@ class UNet(RegularGridModel):
 
         self.dec_stages = nn.ModuleList(dec_stages)
 
-        self.readout = ResBlock(
-            embed_dim, out_chans, act=readout_act, norm="none", filter_size=1
-        )
+        if not mlp_as_readout:
+            self.readout = ResBlock(
+                embed_dim,
+                out_chans,
+                act=readout_act,
+                norm="none",
+                filter_size=1,
+                add_skip=True,
+            )
+        else:
+
+            final_linear = nn.Conv2d(embed_dim, out_chans, 1, bias=True)
+            nn.init.zeros_(final_linear.weight)
+            nn.init.zeros_(final_linear.bias)
+            self.readout = nn.Sequential(
+                nn.Conv2d(embed_dim, embed_dim, 1, bias=False),
+                ACTIVATIONS[act](),
+                get_norm(norm, embed_dim),
+                final_linear,
+            )
+
+            # def init_weights(m):
+            #     if isinstance(m, (nn.Conv2d,)):
+            #         nn.init.kaiming_normal_(m.weight)
+            #     elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm, nn.InstanceNorm2d)):
+            #         nn.init.ones_(m.weight)
+
+            #     if hasattr(m, "bias") and m.bias is not None:
+            #         nn.init.zeros_(m.bias)
+
+            # self.apply(init_weights)
 
     def model(self, x_in):
 

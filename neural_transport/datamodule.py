@@ -169,7 +169,7 @@ class CarbonDataset(Dataset):
         if load_obspack:
 
             self.obspack_ds = (
-                xr.open_zarr(self.data_path.parent.parent / "Obspack" / "obspack.zarr")
+                xr.open_zarr(self.data_path.parent.parent / "Obspack" / f"obspack_{freq}.zarr")
                 .sel(time=ds.time, method="nearest")
                 .compute()
             )

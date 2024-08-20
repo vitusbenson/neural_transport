@@ -11,18 +11,13 @@ from cdo import Cdo
 from tqdm import tqdm
 
 
-def get_zarrpath_obspath(out_path, rollout, freq, zarr_filename=None):
+def get_zarrpath_obspath(out_path, rollout, freq, zarr_filename=None, zero_surfflux=False):
     if zarr_filename is None:
-        if freq:
-            zarr_filename = (
-                f"co2_pred_rollout_{freq}.zarr"
-                if rollout
-                else "co2_pred_singlestep.zarr"
-            )
-        else:
-            zarr_filename = (
-                "co2_pred_rollout.zarr" if rollout else "co2_pred_singlestep.zarr"
-            )
+        zarr_filename = (
+            f"co2_pred_rollout_{freq}.zarr" if rollout else "co2_pred_singlestep.zarr"
+        )
+    if zero_surfflux:
+        zarr_filename = zarr_filename.replace("co2_pred", "co2_pred_zeroflux")
 
     out_path = Path(out_path)
     out_path.mkdir(exist_ok=True, parents=True)
@@ -47,7 +42,7 @@ def iterative_forecast(
     target_vars_3d=[],
     target_vars_2d=[],
 ):
-    zarrpath, obspath = get_zarrpath_obspath(out_path, rollout, freq, zarr_filename)
+    zarrpath, obspath = get_zarrpath_obspath(out_path, rollout, freq, zarr_filename, zero_surfflux = zero_surfflux)
 
     prototype_zarr = dataset.create_prototype_zarr(
         zarrpath,
@@ -78,6 +73,10 @@ def iterative_forecast(
         if rollout and (prototype_zarr.time[t].values not in time):
             for k in preds:
                 batch[k] = preds[k]
+
+        if zero_surfflux:
+            for var in ["co2flux_anthro", "co2flux_land", "co2flux_ocean"]:
+                batch[var] = torch.zeros_like(batch[var])
 
         with torch.no_grad():
             preds = model(batch)
@@ -171,3 +170,4 @@ def remap_with_cdo(dataset, prototype_zarr, ds):
 
     cdo.cleanTempDir()
     return ds_remap
+

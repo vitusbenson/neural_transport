@@ -8,6 +8,8 @@ import xarray as xr
 from dask.diagnostics import ProgressBar
 from tqdm.contrib.concurrent import process_map
 
+FREQ = "3h"
+
 
 def download_obspack(data_dir):
     """
@@ -44,9 +46,13 @@ def open_one_obspack(obspack_path):
             .sortby("time")
         )
         obspack_obs = obspack_obs.resample(
-            time="6h", origin="start_day", offset="3h", closed="left", label="left"
+            time=FREQ,
+            origin="start_day",
+            offset="3h" if FREQ == "6h" else "90min",
+            closed="left",
+            label="left",
         ).mean()
-        offset = pd.tseries.frequencies.to_offset("6h") / 2
+        offset = pd.tseries.frequencies.to_offset(FREQ) / 2
         obspack_obs["time"] = obspack_obs.get_index("time") + offset
 
         return {obspack_path.stem: obspack_obs.to_array("vari")}
@@ -77,7 +83,7 @@ def prepare_obspack_for_carboscope(data_dir):
     obs = obs.chunk({"time": 2000, "cell": -1})
 
     with ProgressBar():
-        obs.to_zarr(obspack_dir / "obspack.zarr")
+        obs.to_zarr(obspack_dir / f"obspack_{FREQ}.zarr")
 
     attrs = []
     for obspack_path in obspack_paths:
@@ -97,3 +103,8 @@ def prepare_obspack_for_carboscope(data_dir):
 
     df = pd.DataFrame.from_records(attrs)
     df.to_csv(obspack_dir / "obspack_metadata.csv", index=False)
+
+
+if __name__ == "__main__":
+
+    prepare_obspack_for_carboscope("/Net/Groups/BGI/tscratch/vbenson/graph_tm/data/")

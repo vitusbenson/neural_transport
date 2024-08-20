@@ -877,6 +877,7 @@ class SphericalFourierNeuralOperatorBlock(nn.Module):
         inner_skip="linear",
         outer_skip=None,
         use_mlp=True,
+        bias=True,
     ):
         super(SphericalFourierNeuralOperatorBlock, self).__init__()
 
@@ -900,7 +901,7 @@ class SphericalFourierNeuralOperatorBlock(nn.Module):
             factorization=factorization,
             separable=separable,
             rank=rank,
-            bias=True,
+            bias=bias,
         )
 
         if inner_skip == "linear":
@@ -1070,7 +1071,7 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
         embed_dim=256,
         num_layers=4,
         activation_function="relu",
-        encoder_layers=1,
+        num_encoder_layers=1,
         use_mlp=True,
         mlp_ratio=2.0,
         drop_rate=0.0,
@@ -1083,6 +1084,8 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
         separable=False,
         rank=128,
         pos_embed=False,
+        outer_skip = "identity",
+        bias=True,
     ):
 
         super(SphericalFourierNeuralOperatorNet, self).__init__()
@@ -1099,7 +1102,7 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
         self.hard_thresholding_fraction = hard_thresholding_fraction
         self.normalization_layer = normalization_layer
         self.use_mlp = use_mlp
-        self.encoder_layers = encoder_layers
+        self.num_encoder_layers = num_encoder_layers
         self.big_skip = big_skip
         self.factorization = factorization
         self.separable = (separable,)
@@ -1184,7 +1187,6 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
         # self.encoder = encoder
 
         # construct an encoder with num_encoder_layers
-        num_encoder_layers = 1
         encoder_hidden_dim = int(self.embed_dim * mlp_ratio)
         current_dim = self.in_chans
         encoder_layers = []
@@ -1257,7 +1259,7 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
             inverse_transform = self.itrans_up if last_layer else self.itrans
 
             inner_skip = "none"
-            outer_skip = "identity"
+            
 
             if first_layer:
                 norm_layer = norm_layer1
@@ -1283,6 +1285,7 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
                 factorization=self.factorization,
                 separable=self.separable,
                 rank=self.rank,
+                bias=bias,
             )
 
             self.blocks.append(block)
@@ -1297,11 +1300,10 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
         #                    checkpointing = False)
 
         # construct an decoder with num_decoder_layers
-        num_decoder_layers = 1
         decoder_hidden_dim = int(self.embed_dim * mlp_ratio)
         current_dim = self.embed_dim + self.big_skip * self.in_chans
         decoder_layers = []
-        for l in range(num_decoder_layers - 1):
+        for l in range(num_encoder_layers - 1):
             fc = nn.Conv2d(current_dim, decoder_hidden_dim, 1, bias=True)
             # initialize the weights correctly
             scale = math.sqrt(2.0 / current_dim)
@@ -1364,6 +1366,10 @@ class SFNO(RegularGridModel):
         out_chans=19,
         normalization_layer="instance_norm",
         rank=1,
+        outer_skip="identity",
+        activation_function="relu",
+        bias=True,
+        num_encoder_layers=1,
     ) -> None:
 
         self.sfnonet = SphericalFourierNeuralOperatorNet(
@@ -1376,6 +1382,10 @@ class SFNO(RegularGridModel):
             out_chans=out_chans,
             normalization_layer=normalization_layer,
             rank=rank,
+            outer_skip=outer_skip,
+            activation_function=activation_function,
+            bias=bias,
+            num_encoder_layers=num_encoder_layers,
         )
 
     def model(self, x_in):

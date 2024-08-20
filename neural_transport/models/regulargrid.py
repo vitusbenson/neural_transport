@@ -1,20 +1,13 @@
 import torch
 import torch.nn as nn
 
+from neural_transport.models.aroma import AromaDecoder, AromaEncoder
+from neural_transport.models.layers import (
+    ACTIVATIONS,
+    MultiScaleDecoder,
+    MultiScaleEncoder,
+)
 from neural_transport.tools.conversion import *
-
-ACTIVATIONS = {
-    "none": nn.Identity,
-    "relu": nn.ReLU,
-    "gelu": nn.GELU,
-    "leakyrelu": nn.LeakyReLU,
-    "elu": nn.ELU,
-    "sigmoid": nn.Sigmoid,
-    "tanh": nn.Tanh,
-    "hardsigmoid": nn.Hardsigmoid,
-    "hardtanh": nn.Hardtanh,
-    "swish": nn.SiLU,
-}
 
 
 class RegularGridModel(nn.Module):
@@ -32,6 +25,12 @@ class RegularGridModel(nn.Module):
         dt=3600,
         molecules=["co2"],
         targshift=False,
+        vert_pos_embed=False,
+        vert_pos_embed_kwargs=None,
+        horizontal_interpolation=None,
+        in_nlat=None,
+        in_nlon=None,
+        multiscale_kwargs=dict(in_chans=5, out_chans=128, layer_norm=True, act="swish"),
     ):
         super().__init__()
 
@@ -40,12 +39,34 @@ class RegularGridModel(nn.Module):
         self.input_vars = input_vars
         self.target_vars = target_vars
 
+        self.in_nlat = in_nlat or nlat
+        self.in_nlon = in_nlon or nlon
+        self.horizontal_interpolation = horizontal_interpolation
+
         self.predict_delta = predict_delta
         self.add_surfflux = add_surfflux
         self.dt = dt
         self.massfixer = massfixer
         self.molecules = molecules
         self.targshift = targshift
+        self.vert_pos_embed = vert_pos_embed
+
+        if self.vert_pos_embed:
+            self.aroma_encoder = AromaEncoder(**vert_pos_embed_kwargs)
+            self.aroma_decoder = AromaDecoder(**vert_pos_embed_kwargs)
+            self.aroma_decoder.pos_embed = self.aroma_encoder.pos_embed
+
+        if self.horizontal_interpolation == "multiscale_encoder":
+            self.multiscale_encoder = MultiScaleEncoder(
+                in_shape=(self.in_nlat, self.in_nlon),
+                out_shape=(self.nlat, self.nlon),
+                **multiscale_kwargs,
+            )
+            self.multiscale_decoder = MultiScaleDecoder(
+                in_shape=(self.in_nlat, self.in_nlon),
+                out_shape=(self.nlat, self.nlon),
+                **multiscale_kwargs,
+            )
 
         self.init_model(**model_kwargs)
 
@@ -63,19 +84,35 @@ class RegularGridModel(nn.Module):
 
     def preprocess_inputs(self, batch):
 
-        to_cat = []
+        batch_normalized = {}
         for v in self.input_vars:
             x_in_curr = (batch[v] - batch[f"{v}_offset"]) / batch[f"{v}_scale"]
             if self.targshift and (v in self.target_vars):
-                to_cat.append(x_in_curr - x_in_curr.mean((1, 2), keepdim=True))
+                batch_normalized[v] = x_in_curr - x_in_curr.mean((1, 2), keepdim=True)
             else:
-                to_cat.append(x_in_curr)
+                batch_normalized[v] = x_in_curr
 
-        x_in = torch.cat(to_cat, dim=-1)
+        if self.vert_pos_embed:
+            x_in = self.aroma_encoder(batch_normalized)
+        else:
+            x_in = torch.cat(list(batch_normalized.values()), dim=-1)
 
         B, N, C = x_in.shape
 
-        x_in = x_in.reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)  # b c h w
+        x_in = x_in.reshape(B, self.in_nlat, self.in_nlon, C).permute(
+            0, 3, 1, 2
+        )  # b c h w
+
+        if self.horizontal_interpolation == "multiscale_encoder":
+            x_in = self.multiscale_encoder(x_in)
+
+        elif self.horizontal_interpolation is not None:
+            x_in = nn.functional.interpolate(
+                x_in,
+                size=(self.nlat, self.nlon),
+                align_corners=True,
+                mode=self.horizontal_interpolation,
+            )
 
         # if not x_in.isfinite().all():
         #     print("x_in not finite", x_in.min(), x_in.mean(), x_in.max())
@@ -86,7 +123,20 @@ class RegularGridModel(nn.Module):
 
         B, N, _ = batch[self.target_vars[0]].shape
 
+        if self.horizontal_interpolation == "multiscale_encoder":
+            x_out = self.multiscale_decoder(x_out)
+        elif self.horizontal_interpolation is not None:
+            x_out = nn.functional.interpolate(
+                x_out,
+                size=(self.in_nlat, self.in_nlon),
+                align_corners=True,
+                mode=self.horizontal_interpolation,
+            )
+
         x_out = x_out.permute(0, 2, 3, 1).reshape(B, N, -1)
+
+        if self.vert_pos_embed:
+            x_out = self.aroma_decoder(x_out, batch)
 
         x_grid_offset = torch.cat(
             [(batch[f"{v}_offset"]).expand_as(batch[v]) for v in self.target_vars],
@@ -242,150 +292,5 @@ class RegularGridModel(nn.Module):
             #     f"RMSE in {molecule} mass: {rmse_mass:.5f}, RMSE Delta: {rmse_delta:.5f}, RMSE PreFixer: {rmse_pre:.5f}, RMSE PostFixer: {rmse_post:.5f}, RMSE Virtual {rmse_virtual:.5f}, RMSE Zero {rmse_zero:.5f}"
             # )
             # breakpoint()
-
-            # if (
-            #     f"{molecule}density" in preds
-            #     and (f"{molecule}massmix" not in preds)
-            #     # v.endswith("density")
-            #     # and v != "airdensity"
-            #     # and v.replace("density", "massmix") not in self.target_vars
-            # ):
-
-            #     if self.add_surfflux and (f"{molecule}flux_land" in batch):
-            #         surfflux_as_densitysource_prev = mass_to_density(
-            #             (
-            #                 batch[f"{molecule}flux_land"]
-            #                 + batch[f"{molecule}flux_ocean"]
-            #                 + batch[f"{molecule}flux_subt"]
-            #             )
-            #             * batch["cell_area"]
-            #             * self.dt,
-            #             batch["volume"][..., :1],
-            #         )  # b n h
-            #         preds[f"{molecule}density"][..., :1] = (
-            #             preds[f"{molecule}density"][..., :1]
-            #             + surfflux_as_densitysource_prev
-            #         )
-
-            #     preds[f"{molecule}massmix"] = density_to_massmix(
-            #         preds[f"{molecule}density"],
-            #         (
-            #             batch["airdensity_next"]
-            #             if not "airdensity" in self.target_vars
-            #             else preds["airdensity"]
-            #         ),
-            #         ppm=True,
-            #     )
-            # if (
-            #     f"{molecule}massmix" in preds
-            #     and (f"{molecule}density" not in preds)
-            #     # v.endswith("massmix")
-            #     # and v.replace("massmix", "density") not in self.target_vars
-            # ):
-            #     if self.massfixer:
-            #         cell_area_weights = batch["cell_area"] / batch["cell_area"].sum(
-            #             (1,), keepdim=True
-            #         )
-            #         pl_weights = batch["pressure_height"] / batch[
-            #             "pressure_height"
-            #         ].sum((2,), keepdim=True)
-            #         mean_pred_mass = (
-            #             preds[f"{molecule}massmix"] * cell_area_weights * pl_weights
-            #         ).sum((1, 2), keepdim=True)
-            #         mean_targ_mass = (
-            #             batch[f"{molecule}massmix"] * cell_area_weights * pl_weights
-            #         ).sum((1, 2), keepdim=True)
-
-            #         if self.massfixer == "shift":
-            #             preds[f"{molecule}massmix"] = (
-            #                 preds[f"{molecule}massmix"]
-            #                 - mean_pred_mass
-            #                 + mean_targ_mass
-            #             )
-            #         elif self.massfixer == "scale":
-            #             preds[f"{molecule}massmix"] = (
-            #                 preds[f"{molecule}massmix"]
-            #                 * mean_targ_mass
-            #                 / mean_pred_mass
-            #             )
-
-            #         new_pred_mass = (
-            #             preds[f"{molecule}massmix"] * cell_area_weights * pl_weights
-            #         ).sum((1, 2), keepdim=True)
-
-            #         print(
-            #             f"Mass error in {molecule} mass: {mean_targ_mass - new_pred_mass}"
-            #         )
-
-            #         preds[f"{molecule}massmix"] = batch[f"{molecule}massmix"].clone()
-
-            #     if self.add_surfflux and (f"{molecule}flux_land" in batch):
-
-            #         surfflux_as_massmixsource_prev = molemix_to_massmix(
-            #             (
-            #                 batch[f"{molecule}flux_land"]
-            #                 + batch[f"{molecule}flux_ocean"]
-            #                 + batch[f"{molecule}flux_subt"]
-            #             )
-            #             * batch["cell_area"]
-            #             * self.dt
-            #             / 1e12
-            #             / 3.664
-            #             / 2.124
-            #         )
-            #         next_targ_mass = (
-            #             batch[f"{molecule}massmix_next"]
-            #             * cell_area_weights
-            #             * pl_weights
-            #         ).sum((1, 2), keepdim=True)
-            #         # targ_mass2 = batch[f"{molecule}massmix_next"].clone()
-            #         # targ_mass2[..., :1] = (
-            #         #     targ_mass2[..., :1] + surfflux_as_massmixsource_prev
-            #         # )
-            #         # flux_targ_mass = (targ_mass2 * cell_area_weights * pl_weights).sum(
-            #         #     (1, 2), keepdim=True
-            #         # )
-
-            #         # breakpoint()
-            #         # surfflux_as_massmixsource_prev = mass_to_massmix(
-            #         #     (
-            #         #         batch[f"{molecule}flux_land"]
-            #         #         + batch[f"{molecule}flux_ocean"]
-            #         #         + batch[f"{molecule}flux_subt"]
-            #         #     )
-            #         #     * batch["cell_area"]
-            #         #     * self.dt,
-            #         #     batch["airdensity"][..., :1],
-            #         #     batch["volume"][..., :1],
-            #         #     ppm=True,
-            #         # )  # b n h
-            #         preds[f"{molecule}massmix"][..., :1] = (
-            #             preds[f"{molecule}massmix"][..., :1]
-            #             + surfflux_as_massmixsource_prev
-            #             / pl_weights[..., :1]
-            #             / cell_area_weights
-            #         )
-
-            #         flux_pred_mass = (
-            #             preds[f"{molecule}massmix"] * cell_area_weights * pl_weights
-            #         ).sum((1, 2), keepdim=True)
-
-            #         print(
-            #             f"Mass error w/ flux in {molecule} mass: {next_targ_mass - flux_pred_mass}"
-            #         )
-
-            #         print(
-            #             f"Delta CO2 targ {next_targ_mass - mean_targ_mass}, Delta Co2 flux {surfflux_as_massmixsource_prev.sum()}"
-            #         )
-
-            #     preds[f"{molecule}density"] = massmix_to_density(
-            #         preds[f"{molecule}massmix"],
-            #         (
-            #             batch["airdensity_next"]
-            #             if not "airdensity" in self.target_vars
-            #             else preds["airdensity"]
-            #         ),
-            #         ppm=True,
-            #     )
 
         return preds

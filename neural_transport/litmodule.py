@@ -34,10 +34,46 @@ class NeuralTransport(pl.LightningModule):
             grid="latlon1",
             max_workers=32,
         ),
+        pretrained_ckptpath=None,
     ):
         super().__init__()
         self.save_hyperparameters()
         self.model = MODELS[model](**model_kwargs)
+        if pretrained_ckptpath is not None:
+            ckpt = torch.load(pretrained_ckptpath, map_location="cpu")
+            model_state_dict = {
+                k.replace("model.", ""): v
+                for k, v in ckpt["state_dict"].items()
+                if k.startswith("model.")
+            }
+            for key in [
+                "aroma_encoder.pos_embed.static_feats",
+                "aroma_decoder.pos_embed.static_feats",
+                "multiscale_encoder.position_feats",
+                "multiscale_decoder.position_feats",
+            ]:
+                model_state_dict.pop(key, None)
+
+            # if model == "sfno":
+            #     for i, block in enumerate(self.model.sfnonet.blocks):
+            #         old_weight = model_state_dict[
+            #             f"sfnonet.blocks.{i}.filter.filter.weight"
+            #         ]
+            #         # new_weight = torch.ones_like(block.filter.filter.weight)
+            #         C_out, C_in = block.filter.filter.weight.shape[:2]
+            #         new_weight = torch.eye(
+            #             C_out,
+            #             C_in,
+            #             dtype=block.filter.filter.weight.dtype,
+            #             device=block.filter.filter.weight.device,
+            #         )[:, :, None, None].expand_as(block.filter.filter.weight).clone()
+            #         new_weight[:, :, : old_weight.shape[2], :] = old_weight
+            #         model_state_dict[f"sfnonet.blocks.{i}.filter.filter.weight"] = (
+            #             new_weight
+            #         )
+
+            self.model.load_state_dict(model_state_dict, strict=False)
+
         self.loss = LOSSES[loss](**loss_kwargs)
         self.metrics = ManyMetrics(metrics)
 

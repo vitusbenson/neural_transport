@@ -7,24 +7,9 @@ import xarray as xr
 from torch_geometric.utils import scatter
 
 from neural_transport.models.gnn.mesh import *
-from neural_transport.models.regulargrid import ACTIVATIONS, RegularGridModel
+from neural_transport.models.layers import ACTIVATIONS, MLP
+from neural_transport.models.regulargrid import RegularGridModel
 from neural_transport.tools.conversion import *
-
-
-class MLP(nn.Module):
-    def __init__(self, n_in, n_hid, n_out, layer_norm=True, act="swish"):
-        super().__init__()
-
-        self.mlp = nn.Sequential(
-            nn.Linear(n_in, n_hid, bias=True),
-            ACTIVATIONS[act](),
-            nn.Linear(n_hid, n_out, bias=(not layer_norm)),
-        )
-
-        self.norm = nn.LayerNorm(n_out) if layer_norm else nn.Identity()
-
-    def forward(self, x):
-        return self.norm(self.mlp(x))
 
 
 class MessagePassing(nn.Module):
