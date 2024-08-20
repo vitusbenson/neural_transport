@@ -7,6 +7,10 @@ name = "neural_transport"
 authors = [
     {name = "Vitus Benson", email = "vbenson@bgc-jena.mpg.de"},
 ]
+readme = "README.md"
+license = {file = "LICENSE"}
+description = "Neural Transport - A Python library to train neural network emulators of atmospheric transport models."
+keywords = ["AI", "neural network", "transport model", "carbon", "co2", "emulator", "pytorch"]
 requires-python = ">=3.10"
 version = "0.0.1"
 dependencies = [
