@@ -656,6 +656,7 @@ class SwinTransformerV2CrStage(nn.Module):
         sequential_attn: bool = False,
         rel_pos: bool = True,
         grad_checkpointing: bool = False,
+        random_shift: bool = False,
     ) -> None:
         super(SwinTransformerV2CrStage, self).__init__()
         self.downscale: bool = downscale
@@ -676,6 +677,14 @@ class SwinTransformerV2CrStage(nn.Module):
                 return True
             return i == depth if extra_norm_stage else False
 
+        def _calc_shift_size(index):
+            if random_shift and index > 0:
+                return [torch.randint(0, w, size = ()).item() for w in window_size]
+            elif (index % 2) != 0:
+                return [w // 2 for w in window_size]
+            else:
+                return 0
+
         self.blocks = nn.Sequential(
             *[
                 SwinTransformerV2CrBlock(
@@ -683,9 +692,7 @@ class SwinTransformerV2CrStage(nn.Module):
                     num_heads=num_heads,
                     feat_size=self.feat_size,
                     window_size=window_size,
-                    shift_size=tuple(
-                        [0 if ((index % 2) == 0) else w // 2 for w in window_size]
-                    ),
+                    shift_size=_calc_shift_size(index),
                     mlp_ratio=mlp_ratio,
                     init_values=init_values,
                     proj_drop=proj_drop,
@@ -792,6 +799,7 @@ class SwinTransformerV2Cr(nn.Module):
         rel_pos: bool = True,
         checkpoint_stages: bool = False,
         residual: bool = False,
+        random_shift: bool = False,
         **kwargs: Any,
     ) -> None:
         super(SwinTransformerV2Cr, self).__init__()
@@ -853,6 +861,7 @@ class SwinTransformerV2Cr(nn.Module):
                     norm_layer=norm_layer,
                     rel_pos=rel_pos,
                     grad_checkpointing=self.checkpoint_stages,
+                    random_shift=random_shift,
                 )
             ]
             self.feature_info += [
@@ -999,28 +1008,34 @@ class SwinTransformer(RegularGridModel):
         self,
         img_size=(64, 96),
         patch_size=4,
+        window_size=(8, 16),
         in_chans=40,
         out_chans=19,
         embed_dim=512,
         depths=(12,),
         num_heads=(8,),
-        img_window_ratio=8,
+        # img_window_ratio=8,
         mlp_ratio=4.0,
         drop_path_rate=0.1,
         interpolation_mode="nearest",
+        rel_pos=True,
+        random_shift=False,
     ) -> None:
 
         self.swintransformer = SwinTransformerV2Cr(
             img_size=img_size,
             patch_size=patch_size,
+            window_size=window_size,
             in_chans=in_chans,
             out_chans=out_chans,
             embed_dim=embed_dim,
             depths=depths,
             num_heads=num_heads,
-            img_window_ratio=img_window_ratio,
+            # img_window_ratio=img_window_ratio,
             mlp_ratio=mlp_ratio,
             drop_path_rate=drop_path_rate,
+            rel_pos=rel_pos,
+            random_shift=random_shift,
         )
 
         self.interpolation_mode = interpolation_mode

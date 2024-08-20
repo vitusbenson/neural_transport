@@ -36,14 +36,14 @@ def plot_value_over_leadtime(
     )
 
     with mpl.rc_context(mpl_rc_params):
-        sns.set_palette("Spectral", n_colors=19)
-        daf.plot(hue="height", figsize=figsize)
+        sns.set_palette("Spectral", n_colors=len(da.level))
+        daf.plot(hue="level", figsize=figsize)
         sns.move_legend(plt.gca(), loc="center left", bbox_to_anchor=(1, 0.5))
         if thresh_value is not None:
             plt.axhline(y=thresh_value, ls="--", color="black", zorder=0)
 
             invalid_days = (
-                daf.min("height")
+                daf.min("level")
                 .compute()
                 .where(lambda x: x < thresh_value, drop=True)
                 .days.values
@@ -84,9 +84,9 @@ def r2(pred, targ, weights, dims=["lat", "lon"]):
             pred,
             targ,
             dim=dims,
-            weights=weights.isel(**{d: 1 for d in weights.dims if d not in dims}),
+            weights=weights.isel(**{d: 0 for d in weights.dims if d not in dims}),
         )
-        ** 0.5
+        ** 2
     )
 
 
@@ -95,7 +95,7 @@ def nse(pred, targ, weights, dims=["lat", "lon"]):
         pred,
         targ,
         dim=dims,
-        weights=weights.isel(**{d: 1 for d in weights.dims if d not in dims}),
+        weights=weights.isel(**{d: 0 for d in weights.dims if d not in dims}),
     )
 
 
@@ -126,18 +126,21 @@ def get_metric_limits(metric, metric_pred):
     return METRIC_LIMITS.get(
         metric,
         (
-            [-np.abs(metric_pred).max(), np.abs(metric_pred).max()]
+            [-np.abs(metric_pred).quantile(0.98), np.abs(metric_pred).quantile(0.98)]
             if metric in ["bias"]
             else (
-                [1 - np.abs(1 - metric_pred).max(), 1 + np.abs(1 - metric_pred).max()]
+                [
+                    1 - np.abs(1 - metric_pred).quantile(0.98),
+                    1 + np.abs(1 - metric_pred).quantile(0.98),
+                ]
                 if metric in ["rel_mean", "rel_std"]
-                else [0, metric_pred.max()]
+                else [0, metric_pred.quantile(0.98)]
             )
         ),
     )
 
 
-METRIC_THRESH = dict(r2=0.8, nse=0.5, rel_mean=1.0, rel_std=0.9)
+METRIC_THRESH = dict(r2=0.9, nse=0.5, rel_mean=1.0, rel_std=0.9)
 
 
 def plot_metric_over_leadtime(pred, targ, metric, figsize=(8, 5), freq="QS"):
@@ -224,19 +227,24 @@ def plot_metric_over_space(pred, targ, metric, figsize=(8, 4)):
 
 
 def plot_value_over_latheight(da, clabel="", figsize=(8, 4), **kwargs):
-    das = da.mean([d for d in da.dims if d not in ["lat", "height"]])
+    das = da.mean([d for d in da.dims if d not in ["lat", "level"]])
 
     with mpl.rc_context(mpl_rc_params):
         fig = plt.figure(figsize=figsize)
         ax = plt.subplot()
 
+        old_level = das.level.values
+        das["level"] = range(len(old_level))
+
         das.plot(
             x="lat",
-            y="height",
+            y="level",
             ax=ax,
             cbar_kwargs=dict(label=clabel, shrink=0.8),
             **kwargs,
         )
+
+        plt.yticks(ticks=range(len(old_level)), labels=old_level.astype("int"))
 
         plt.tight_layout()
 
@@ -272,8 +280,8 @@ def get_zonal_spectrum(pred, targ):
     Fpred = xrft.fft(pred, dim="lon", real_dim="lon")
     Ftarg = xrft.fft(targ, dim="lon", real_dim="lon")
 
-    Specpred = abs(Fpred).mean(["lat", "height"])
-    Spectarg = abs(Ftarg).mean(["lat", "height"])
+    Specpred = abs(Fpred).mean(["lat", "level"])
+    Spectarg = abs(Ftarg).mean(["lat", "level"])
 
     return Specpred, Spectarg
 
@@ -353,15 +361,15 @@ def get_pred_targ_from_varname(preds, targs, varname):
                     preds[varname.replace("molemix", "massmix")]
                 )
 
-        elif varname.endswith("massmix") and varname not in targs:
-            targs[varname] = density_to_massmix(
-                targs[varname.replace("massmix", "density")]
-            )
+    elif varname.endswith("massmix") and varname not in targs:
+        targs[varname] = density_to_massmix(
+            targs[varname.replace("massmix", "density")]
+        )
 
     pred = preds[varname].compute()
     targ = targs[varname].compute()
     pred["time"] = targ["time"]
-    pred["height"] = targ["height"]
+    pred["level"] = targ["level"]
 
     return pred, targ
 
@@ -467,16 +475,16 @@ def plot_3d_variable(da, fig, tt, *args, **kwargs):
         )
 
         for i, curr_da in enumerate([targ, pred, targ - pred]):
-            for j, height in enumerate(kwargs.get("heights", [1, 8, 15])):
+            for j, level in enumerate(kwargs.get("levels", [1, 8, 15])):
                 ax = axs[i, j]
 
-                cnf = curr_da.isel(height=height).plot(
+                cnf = curr_da.isel(level=level).plot(
                     ax=ax,
                     add_colorbar=False,
                     **(vari_kwargs if i < 2 else delta_kwargs),
                 )
 
-                if j == len(kwargs.get("heights", [1, 8, 15])) - 1:
+                if j == len(kwargs.get("levels", [1, 8, 15])) - 1:
                     if i == 1:
                         cbar = plt.colorbar(
                             cnf,
@@ -514,7 +522,7 @@ def plot_3d_variable(da, fig, tt, *args, **kwargs):
                     ax.text(
                         0.5,
                         -0.05,
-                        f"{da.height.values[height]:.0f} hPa",
+                        f"{da.level.values[level]:.0f} hPa",
                         transform=ax.transAxes,
                         ha="center",
                         va="top",
@@ -543,7 +551,7 @@ def animate_3d_variable(pred, targ, outpath, plot_kwargs=dict(), num_workers=32)
     da = (
         xr.Dataset({"pred": pred, "targ": targ})
         .to_array("vari")
-        .chunk({"time": 1, "lat": -1, "lon": -1, "height": -1, "vari": -1})
+        .chunk({"time": 1, "lat": -1, "lon": -1, "level": -1, "vari": -1})
         .fillna(0.0)
     )
 
@@ -580,7 +588,7 @@ def animate_predictions(
     out_dir,
     varnames=["co2molemix"],
     postfix="3d_anim",
-    heights=[1, 8, 15],
+    levels=[0, 3, 5],
     num_workers=32,
 ):
     out_dir = Path(out_dir)
@@ -589,10 +597,10 @@ def animate_predictions(
     for varname in varnames:
         pred, targ = get_pred_targ_from_varname(preds, targs, varname)
 
-        vmin = targ.isel(height=heights).quantile(0.02).compute().item()
-        vmax = targ.isel(height=heights).quantile(0.98).compute().item()
+        vmin = targ.isel(level=levels).quantile(0.02).compute().item()
+        vmax = targ.isel(level=levels).quantile(0.98).compute().item()
         max_delta = (
-            np.abs(targ - pred).isel(height=heights).quantile(0.95).compute().item()
+            np.abs(targ - pred).isel(level=levels).quantile(0.95).compute().item()
         )
 
         nstep = 101
@@ -609,7 +617,7 @@ def animate_predictions(
             vmax=vmax,
             max_delta=max_delta,
             nstep=nstep,
-            heights=heights,
+            levels=levels,
         )
 
         animate_3d_variable(
@@ -692,9 +700,6 @@ def plot_obspack_stations(
         with mpl.rc_context(mpl_rc_params):
             fig = plt.figure(figsize=(8, 5))
             ax = plt.subplot()
-            obs.obs_co2molemix.isel(cell=i).plot(
-                ax=ax, color="black", lw=0.75, alpha=0.85, label="Observed", marker="x"
-            )
 
             if compare_obs is not None:
                 compare_obs.co2molemix.isel(cell=i).plot(
@@ -703,6 +708,10 @@ def plot_obspack_stations(
 
             obs.co2molemix.isel(cell=i).plot(
                 ax=ax, label="Predicted", color="tab:orange", lw=0.75
+            )
+
+            obs.obs_co2molemix.isel(cell=i).plot(
+                ax=ax, color="black", lw=0.75, alpha=0.85, label="Observed", marker="x"
             )
 
             ax.set_xlabel("")

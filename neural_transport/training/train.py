@@ -1,4 +1,5 @@
 import multiprocessing
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -16,17 +17,30 @@ from neural_transport.inference.plot_results import (
 from neural_transport.litmodule import NeuralTransport
 
 
-def train_singlestep(run_dir, data_kwargs, lit_module_kwargs, trainer_kwargs):
+def train_singlestep(
+    run_dir, data_kwargs, lit_module_kwargs, trainer_kwargs, ckptpath=None
+):
     run_dir = Path(run_dir)
 
     logger = pl.loggers.tensorboard.TensorBoardLogger(
         run_dir, name="", version="singlestep"
     )
     checkpoint_callback = pl.callbacks.ModelCheckpoint(
-        save_top_k=-1,
+        save_top_k=1,  # -1,
         save_last=True,
         monitor="Loss/Val_rollout",
         filename="Epoch={epoch}-Step={step}-LossVal={Loss/Val_rollout:.6f}",
+        auto_insert_metric_name=False,
+        every_n_epochs=1,
+    )
+    checkpoint_callback.CHECKPOINT_NAME_LAST = "best"
+
+    latest_checkpoint_callback = pl.callbacks.ModelCheckpoint(
+        save_top_k=1,
+        save_last=True,
+        monitor="step",
+        mode="max",
+        filename="latest-Epoch={epoch}-Step={step}-LossVal={Loss/Val_rollout:.6f}",
         auto_insert_metric_name=False,
         every_n_epochs=1,
     )
@@ -35,16 +49,26 @@ def train_singlestep(run_dir, data_kwargs, lit_module_kwargs, trainer_kwargs):
 
     dset = CarbonDataModule(**data_kwargs)
 
+    if ckptpath is not None:
+        lit_module_kwargs["pretrained_ckptpath"] = ckptpath
+        # model = NeuralTransport.load_from_checkpoint(
+        #     ckptpath,
+        #     map_location="cpu",
+        #     **lit_module_kwargs,
+        # )
+    # else:
     model = NeuralTransport(**lit_module_kwargs)
 
     trainer = pl.Trainer(
-        callbacks=[checkpoint_callback, lr_monitor],
+        callbacks=[checkpoint_callback, latest_checkpoint_callback, lr_monitor],
         logger=logger,
         **trainer_kwargs,
     )
 
     print("Starting singlestep training")
     trainer.fit(model, dset)
+
+    return model.global_rank
 
 
 def train_rollout(
@@ -54,6 +78,7 @@ def train_rollout(
     rollout_trainer_kwargs,
     rollout_constant_lr=1e-5,
     timesteps=[3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31],
+    ckpt="last",
 ):
     run_dir = Path(run_dir)
 
@@ -63,8 +88,19 @@ def train_rollout(
             warmup_steps=1, halfcosine_steps=100000, min_lr=1, max_lr=1
         )
 
+    log_path = run_dir / "singlestep"
+    ckptdir = log_path / "checkpoints"
+    bestckptpath = sorted(
+        [p for p in ckptdir.glob("*.ckpt") if "LossVal" in p.name],
+        key=lambda p: float(p.name.split("=")[-1].split(".c")[0]),
+    )[0]
+
+    lastckptpath = log_path / "checkpoints/last.ckpt"
+
+    ckptpath = bestckptpath if ckpt == "best" else lastckptpath
+
     model = NeuralTransport.load_from_checkpoint(
-        run_dir / "singlestep/checkpoints/last.ckpt",
+        ckptpath,
         map_location="cpu",
         **lit_module_kwargs,
     )
@@ -100,8 +136,10 @@ def train_rollout(
 
         print(f"Starting training {n_timesteps} timesteps")
         trainer.fit(model, dset)
-        trainer.fit_loop.max_epochs += 2
+        trainer.fit_loop.max_epochs += rollout_trainer_kwargs["max_epochs"]
         trainer.fit_loop.epoch_loop.val_loop._results.clear()
+
+    return model.global_rank
 
 
 def load_dataset(data_path, data_kwargs):
@@ -110,6 +148,8 @@ def load_dataset(data_path, data_kwargs):
         data_path=data_path,
         dataset=data_kwargs["dataset"],
         grid=data_kwargs["grid"],
+        vertical_levels=data_kwargs["vertical_levels"],
+        freq=data_kwargs["freq"],
         n_timesteps=1,
         target_vars=data_kwargs["target_vars"],
         forcing_vars=data_kwargs["forcing_vars"],
@@ -128,6 +168,8 @@ def predict(
     freq="QS",
     ckpt="last",
     lit_module_kwargs={},
+    massfixer="default",
+    zero_surfflux=False,
 ):
     log_path = Path(log_path)
 
@@ -138,9 +180,12 @@ def predict(
     )[0]
 
     lastckptpath = log_path / "checkpoints/last.ckpt"
-    outpath = log_path / "preds" / ckpt
 
     ckptpath = bestckptpath if ckpt == "best" else lastckptpath
+
+    if massfixer != "default":
+        lit_module_kwargs["model_kwargs"]["massfixer"] = massfixer
+    outpath = log_path / "preds" / f"ckpt={ckpt}_massfixer={massfixer}"
 
     dataset = load_dataset(data_path_forecast, data_kwargs)
 
@@ -156,8 +201,9 @@ def predict(
         verbose=True,
         freq=freq,
         remap=("latlon" not in data_kwargs["grid"]),
-        target_vars_3d=["co2density", "co2massmix"],
+        target_vars_3d=["co2massmix"],
         target_vars_2d=[],
+        zero_surfflux=zero_surfflux,
     )
 
 
@@ -174,8 +220,10 @@ def load_pred_targ(target_path, pred_path):
     return co2targ, co2pred
 
 
-def score(target_path, pred_path, obs_pred_path=None):
+def score(target_path, pred_path, obs_pred_path=None, freq="QS"):
     co2targ, co2pred = load_pred_targ(target_path, pred_path)
+    co2pred = co2pred.isel(time=slice(1, None))
+    co2targ = co2targ.isel(time=slice(1, None)).isel(time=slice(len(co2pred.time)))
 
     model_name = pred_path.parent.parent.parent.parent.name
     singlestep_or_rollout = pred_path.parent.parent.parent.name
@@ -184,21 +232,26 @@ def score(target_path, pred_path, obs_pred_path=None):
 
     metrics = {}
     metrics[f"{model_name}_{singlestep_or_rollout}_{ckpt_name}"] = compute_score_df(
-        co2targ, co2pred
+        co2targ,
+        co2pred,
+        freq=freq,
     )
 
     df = pd.DataFrame(metrics).T
     score_path.mkdir(parents=True, exist_ok=True)
-    df.to_csv(score_path / "metrics.csv")
+    df.to_csv(score_path / ("metrics.csv" if freq == "QS" else f"metrics_{freq}.csv"))
 
     if obs_pred_path:
         obspreds = xr.open_zarr(obs_pred_path)  # .isel(time = slice(1,None))
 
         print(f"Computing score for {obs_pred_path}")
 
-        df = compute_local_scores(obs_preds=obspreds)
+        df = compute_local_scores(obs_preds=obspreds, freq=freq)
 
-        df.to_csv(score_path / "obs_metrics.csv")
+        df.to_csv(
+            score_path
+            / ("obs_metrics.csv" if freq == "QS" else f"obs_metrics_{freq}.csv")
+        )
 
 
 def plot(
@@ -210,6 +263,7 @@ def plot(
     data_kwargs=None,
     movie_interval=["2018-01-01", "2018-03-31"],
     num_workers=multiprocessing.cpu_count() // 2,
+    plot_types=["metrics", "animations", "obspack"],
 ):
     co2targ, co2pred = load_pred_targ(target_path, pred_path)
 
@@ -221,19 +275,21 @@ def plot(
     co2targ = co2targ.isel(time=slice(None, len(co2pred.time)))
 
     plot_path.mkdir(parents=True, exist_ok=True)
-    plot_metrics(co2pred, co2targ, plot_path)
+    if "metrics" in plot_types:
+        plot_metrics(co2pred, co2targ, plot_path, imgformats=["pdf"])
 
     t0, tend = movie_interval
 
-    animate_predictions(
-        co2pred.sel(time=slice(t0, tend)),
-        co2targ.sel(time=slice(t0, tend)),
-        plot_path,
-        postfix=f"3d_anim_t0={t0}-tend={tend}",
-        num_workers=num_workers,
-    )
+    if "animations" in plot_types:
+        animate_predictions(
+            co2pred.sel(time=slice(t0, tend)),
+            co2targ.sel(time=slice(t0, tend)),
+            plot_path,
+            postfix=f"3d_anim_t0={t0}-tend={tend}",
+            num_workers=num_workers,
+        )
 
-    if obs_pred_path:
+    if obs_pred_path and ("obspack" in plot_types):
         obspreds = xr.open_zarr(obs_pred_path)
 
         dataset = load_dataset(data_path_forecast, data_kwargs)
@@ -248,6 +304,7 @@ def plot(
             plot_path,
             compare_obs=carboscope_obspred,
             stations="all",
+            imgformats=["pdf"],
         )
 
 
@@ -264,9 +321,21 @@ def train_and_eval_singlestep(
     num_workers=multiprocessing.cpu_count() // 2,
     train=True,
     ckpt="last",
+    massfixer="default",
+    pretrained_ckptpath=None,
 ):
     if train:
-        train_singlestep(run_dir, data_kwargs, lit_module_kwargs, trainer_kwargs)
+        train_singlestep(
+            run_dir,
+            data_kwargs,
+            lit_module_kwargs,
+            trainer_kwargs,
+            ckptpath=pretrained_ckptpath,
+        )
+
+    if ("SLURM_PROCID" in os.environ) and (int(os.environ["SLURM_PROCID"]) > 0):
+        return
+
     predict(
         run_dir / "singlestep",
         data_path_forecast,
@@ -275,13 +344,25 @@ def train_and_eval_singlestep(
         freq=freq,
         ckpt=ckpt,
         lit_module_kwargs=lit_module_kwargs,
+        massfixer=massfixer,
     )
-    target_path = data_path_forecast / f"{data_kwargs['dataset']}_latlon4.zarr"
+    target_path = (
+        data_path_forecast
+        / f"{data_kwargs['dataset']}_{data_kwargs['grid']}_{data_kwargs['vertical_levels']}_{data_kwargs['freq']}.zarr"
+    )
     pred_path = (
-        run_dir / "singlestep" / "preds" / ckpt / f"co2_pred_rollout_{freq}.zarr"
+        run_dir
+        / "singlestep"
+        / "preds"
+        / f"ckpt={ckpt}_massfixer={massfixer}"
+        / f"co2_pred_rollout_{freq}.zarr"
     )
     obs_pred_path = (
-        run_dir / "singlestep" / "preds" / ckpt / f"obs_co2_pred_rollout_{freq}.zarr"
+        run_dir
+        / "singlestep"
+        / "preds"
+        / f"ckpt={ckpt}_massfixer={massfixer}"
+        / f"obs_co2_pred_rollout_{freq}.zarr"
     )
     score(target_path, pred_path, obs_pred_path)
     plot(
@@ -311,6 +392,12 @@ def train_and_eval_rollout(
     timesteps=[3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31],
     train=True,
     ckpt="last",
+    massfixers=["default"],
+    run_scoring=True,
+    run_plotting=True,
+    run_forecast=True,
+    plot_types=["metrics", "animations", "obspack"],
+    zero_surfflux=False,
 ):
     if train:
         train_rollout(
@@ -320,29 +407,66 @@ def train_and_eval_rollout(
             rollout_trainer_kwargs,
             rollout_constant_lr=rollout_constant_lr,
             timesteps=timesteps,
+            ckpt=ckpt,
         )
-    predict(
-        run_dir / "rollout",
-        data_path_forecast,
-        data_kwargs,
-        device=device,
-        freq=freq,
-        ckpt=ckpt,
-    )
-    target_path = data_path_forecast / f"{data_kwargs['dataset']}_latlon4.zarr"
-    pred_path = run_dir / "rollout" / "preds" / ckpt / f"co2_pred_rollout_{freq}.zarr"
-    obs_pred_path = (
-        run_dir / "rollout" / "preds" / ckpt / f"obs_co2_pred_rollout_{freq}.zarr"
-    )
-    print("Starting Scoring")
-    score(target_path, pred_path, obs_pred_path)
-    plot(
-        target_path,
-        pred_path,
-        obs_pred_path,
-        obs_compare_path,
-        data_path_forecast,
-        data_kwargs,
-        movie_interval,
-        num_workers,
-    )
+
+    if ("SLURM_PROCID" in os.environ) and (int(os.environ["SLURM_PROCID"]) > 0):
+        return
+
+    for massfixer in massfixers:
+        if run_forecast:
+            predict(
+                run_dir / "rollout",
+                data_path_forecast,
+                data_kwargs,
+                device=device,
+                freq=freq,
+                ckpt=ckpt,
+                lit_module_kwargs=lit_module_kwargs,
+                massfixer=massfixer,
+                zero_surfflux=zero_surfflux,
+            )
+        target_path = (
+            data_path_forecast
+            / f"{data_kwargs['dataset']}_{data_kwargs['grid']}_{data_kwargs['vertical_levels']}_{data_kwargs['freq']}.zarr"
+        )
+
+        pred_path = (
+            run_dir
+            / "rollout"
+            / "preds"
+            / f"ckpt={ckpt}_massfixer={massfixer}"
+            / (
+                f"co2_pred_rollout_{freq}.zarr"
+                if not zero_surfflux
+                else f"co2_pred_zeroflux_rollout_{freq}.zarr"
+            )
+        )
+        obs_pred_path = (
+            run_dir
+            / "rollout"
+            / "preds"
+            / f"ckpt={ckpt}_massfixer={massfixer}"
+            / (
+                f"obs_co2_pred_rollout_{freq}.zarr"
+                if not zero_surfflux
+                else f"obs_co2_pred_zeroflux_rollout_{freq}.zarr"
+            )
+        )
+
+        if run_scoring:
+            print("Starting Scoring")
+            score(target_path, pred_path, obs_pred_path, freq=freq)
+        if run_plotting:
+            print("Starting Plotting")
+            plot(
+                target_path,
+                pred_path,
+                obs_pred_path,
+                obs_compare_path,
+                data_path_forecast,
+                data_kwargs,
+                movie_interval=movie_interval,
+                num_workers=num_workers,
+                plot_types=plot_types,
+            )

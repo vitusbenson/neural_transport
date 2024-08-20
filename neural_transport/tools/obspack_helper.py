@@ -6,22 +6,28 @@ from neural_transport.models.gnn.mesh import latlon_to_xyz
 
 
 def extract_obspack_locs_from_xarray(ds, obs, grid="latlon4"):
+    
     if grid.startswith("latlon"):
         obs_t = obs.sel(time=ds.time, method="nearest").dropna(
-            "cell", subset=["lat", "lon", "height"]
+            "cell", how="all", subset=["lat", "lon", "height"]
         )
         ds_loc = ds.sel(lat=obs_t.lat, lon=obs_t.lon, method="nearest")
 
-        height_idx = ((ds_loc.gp - obs_t.height) ** 2).argmin("height")
+        height_idx = (
+            (obs_t.height >= ds_loc.gph_bottom * 1000)
+            & (obs_t.height <= ds_loc.gph_top * 1000)
+        ).argmax(
+            "level"
+        )  # ((1000*ds_loc.gph - obs_t.height) ** 2).argmin("level")
         height_idx = height_idx.assign_coords(
             height=("cell", height_idx.values)
         ).compute()
 
-        ds_cell = ds_loc.isel(height=height_idx)
+        ds_cell = ds_loc.isel(level=height_idx)
 
         ds_out = xr.merge(
             [
-                ds_cell.drop_vars(["height", "lat", "lon"]),
+                ds_cell.drop_vars(["level", "lat", "lon"]),
                 obs_t.rename({k: f"obs_{k}" for k in obs_t.data_vars}),
             ]
         )
@@ -39,12 +45,12 @@ def extract_obspack_locs_from_xarray(ds, obs, grid="latlon4"):
         _, idxs = kd_tree.query(x=obs_positions)
         ds_loc = ds.isel(cell=idxs)
 
-        height_idx = ((ds_loc.gp - obs_t.height) ** 2).argmin("height").compute()
-        ds_cell = ds_loc.isel(height=height_idx.compute())
+        height_idx = ((ds_loc.gph - obs_t.height) ** 2).argmin("level").compute()
+        ds_cell = ds_loc.isel(level=height_idx.compute())
 
         ds_out = xr.merge(
             [
-                ds_cell.drop_vars(["height", "clat", "clon"]),
+                ds_cell.drop_vars(["level", "clat", "clon"]),
                 obs_t.rename({k: f"obs_{k}" for k in obs_t.data_vars}),
             ]
         )
