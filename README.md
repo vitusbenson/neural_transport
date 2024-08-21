@@ -1,4 +1,4 @@
-![#](logo.png)
+![#](https://raw.githubusercontent.com/vitusbenson/neural_transport/main/logo.png)
 
 *A Python library to train neural network emulators of atmospheric transport models.*
 
@@ -12,6 +12,9 @@
     <img src="https://img.shields.io/twitter/follow/vitusbenson?style=social" alt="Twitter">
 </a>
 
+<a href="https://arxiv.org/abs/2408.11032" target="_blank">
+    <img src="https://img.shields.io/badge/arXiv-2408.11032-b31b1b.svg" alt="ArXiv">
+</a>
 
 
 
@@ -36,17 +39,17 @@ pip install -e .
 
 # Cite NeuralTransport
 
-In case you use NeuralTransport in your research or work, it would be highly appreciated if you include a reference to our [paper](https://arxiv.org/abs/2408.XXXXX) in any kind of publication.
+In case you use NeuralTransport in your research or work, it would be highly appreciated if you include a reference to our [paper](https://arxiv.org/abs/2408.11032) in any kind of publication.
 
 ```bibtex
 @article{benson2024neuraltransport,
   title = {Atmospheric Transport Modeling of CO2 with Neural Networks},
   author = {Vitus Benson, Ana Bastos, Christian Reimers, Alexander J. Winkler,
  Fanny Yang and Markus Reichstein},
-  eprint={2408.XXXXX},
+  eprint={2408.11032},
   archivePrefix={arXiv},
   primaryClass={cs.LG},
-  url={https://arxiv.org/abs/2408.XXXXX}, 
+  url={https://arxiv.org/abs/2408.11032}, 
 }
 ```
 
