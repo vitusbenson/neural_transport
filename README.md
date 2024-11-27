@@ -30,7 +30,6 @@ conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvi
 conda install pyg -c pyg
 pip3 install lightning cdsapi pypdf2 trimesh rtree ipykernel ipywidgets tensorboard einops timm ecmwf-api-client eccodes dm-tree cfgrib 
 pip3 install git+https://github.com/jbusecke/xmovie.git
-pip3 install git+https://github.com/vitusbenson/torch_advection.git
 pip install pynvml wandb ruamel.yaml moviepy
 pip3 install git+https://github.com/NVIDIA/modulus-makani.git
 pip install -e .

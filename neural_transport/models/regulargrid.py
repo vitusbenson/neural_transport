@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 
-from neural_transport.models.aroma import AromaDecoder, AromaEncoder
 from neural_transport.models.layers import (
     ACTIVATIONS,
     MultiScaleDecoder,
@@ -49,12 +48,7 @@ class RegularGridModel(nn.Module):
         self.massfixer = massfixer
         self.molecules = molecules
         self.targshift = targshift
-        self.vert_pos_embed = vert_pos_embed
 
-        if self.vert_pos_embed:
-            self.aroma_encoder = AromaEncoder(**vert_pos_embed_kwargs)
-            self.aroma_decoder = AromaDecoder(**vert_pos_embed_kwargs)
-            self.aroma_decoder.pos_embed = self.aroma_encoder.pos_embed
 
         if self.horizontal_interpolation == "multiscale_encoder":
             self.multiscale_encoder = MultiScaleEncoder(
@@ -92,10 +86,7 @@ class RegularGridModel(nn.Module):
             else:
                 batch_normalized[v] = x_in_curr
 
-        if self.vert_pos_embed:
-            x_in = self.aroma_encoder(batch_normalized)
-        else:
-            x_in = torch.cat(list(batch_normalized.values()), dim=-1)
+        x_in = torch.cat(list(batch_normalized.values()), dim=-1)
 
         B, N, C = x_in.shape
 
@@ -134,9 +125,6 @@ class RegularGridModel(nn.Module):
             )
 
         x_out = x_out.permute(0, 2, 3, 1).reshape(B, N, -1)
-
-        if self.vert_pos_embed:
-            x_out = self.aroma_decoder(x_out, batch)
 
         x_grid_offset = torch.cat(
             [(batch[f"{v}_offset"]).expand_as(batch[v]) for v in self.target_vars],
