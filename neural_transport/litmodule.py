@@ -47,8 +47,6 @@ class NeuralTransport(pl.LightningModule):
                 if k.startswith("model.")
             }
             for key in [
-                "aroma_encoder.pos_embed.static_feats",
-                "aroma_decoder.pos_embed.static_feats",
                 "multiscale_encoder.position_feats",
                 "multiscale_decoder.position_feats",
             ]:

@@ -35,7 +35,6 @@ dependencies = [
     "torch_geometric",
     "scipy",
     "trimesh",
-    "torch_advection",
     "tensorly",
     "torch_harmonics",
     "timm",
