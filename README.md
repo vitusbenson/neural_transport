@@ -20,18 +20,17 @@
 
 # Installation
 
-
 ```
-conda create -n neuraltransport python=3.10
+conda create -n neuraltransport -c conda-forge python=3.12
 conda activate neuraltransport
-conda install -c conda-forge ffmpeg pkg-config libjpeg-turbo opencv cupy cuda-version=11.8
+conda install -c conda-forge ffmpeg pkg-config libjpeg-turbo opencv cupy
 conda install -c conda-forge numpy pandas xesmf cdo python-cdo xarray dask zarr netCDF4 bottleneck matplotlib seaborn cartopy shapely xskillscore xrft pyarrow
-conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
-conda install pyg -c pyg
-pip3 install lightning cdsapi pypdf2 trimesh rtree ipykernel ipywidgets tensorboard einops timm ecmwf-api-client eccodes dm-tree cfgrib 
+pip3 install torch torchvision torchaudio
+pip install torch_geometric
+pip install pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_conv -f https://data.pyg.org/whl/torch-2.7.0+cu126.html
+pip3 install lightning cdsapi pypdf2 trimesh rtree ipykernel ipywidgets tensorboard einops timm ecmwf-api-client eccodes dm-tree cfgrib pynvml wandb ruamel.yaml moviepy torch_harmonics tensorly tensorly-torch
 pip3 install git+https://github.com/jbusecke/xmovie.git
-pip install pynvml wandb ruamel.yaml moviepy
-pip3 install git+https://github.com/NVIDIA/modulus-makani.git
+# Go inside your neural_transport folder (cd neural_transport)
 pip install -e .
 ```
 
