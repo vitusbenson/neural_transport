@@ -8,7 +8,8 @@ import pytorch_lightning as pl
 import torch
 import xarray as xr
 import zarr
-from numcodecs import blosc
+
+# from numcodecs import blosc
 from torch.utils.data import Dataset
 
 from neural_transport.datasets.grids import *
@@ -18,7 +19,7 @@ from neural_transport.tools.conversion import *
 from neural_transport.tools.obspack_helper import extract_obspack_locs_from_xarray
 from neural_transport.tools.xarray_helper import tensor_to_xarray
 
-blosc.use_threads = False
+# blosc.use_threads = False
 dask.config.set(scheduler="synchronous")
 
 
@@ -169,7 +170,9 @@ class CarbonDataset(Dataset):
         if load_obspack:
 
             self.obspack_ds = (
-                xr.open_zarr(self.data_path.parent.parent / "Obspack" / f"obspack_{freq}.zarr")
+                xr.open_zarr(
+                    self.data_path.parent.parent / "Obspack" / f"obspack_{freq}.zarr"
+                )
                 .sel(time=ds.time, method="nearest")
                 .compute()
             )
@@ -438,7 +441,7 @@ class CarbonDataset(Dataset):
             else:
                 dims = ("time", "lat", "lon", "level")
                 chunking = {"time": 10, "lat": -1, "lon": -1, "level": -1}
-            nparr = np.NaN
+            nparr = np.nan
 
         else:
             coords = dict(
@@ -457,7 +460,7 @@ class CarbonDataset(Dataset):
 
             nparr = np.full(
                 (len(coords["time"]), len(coords["clon"]), len(coords["level"])),
-                np.NaN,
+                np.nan,
             )
 
         arr = (
@@ -492,13 +495,20 @@ class CarbonDataset(Dataset):
 
         if overwrite and zarrpath.exists():
             shutil.rmtree(zarrpath)
+
+        prototype_zarr.time.encoding['compressors'] = None # Zarr v3 fix
+        
         prototype_zarr.to_zarr(zarrpath, compute=False)
 
         return prototype_zarr
 
     def tensor_to_xarray(self, tensor):
         return tensor_to_xarray(
-            tensor, grid=self.grid, dataset=self.dataset, gridnc=self.grid_ds, vertical_levels=self.vertical_levels
+            tensor,
+            grid=self.grid,
+            dataset=self.dataset,
+            gridnc=self.grid_ds,
+            vertical_levels=self.vertical_levels,
         ).squeeze(drop=True)
 
 
