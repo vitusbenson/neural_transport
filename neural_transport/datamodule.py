@@ -438,7 +438,7 @@ class CarbonDataset(Dataset):
             else:
                 dims = ("time", "lat", "lon", "level")
                 chunking = {"time": 10, "lat": -1, "lon": -1, "level": -1}
-            nparr = np.NaN
+            nparr = np.nan
 
         else:
             coords = dict(
