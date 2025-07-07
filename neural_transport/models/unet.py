@@ -33,7 +33,8 @@ class PeriodicPadding(nn.Module):
         )
 
         return x
-
+# J: Basically mimicks that the earth is a cylinder.
+# J: But is x not just replaced instead of added?
 
 class ResBlock(nn.Module):
 
