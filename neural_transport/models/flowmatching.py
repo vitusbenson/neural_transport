@@ -41,9 +41,9 @@ class FlowMatching(nn.Module):
         # extract target_vars to get x1 and normalize # B N C
         x_1 = batch[f"{self.model.target_vars[0]}_next"]
         ### Here target_vars[0] is supposed to be co2massmix
-        batch_normalized = self.normalize_batch(self, batch)
+        batch_normalized = self.model.normalize_batch_target_vars(batch)
         x_1_normalized = batch_normalized[f"{self.model.target_vars[0]}_next"]
-    
+
         # sample noise [B N C]
         x_0 = torch.randn_like(x_1, device=x_1.device)
 
@@ -58,8 +58,12 @@ class FlowMatching(nn.Module):
         )
 
         # compute flow matching loss and add denormalized x_1
-        preds = self.model(path_sample.x_t, path_sample.t) + x_1
-        # loss_input_2 = path_sample.dx_t
+        batch_pred = batch.copy()
+        batch_pred[self.model.target_vars[0]] = path_sample.x_t + x_0
+        preds = self.model(batch_pred)
+        # preds = self.model(path_sample.x_t, path_sample.t) + x_1
+        ### UNet does not take t as input yet
+
         return preds # B N C
 
 
@@ -80,5 +84,5 @@ class FlowMatching(nn.Module):
         # denormalize sol
         return sol
     
-    def inference_obs_forward(self, batch):
-        return sol
+    #def inference_obs_forward(self, batch):
+    #    return sol
