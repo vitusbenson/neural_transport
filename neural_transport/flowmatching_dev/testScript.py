@@ -103,20 +103,15 @@ class RegularGridModel(nn.Module):
         return preds
 
     def normalize_batch(self, batch):
-        
         batch_normalized = {}
-        if not self.training:
-            vars_to_normalize = self.target_vars
-        else:
-            vars_to_normalize = self.input_vars
+        vars_to_normalize = self.input_vars
         
         for v in vars_to_normalize:
             print(f"input: {v}")
-
-            ### necessary for forward_inference in FlowMatching to work
             if v not in batch:
                 print(f"WARNING: skipping {v}, missing in batch")
                 continue
+
             try:
                 offset = batch[f"{v}_offset"]
                 scale = batch[f"{v}_scale"]
@@ -128,6 +123,7 @@ class RegularGridModel(nn.Module):
                 )
             
             x_in_curr = (batch[v] - offset) / scale
+
             if self.targshift and (v in self.target_vars):
                 batch_normalized[v] = x_in_curr - x_in_curr.mean((1, 2), keepdim=True)
             else:
@@ -566,9 +562,9 @@ class UNet(RegularGridModel):
 # train UNet parameters 1/2
 
 TARGET_VARS = ["co2massmix"]
-#FORCING_VARS_1D = [
-#    "flow_time"
-#]
+FORCING_VARS_1D = [
+    # "flow_time"
+]
 
 # Uncomment for conditional Flow Matching
 FORCING_VARS_2D = [
@@ -597,9 +593,9 @@ freq = "6h"
 
 nlev = len(VERTICAL_LAYERS_PROTOTYPE_COORDS[vertical_levels]["level"])
 
-FORCING_VARS = FORCING_VARS_2D + FORCING_VARS_3D # + FORCING_VARS_1D
+FORCING_VARS = FORCING_VARS_1D + FORCING_VARS_2D + FORCING_VARS_3D
 LEN_ALL_TARGET_VARS = nlev * len(TARGET_VARS)
-LEN_ALL_FORCING_VARS = len(FORCING_VARS_2D) + nlev * len(FORCING_VARS_3D) # + len(FORCING_VARS_1D)
+LEN_ALL_FORCING_VARS = len(FORCING_VARS_1D) + len(FORCING_VARS_2D) + nlev * len(FORCING_VARS_3D)
 LEN_ALL_VARS = LEN_ALL_TARGET_VARS + LEN_ALL_FORCING_VARS
 
 lat = LATLON_PROTOTYPE_COORDS[grid]["lat"]
@@ -642,9 +638,10 @@ model_kwargs = dict(
 
 # %%
 print(f"vertical layers prototype coords: {nlev}")
+print(f"Lenth of 1D forcing variables: {len(FORCING_VARS_1D)}")
 print(f"Lenght of 2D forcing variables: {len(FORCING_VARS_2D)}")
 print(f"Length of 3D forcing variables: {len(FORCING_VARS_3D)}")
-print(f"Length of all forcing variables: {len(FORCING_VARS_2D)} + {nlev} * {len(FORCING_VARS_3D)} = {LEN_ALL_FORCING_VARS}")
+print(f"Length of all forcing variables: {len(FORCING_VARS_1D)} + {len(FORCING_VARS_2D)} + {nlev} * {len(FORCING_VARS_3D)} = {LEN_ALL_FORCING_VARS}")
 print(f"Length of all target variables: {LEN_ALL_TARGET_VARS}")
 print(f"Length of all variables: {LEN_ALL_VARS}")
 
@@ -670,23 +667,23 @@ data_kwargs = dict(
     batch_size_pred=BATCH_SIZE_PRED,
     num_workers=32 * N_GPUS,
     val_rollout_n_timesteps=31,
-    target_vars=["co2massmix"], # , "airmass"
+    target_vars=["co2massmix", "airmass"],
     forcing_vars=[
-        # "gph_bottom",
-        # "gph_top",
-        # "p_bottom",
-        # "p_top",
-        # "q",
-        # "t",
-        # "u",
-        # "v",
-        # "blh",
-        # "cell_area",
-        # "co2flux_anthro",
-        # "co2flux_land",
-        # "co2flux_ocean",
-        # "orography",
-        # "tisr",
+        "gph_bottom",
+        "gph_top",
+        "p_bottom",
+        "p_top",
+        "q",
+        "t",
+        "u",
+        "v",
+        "blh",
+        "cell_area",
+        "co2flux_anthro",
+        "co2flux_land",
+        "co2flux_ocean",
+        "orography",
+        "tisr",
     ],
     compute=False,
     # time_interval=["1990-01-01", "2014-12-31"],
@@ -918,12 +915,11 @@ class FlowMatching(nn.Module):
             batch[f"{self.target_var}_scale"]
         )
 
-        print("x_init:", x_init.shape,'\n',
-              "time_grid:", time_grid.shape,'\n',
-              "target_var:", batch[self.target_var].shape,'\n',
-              "offset:", batch[f"{self.target_var}_offset"].shape,'\n',
-              "scale:", batch[f"{self.target_var}_scale"].shape
-        )
+        print("x_init:", x_init.shape)
+        print("time_grid:", time_grid.shape)
+        print("target_var:", batch[self.target_var].shape)
+        print("offset:", batch[f"{self.target_var}_offset"].shape)
+        print("scale:", batch[f"{self.target_var}_scale"].shape)
 
         # solve the ODE to get the trajectory
         sol = self.solver.sample(time_grid=time_grid,
@@ -956,6 +952,16 @@ with torch.no_grad():
 
 # %%
 # anpassen von variables -> offset/scale/delta is loaded, even if not given into the model!?
+# neural_transport -> datamolude.py -> CarbonDataset -> def __getitem__(self, t: int): ->
+# data |= {
+#             f"{k}_offset": torch.from_numpy(
+#                 self.expand_dims(self.stats_ds[k].sel(stats="mean")).values.astype(
+#                     "float32"
+#                 )
+#             )
+#             for k in self.stats_ds.data_vars.keys()  !!!!!! instead of e.g. self.vars
+#         }
+# same for scale
 
 # %%
 ## write timeline with steps to archive and how to deal with problems
