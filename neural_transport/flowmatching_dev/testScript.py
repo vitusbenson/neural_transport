@@ -192,7 +192,7 @@ class RegularGridModel(nn.Module):
             )
 
         x_out = x_out.permute(0, 2, 3, 1).reshape(B, N, -1)
-
+        
         x_grid_offset = torch.cat(
             [(batch[f"{v}_offset"]).expand_as(batch[v]) for v in self.target_vars],
             dim=-1,
@@ -206,6 +206,12 @@ class RegularGridModel(nn.Module):
             [batch[v] for v in self.target_vars],
             dim=-1,
         )
+        missing = [f"{v}_delta_offset" for v in self.target_vars if f"{v}_delta_offset" not in batch]
+        if missing:
+            print("Missing in batch:", missing)
+            print(batch.keys())
+            print(self.target_vars)
+
         x_grid_delta_offset = torch.cat(
             [
                 (batch[f"{v}_delta_offset"]).expand_as(batch[v])
@@ -810,25 +816,40 @@ plt.show()
 
 # %%
 class VelocityWrapper(nn.Module):
-    def __init__(self, model, target_var, offset=None, scale=None):
+    def __init__(self, model, target_vars,
+                 offset=None, scale=None,
+                 delta_offset=None, delta_scale=None,
+                 static_batch=None
+                 ):
         super().__init__()
         self.model = model
-        self.target_var = target_var
+        self.target_vars = target_vars
         self.offset = offset
         self.scale = scale
+        self.delta_offset = delta_offset
+        self.delta_scale = delta_scale
+        self.static_batch = static_batch or {}
+        
 
     def forward(self, x, t):
         batch_vf = {
-            self.target_var: x,
+            self.target_vars: x,
             "flow_time": t,
         }
 
-        if self.offset is not None and self.scale is not None:
-            batch_vf[f"{self.target_var}_offset"] = self.offset
-            batch_vf[f"{self.target_var}_scale"] = self.scale
+        if self.offset is not None:
+            batch_vf[f"{self.target_vars}_offset"] = self.offset
+        if self.scale is not None:
+            batch_vf[f"{self.target_vars}_scale"] = self.scale
+        if self.delta_offset is not None:
+            batch_vf[f"{self.target_vars}_delta_offset"] = self.delta_offset
+        if self.delta_scale is not None:
+            batch_vf[f"{self.target_vars}_delta_scale"] = self.delta_scale
             
+        batch_vf.update(self.static_batch)
+        print(f"batch_vf keys: {list(batch_vf.keys())}")
         out = self.model(batch_vf)
-        return out[self.target_var]
+        return out[self.target_vars]
 
 # %%
 class FlowMatching(nn.Module):
@@ -847,8 +868,8 @@ class FlowMatching(nn.Module):
         self.method = method
         self.step_size = step_size
         self.path = AffineProbPath(scheduler=CondOTScheduler())
-        self.target_var = self.model.target_vars[0] ### Here target_vars[0] is supposed to be 'co2massmix'
-        self.velocity_model = VelocityWrapper(self.model, self.target_var)
+        self.target_vars = self.model.target_vars[0] ### Here target_vars[0] is supposed to be 'co2massmix'
+        self.velocity_model = VelocityWrapper(self.model, self.target_vars)
         self.solver = ODESolver(velocity_model=self.velocity_model)
 
 
@@ -861,9 +882,9 @@ class FlowMatching(nn.Module):
 
     def training_forward(self, batch):
         # extract target_vars to get x1 and normalize # B N C
-        x_1 = batch[f"{self.target_var}_next"]
+        x_1 = batch[f"{self.target_vars}_next"]
         batch_normalized = self.model.normalize_batch_target_vars(batch)
-        x_1_normalized = batch_normalized[f"{self.target_var}_next"]
+        x_1_normalized = batch_normalized[f"{self.target_vars}_next"]
 
         # sample noise [B N C]
         x_0 = torch.randn_like(x_1, device=x_1.device)
@@ -882,7 +903,7 @@ class FlowMatching(nn.Module):
 
         # compute flow matching loss and add denormalized x_1
         batch_pred = batch.copy()
-        batch_pred[self.target_var] = path_sample.x_t + x_0
+        batch_pred[self.target_vars] = path_sample.x_t + x_0
         ### add offset and scale to batch for normalization
         ### not overrideing but x_t
 
@@ -894,32 +915,45 @@ class FlowMatching(nn.Module):
 
         return preds # B N C
 
-    def set_velocity_stats(self, offset, scale):
-        self.velocity_model = VelocityWrapper(self.model, self.target_var, offset=offset, scale=scale)
+    def set_velocity_stats(self, offset, scale, delta_offset, delta_scale, batch):
+        static_batch = {}
+        for v in self.model.input_vars:
+            print(f"input_vars: {v}")
+            if v not in self.target_vars:
+                static_batch[v] = batch[v]
+        print(f"static_batch keys: {list(static_batch.keys())}")       
+        
+        self.velocity_model = VelocityWrapper(self.model, self.target_vars,
+                                              offset=offset, scale=scale,
+                                              delta_offset=delta_offset, delta_scale=delta_scale,
+                                              static_batch=static_batch)
         self.solver.velocity_model = self.velocity_model
 
 
     def inference_forward(self, batch):
         # sample noise to get x0 # B N C
-        all_levels = batch[self.target_var] # B N C
-        x_init = torch.randn(*all_levels.shape, device=batch[self.target_var].device)
-        #surface_level = batch[self.target_var][:,:,0:1] # B N 1
-        #x_init = torch.randn(*surface_level.shape, device=batch[self.target_var].device)
+        all_levels = batch[self.target_vars] # B N C
+        x_init = torch.randn(*all_levels.shape, device=batch[self.target_vars].device)
+        #surface_level = batch[self.target_vars][:,:,0:1] # B N 1
+        #x_init = torch.randn(*surface_level.shape, device=batch[self.target_vars].device)
 
         # get timesteps for integration T
         time_grid = torch.linspace(0, 1, steps=10, device=x_init.device)
 
         # UNet expects normalization parameters
         self.set_velocity_stats(
-            batch[f"{self.target_var}_offset"],
-            batch[f"{self.target_var}_scale"]
+            batch[f"{self.target_vars}_offset"],
+            batch[f"{self.target_vars}_scale"],
+            batch[f"{self.target_vars}_delta_offset"],
+            batch[f"{self.target_vars}_delta_scale"],
+            batch
         )
 
         print("x_init:", x_init.shape)
         print("time_grid:", time_grid.shape)
-        print("target_var:", batch[self.target_var].shape)
-        print("offset:", batch[f"{self.target_var}_offset"].shape)
-        print("scale:", batch[f"{self.target_var}_scale"].shape)
+        print("target_vars:", batch[self.target_vars].shape)
+        print("offset:", batch[f"{self.target_vars}_offset"].shape)
+        print("scale:", batch[f"{self.target_vars}_scale"].shape)
 
         # solve the ODE to get the trajectory
         sol = self.solver.sample(time_grid=time_grid,
@@ -963,10 +997,7 @@ with torch.no_grad():
 #         }
 # same for scale
 
-# %%
-## write timeline with steps to archive and how to deal with problems
-
-# %%
-
+# %% [markdown]
+# 
 
 
