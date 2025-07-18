@@ -1,4 +1,6 @@
 # %%
+from typing import Optional, Dict
+
 # neural_transport
 from neural_transport.models import MODELS
 #from neural_transport.models.regulargrid import RegularGridModel
@@ -17,6 +19,7 @@ from neural_transport.datamodule import CarbonDataModule
 
 # plotting
 import matplotlib.pyplot as plt
+from matplotlib import cm
 
 # torch
 import pytorch_lightning as pl
@@ -206,12 +209,7 @@ class RegularGridModel(nn.Module):
             [batch[v] for v in self.target_vars],
             dim=-1,
         )
-        missing = [f"{v}_delta_offset" for v in self.target_vars if f"{v}_delta_offset" not in batch]
-        if missing:
-            print("Missing in batch:", missing)
-            print(batch.keys())
-            print(self.target_vars)
-
+        
         x_grid_delta_offset = torch.cat(
             [
                 (batch[f"{v}_delta_offset"]).expand_as(batch[v])
@@ -248,7 +246,7 @@ class RegularGridModel(nn.Module):
             C = batch[v].shape[-1]
             preds[v] = x_out_next[..., i : i + C]
             i += C
-
+        
         for molecule in self.molecules:
 
             # mass_pred_pre_fixer = (
@@ -814,40 +812,43 @@ plt.tight_layout()
 plt.show()
 
 
+# %% [markdown]
+# Should this not show for $t$ close to $0$ just pure noise and for $t$ close to $1$ some identifiable world map?
+
 # %%
 class VelocityWrapper(nn.Module):
-    def __init__(self, model, target_vars,
-                 offset=None, scale=None,
-                 delta_offset=None, delta_scale=None,
-                 static_batch=None
-                 ):
+    def __init__(
+        self,
+        model: nn.Module,
+        target_vars: str,
+        offset: Optional[torch.Tensor] = None,
+        scale: Optional[torch.Tensor] = None,
+        delta_offset: Optional[torch.Tensor] = None,
+        delta_scale: Optional[torch.Tensor] = None,
+        static_batch: Optional[Dict[str, torch.Tensor]] = None,
+    ):
         super().__init__()
         self.model = model
         self.target_vars = target_vars
+
         self.offset = offset
         self.scale = scale
         self.delta_offset = delta_offset
         self.delta_scale = delta_scale
-        self.static_batch = static_batch or {}
-        
 
-    def forward(self, x, t):
+        self.static_batch = static_batch or {}
+
+    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         batch_vf = {
             self.target_vars: x,
             "flow_time": t,
+            f"{self.target_vars}_offset": self.offset,
+            f"{self.target_vars}_scale": self.scale,
+            f"{self.target_vars}_delta_offset": self.delta_offset,
+            f"{self.target_vars}_delta_scale": self.delta_scale,
         }
 
-        if self.offset is not None:
-            batch_vf[f"{self.target_vars}_offset"] = self.offset
-        if self.scale is not None:
-            batch_vf[f"{self.target_vars}_scale"] = self.scale
-        if self.delta_offset is not None:
-            batch_vf[f"{self.target_vars}_delta_offset"] = self.delta_offset
-        if self.delta_scale is not None:
-            batch_vf[f"{self.target_vars}_delta_scale"] = self.delta_scale
-            
         batch_vf.update(self.static_batch)
-        print(f"batch_vf keys: {list(batch_vf.keys())}")
         out = self.model(batch_vf)
         return out[self.target_vars]
 
@@ -916,23 +917,25 @@ class FlowMatching(nn.Module):
         return preds # B N C
 
     def set_velocity_stats(self, offset, scale, delta_offset, delta_scale, batch):
-        static_batch = {}
-        for v in self.model.input_vars:
-            print(f"input_vars: {v}")
-            if v not in self.target_vars:
-                static_batch[v] = batch[v]
-        print(f"static_batch keys: {list(static_batch.keys())}")       
-        
-        self.velocity_model = VelocityWrapper(self.model, self.target_vars,
-                                              offset=offset, scale=scale,
-                                              delta_offset=delta_offset, delta_scale=delta_scale,
-                                              static_batch=static_batch)
+        static_batch = batch
+        # for v in self.model.input_vars:
+        #     print(f"input_vars: {v}")
+        #     if v not in self.target_vars:
+        #         static_batch[v] = batch[v]        
+        self.velocity_model = VelocityWrapper(
+            self.model,
+            self.target_vars,
+            offset=offset, scale=scale,
+            delta_offset=delta_offset, delta_scale=delta_scale,
+            static_batch=static_batch
+        )
         self.solver.velocity_model = self.velocity_model
 
 
     def inference_forward(self, batch):
         # sample noise to get x0 # B N C
-        all_levels = batch[self.target_vars] # B N C
+        
+         # B N C
         x_init = torch.randn(*all_levels.shape, device=batch[self.target_vars].device)
         #surface_level = batch[self.target_vars][:,:,0:1] # B N 1
         #x_init = torch.randn(*surface_level.shape, device=batch[self.target_vars].device)
@@ -948,12 +951,6 @@ class FlowMatching(nn.Module):
             batch[f"{self.target_vars}_delta_scale"],
             batch
         )
-
-        print("x_init:", x_init.shape)
-        print("time_grid:", time_grid.shape)
-        print("target_vars:", batch[self.target_vars].shape)
-        print("offset:", batch[f"{self.target_vars}_offset"].shape)
-        print("scale:", batch[f"{self.target_vars}_scale"].shape)
 
         # solve the ODE to get the trajectory
         sol = self.solver.sample(time_grid=time_grid,
@@ -996,6 +993,30 @@ with torch.no_grad():
 #             for k in self.stats_ds.data_vars.keys()  !!!!!! instead of e.g. self.vars
 #         }
 # same for scale
+
+# %%
+# sol.shape: (T=10, B=64, N=2048, C=10) -> one batch (B=0), surface level (C=0)
+sol_surface = sol[:, 0, :, 0]  # shape: [T, N]
+
+# reshape to 2D grid (assuming [lat=32, lon=64])
+lat, lon = 32, 64
+sol_surface_2d = sol_surface.reshape((10, lat, lon))  # shape: [T, lat, lon]
+
+# plot
+fig, axs = plt.subplots(1, 10, figsize=(20, 2))
+
+vmin, vmax = -5, 5
+for i in range(10):
+    im = axs[i].imshow(sol_surface_2d[i], cmap="viridis", vmin=vmin, vmax=vmax)
+    axs[i].set_title(f"t = {i/9:.2f}")
+    axs[i].axis("off")
+
+plt.tight_layout()
+plt.colorbar(im, ax=axs, orientation='horizontal', fraction=0.05, pad=0.05)
+plt.show()
+
+# %% [markdown]
+# Haha, seem's like it works not at all
 
 # %% [markdown]
 # 
