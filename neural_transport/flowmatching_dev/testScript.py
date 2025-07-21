@@ -21,6 +21,9 @@ from neural_transport.datamodule import CarbonDataModule
 import matplotlib.pyplot as plt
 from matplotlib import cm
 
+# numpy
+import numpy as np
+
 # torch
 import pytorch_lightning as pl
 import torch
@@ -48,6 +51,7 @@ class RegularGridModel(nn.Module):
         target_vars=[],
         nlat=45,
         nlon=72,
+        nlev=None,
         predict_delta=False,
         add_surfflux=False,
         massfixer=None,
@@ -65,6 +69,7 @@ class RegularGridModel(nn.Module):
 
         self.nlat = nlat
         self.nlon = nlon
+        self.nlev = nlev
         self.input_vars = input_vars
         self.target_vars = target_vars
 
@@ -108,9 +113,8 @@ class RegularGridModel(nn.Module):
     def normalize_batch(self, batch):
         batch_normalized = {}
         vars_to_normalize = self.input_vars
-        
         for v in vars_to_normalize:
-            print(f"input: {v}")
+            # print(f"input: {v}")
             if v not in batch:
                 print(f"WARNING: skipping {v}, missing in batch")
                 continue
@@ -166,7 +170,7 @@ class RegularGridModel(nn.Module):
         
         batch_normalized = {}
         for v in self.target_vars:
-            print(f"target: {v}")
+            # print(f"target: {v}")
             for suffix in ['', '_next']:
                 key = f"{v}{suffix}"
                 if key in batch:
@@ -632,6 +636,7 @@ model_kwargs = dict(
     target_vars=TARGET_VARS,
     nlat=len(lat),
     nlon=len(lon),
+    nlev=nlev,
     predict_delta=True,
     add_surfflux=True,
     dt=60 * 60 * 6,
@@ -648,6 +653,8 @@ print(f"Length of 3D forcing variables: {len(FORCING_VARS_3D)}")
 print(f"Length of all forcing variables: {len(FORCING_VARS_1D)} + {len(FORCING_VARS_2D)} + {nlev} * {len(FORCING_VARS_3D)} = {LEN_ALL_FORCING_VARS}")
 print(f"Length of all target variables: {LEN_ALL_TARGET_VARS}")
 print(f"Length of all variables: {LEN_ALL_VARS}")
+
+print(f"Latitude: {model_kwargs['nlat']}, Longitude: {model_kwargs['nlon']}")
 
 # %%
 # train UNet parameters 2/2
@@ -692,6 +699,35 @@ data_kwargs = dict(
     compute=False,
     # time_interval=["1990-01-01", "2014-12-31"],
 )
+
+# %%
+required_vars = ["x_t", "flow_time"]
+input_vars = model_kwargs.get("input_vars", [])
+print(f"Input variables: {input_vars}")
+for var in reversed(required_vars):
+    if var not in input_vars:
+        input_vars.insert(0, var)
+print(f"Input variables after adding required vars: {input_vars}")
+
+
+model_kwargs["input_vars"] = input_vars
+model_kwargs["model_kwargs"]["in_chans"] += 1 + nlev * 1 # + 1 for flow_time, + nlev for co2massmix
+
+# %%
+# required_input_vars = ["flow_time"]
+# input_vars = model_kwargs.get("input_vars", [])
+# print(f"Input variables: {input_vars}")
+# for var in reversed(required_input_vars):
+#     if var not in input_vars:
+#         input_vars.insert(0, var)
+# print(f"Input variables after adding required vars: {input_vars}")
+# required_target_vars = ["x_t"]
+# target_vars = model_kwargs.get("target_vars", [])
+# print(f"Target variables: {target_vars}")
+# for var in reversed(required_target_vars):
+#     if var not in target_vars:
+#         target_vars.insert(0, var)
+# print(f"Target variables after adding required vars: {target_vars}")
 
 # %%
 # instantiate UNet model
@@ -785,8 +821,16 @@ path_sample = path.sample(
         )
 
 # %%
+t_expanded = t[:, None, None].expand(x_1.shape[0], x_1.shape[1], 1)
+
 batch_pred = batch.copy()
-batch_pred[self.model.target_vars[0]] = path_sample.x_t + x_0
+batch_pred["flow_time"] = t_expanded
+batch_pred["flow_time_offset"] = torch.zeros_like(t_expanded)
+batch_pred["flow_time_scale"] = torch.ones_like(t_expanded)
+
+batch_pred["x_t"] = path_sample.x_t + x_0
+batch_pred["x_t_offset"] = torch.zeros_like(batch_pred["x_t"])
+batch_pred["x_t_scale"] = batch_pred["x_t"].std(dim=(1, 2), keepdim=True)
 
 preds = self.model(batch_pred)
 
@@ -795,7 +839,9 @@ var = self.model.target_vars[0]
 x_pred = preds[var]
 
 # %%
-choose = [4, 7, 11, 38, 32, 39, 50, 55, 56]
+choose = [i*10 for i in range((x_0.shape[0]+10)//10)]
+min_max = [np.argmin(t).item(), np.argmax(t).item()]
+choose += min_max
 
 fig, axes = plt.subplots(3, 3, figsize=(12, 6))
 
@@ -863,13 +909,21 @@ class FlowMatching(nn.Module):
             step_size=0.01
             ):
         super().__init__()
-        ## alter input variables to always contain x_t and t
+
+        required_input_vars = ["x_t", "flow_time"]
+        input_vars = model_kwargs.get("input_vars", [])
+        for var in reversed(required_input_vars):
+            if var not in input_vars:
+                input_vars.insert(0, var)
+        model_kwargs["input_vars"] = input_vars
+        model_kwargs["model_kwargs"]["in_chans"] += 1 + nlev * 1 # + 1 for flow_time, + nlev for co2massmix
+
         self.model = model # MODELS[model](**model_kwargs)
         self.return_intermediates = return_intermediates
         self.method = method
         self.step_size = step_size
         self.path = AffineProbPath(scheduler=CondOTScheduler())
-        self.target_vars = self.model.target_vars[0] ### Here target_vars[0] is supposed to be 'co2massmix'
+        self.target_vars = self.model.target_vars[0] # Here target_vars[0] is supposed to be "co2massmix"
         self.velocity_model = VelocityWrapper(self.model, self.target_vars)
         self.solver = ODESolver(velocity_model=self.velocity_model)
 
@@ -882,18 +936,21 @@ class FlowMatching(nn.Module):
 
 
     def training_forward(self, batch):
-        # extract target_vars to get x1 and normalize # B N C
+        # extract target_vars to get x_1 and normalize, [B N C]
         x_1 = batch[f"{self.target_vars}_next"]
         batch_normalized = self.model.normalize_batch_target_vars(batch)
         x_1_normalized = batch_normalized[f"{self.target_vars}_next"]
 
-        # sample noise [B N C]
+        # sample noise  x_0 ~ N(0, I), [B N C]
         x_0 = torch.randn_like(x_1, device=x_1.device)
 
-        # sample time [B]
-        t = torch.rand(x_1.shape[0], device=x_1.device)
-        batch["flow_time"] = t
-        ### add offset and scale to batch for normalization
+        # sample time t \in [0,1], [B] -> [B N 1]
+        B, N, _ = x_1.shape
+        t = torch.rand(B, device=x_1.device)
+        t_expanded = t[:, None, None].expand(B, N, 1)  # expand [B N 1] to match x_1 shape
+        batch["flow_time"] = t_expanded
+        batch["flow_time_offset"] = torch.zeros_like(t_expanded)
+        batch["flow_time_scale"] = torch.ones_like(t_expanded)
 
         # sample path
         path_sample = self.path.sample(
@@ -903,18 +960,21 @@ class FlowMatching(nn.Module):
         )
 
         # compute flow matching loss and add denormalized x_1
-        batch_pred = batch.copy()
-        batch_pred[self.target_vars] = path_sample.x_t + x_0
-        ### add offset and scale to batch for normalization
-        ### not overrideing but x_t
+        # access scheduler for affine path
+        scheduler_out = self.path.scheduler(t)
+        d_sigma_t = scheduler_out.d_sigma_t.view(-1, 1, 1)
+        d_alpha_t = scheduler_out.d_alpha_t.view(-1, 1, 1)
 
-        # (path_sample.x_t + - dt_sigma * x_0) / dt_alpha
-        ### How to obtain dt_sigma and dt_alpha from the path?
-        preds = self.model(batch_pred)
-        # preds = self.model(path_sample.x_t, path_sample.t) + x_1
+        batch["x_t"] = (path_sample.x_t - d_sigma_t * x_0) / d_alpha_t
+        # path_sample.x_t + x_0 (simplified version)
+        batch["x_t_offset"] = torch.zeros_like(batch["x_t"])
+        batch["x_t_scale"] = batch["x_t"].std(dim=(1, 2), keepdim=True)
+        ### why dim=(1, 2) everywhere? why not over the entire batch?
+        preds = self.model(batch)
+        # preds = self.model(path_sample.x_t + x_0, path_sample.t)
         ### UNet does not take t as input yet
 
-        return preds # B N C
+        return preds # [B N C]
 
     def set_velocity_stats(self, offset, scale, delta_offset, delta_scale, batch):
         static_batch = batch
@@ -933,14 +993,13 @@ class FlowMatching(nn.Module):
 
 
     def inference_forward(self, batch):
-        # sample noise to get x0 # B N C
-        
-         # B N C
+        # sample noise to get x0 [B N C]
+        all_levels = batch[self.target_vars] # [B N C]
         x_init = torch.randn(*all_levels.shape, device=batch[self.target_vars].device)
-        #surface_level = batch[self.target_vars][:,:,0:1] # B N 1
+        #surface_level = batch[self.target_vars][:,:,0:1] # [B N 1]
         #x_init = torch.randn(*surface_level.shape, device=batch[self.target_vars].device)
 
-        # get timesteps for integration T
+        # get timesteps for integration [T]
         time_grid = torch.linspace(0, 1, steps=10, device=x_init.device)
 
         # UNet expects normalization parameters
@@ -998,8 +1057,8 @@ with torch.no_grad():
 # sol.shape: (T=10, B=64, N=2048, C=10) -> one batch (B=0), surface level (C=0)
 sol_surface = sol[:, 0, :, 0]  # shape: [T, N]
 
-# reshape to 2D grid (assuming [lat=32, lon=64])
-lat, lon = 32, 64
+# reshape to 2D grid [lat=32, lon=64]
+lat, lon = model_kwargs['nlat'], model_kwargs['nlon']
 sol_surface_2d = sol_surface.reshape((10, lat, lon))  # shape: [T, lat, lon]
 
 # plot
@@ -1018,7 +1077,7 @@ plt.show()
 # %% [markdown]
 # Haha, seem's like it works not at all
 
-# %% [markdown]
-# 
+# %%
+
 
 
