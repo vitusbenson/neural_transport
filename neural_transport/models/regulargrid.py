@@ -18,6 +18,7 @@ class RegularGridModel(nn.Module):
         target_vars=[],
         nlat=45,
         nlon=72,
+        nlev=None,
         predict_delta=False,
         add_surfflux=False,
         massfixer=None,
@@ -35,6 +36,7 @@ class RegularGridModel(nn.Module):
 
         self.nlat = nlat
         self.nlon = nlon
+        self.nlev = nlev
         self.input_vars = input_vars
         self.target_vars = target_vars
 
@@ -76,15 +78,37 @@ class RegularGridModel(nn.Module):
         preds = self.postprocess_outputs(x_out, batch)
         return preds
 
-    def preprocess_inputs(self, batch):
-
+    def normalize_batch(self, batch):
         batch_normalized = {}
-        for v in self.input_vars:
-            x_in_curr = (batch[v] - batch[f"{v}_offset"]) / batch[f"{v}_scale"]
+        vars_to_normalize = self.input_vars
+        for v in vars_to_normalize:
+            # print(f"input: {v}")
+            if v not in batch:
+                print(f"WARNING: skipping {v}, missing in batch")
+                continue
+
+            try:
+                offset = batch[f"{v}_offset"]
+                scale = batch[f"{v}_scale"]
+            except KeyError as e:
+                raise KeyError(
+                    f"Missing offset/scale for input variable '{v}' during normalization: {e}."
+                    f"Expected keys: {v}_offset, {v}_scale. "
+                    f"Available keys: {list(batch.keys())}"
+                )
+            
+            x_in_curr = (batch[v] - offset) / scale
+
             if self.targshift and (v in self.target_vars):
                 batch_normalized[v] = x_in_curr - x_in_curr.mean((1, 2), keepdim=True)
             else:
                 batch_normalized[v] = x_in_curr
+
+        return batch_normalized
+
+    def preprocess_inputs(self, batch):
+
+        batch_normalized = self.normalize_batch(batch)
 
         x_in = torch.cat(list(batch_normalized.values()), dim=-1)
 
@@ -110,6 +134,24 @@ class RegularGridModel(nn.Module):
 
         return x_in
 
+    def normalize_batch_target_vars(self, batch):
+        
+        batch_normalized = {}
+        for v in self.target_vars:
+            # print(f"target: {v}")
+            for suffix in ['', '_next']:
+                key = f"{v}{suffix}"
+                if key in batch:
+                    mean = batch[f"{v}_offset"]
+                    std = batch[f"{v}_scale"]
+                    x_in_curr = (batch[key] - mean) / std
+                if self.targshift:
+                    batch_normalized[key] = x_in_curr - x_in_curr.mean((1, 2), keepdim=True)
+                else:
+                    batch_normalized[key] = x_in_curr
+
+        return batch_normalized
+    
     def postprocess_outputs(self, x_out, batch):
 
         B, N, _ = batch[self.target_vars[0]].shape

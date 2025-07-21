@@ -3,7 +3,7 @@ from neural_transport.models.gnn.graphcast import GraphCast
 from neural_transport.models.sfno import SFNO
 from neural_transport.models.swintransformer import SwinTransformer
 from neural_transport.models.unet import UNet
-#from neural_transport.models.flowmatching import FlowMatching
+from neural_transport.models.flowmatching import FlowMatching
 
 MODELS = {
     "gnn": GraphTM,
@@ -11,5 +11,5 @@ MODELS = {
     "sfno": SFNO,
     "swintransformer": SwinTransformer,
     "graphcast": GraphCast,
-    #"flowmatching": FlowMatching
+    "flowmatching": FlowMatching,
 }
