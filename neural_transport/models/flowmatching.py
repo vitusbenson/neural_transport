@@ -11,7 +11,7 @@ from flow_matching.path import AffineProbPath
 from flow_matching.solver import ODESolver
 
 # neural_transport
-from neural_transport.models import MODELS
+from neural_transport.models.unet import UNet
 
 class VelocityWrapper(nn.Module):
     def __init__(
@@ -53,7 +53,7 @@ class VelocityWrapper(nn.Module):
 class FlowMatching(nn.Module):
     def __init__(
             self,
-            model="unet",
+            # model="unet",
             model_kwargs={},
             return_intermediates=False,
             method='midpoint',
@@ -66,18 +66,21 @@ class FlowMatching(nn.Module):
         for var in reversed(required_input_vars):
             if var not in input_vars:
                 input_vars.insert(0, var)
-        model_kwargs["input_vars"] = input_vars
-        model_kwargs["model_kwargs"]["in_chans"] += 1 + model_kwargs["nlev"] * 1 # + 1 for flow_time, + nlev for co2massmix
+        
+        if "model_kwargs" in model_kwargs:
+            sub_kwargs = model_kwargs["model_kwargs"]
+        else:
+            sub_kwargs = model_kwargs
 
-        self.model = MODELS[model](**model_kwargs)
+        sub_kwargs["input_vars"] = input_vars
+        sub_kwargs["in_chans"] += 1 + sub_kwargs["nlev"] * 1 # + 1 for flow_time, + nlev for co2massmix
+
+        self.model = UNet(**sub_kwargs) # MODELS[model](**model_kwargs)
         self.return_intermediates = return_intermediates
         self.method = method
         self.step_size = step_size
         self.path = AffineProbPath(scheduler=CondOTScheduler())
         self.target_vars = self.model.target_vars[0] # Here target_vars[0] is supposed to be "co2massmix"
-        self.velocity_model = VelocityWrapper(self.model, self.target_vars)
-        self.solver = ODESolver(velocity_model=self.velocity_model)
-
 
     def forward(self, batch):
         if self.training:
@@ -125,21 +128,16 @@ class FlowMatching(nn.Module):
 
         return preds # [B N C]
 
-    def set_velocity_stats(self, offset, scale, delta_offset, delta_scale, batch):
-        static_batch = batch
-        # for v in self.model.input_vars:
-        #     print(f"input_vars: {v}")
-        #     if v not in self.target_vars:
-        #         static_batch[v] = batch[v]        
-        self.velocity_model = VelocityWrapper(
+    def return_velocity_wrapper(self, offset, scale, delta_offset, delta_scale, batch):
+        return VelocityWrapper(
             self.model,
             self.target_vars,
-            offset=offset, scale=scale,
-            delta_offset=delta_offset, delta_scale=delta_scale,
-            static_batch=static_batch
+            offset=offset,
+            scale=scale,
+            delta_offset=delta_offset,
+            delta_scale=delta_scale,
+            static_batch=batch
         )
-        self.solver.velocity_model = self.velocity_model
-
 
     def inference_forward(self, batch):
         # sample noise to get x0 [B N C]
@@ -152,7 +150,7 @@ class FlowMatching(nn.Module):
         time_grid = torch.linspace(0, 1, steps=10, device=x_init.device)
 
         # UNet expects normalization parameters
-        self.set_velocity_stats(
+        velocity_model = self.return_velocity_wrapper(
             batch[f"{self.target_vars}_offset"],
             batch[f"{self.target_vars}_scale"],
             batch[f"{self.target_vars}_delta_offset"],
@@ -161,7 +159,8 @@ class FlowMatching(nn.Module):
         )
 
         # solve the ODE to get the trajectory
-        sol = self.solver.sample(time_grid=time_grid,
+        solver = ODESolver(velocity_model=velocity_model)
+        sol = solver.sample(time_grid=time_grid,
                                  x_init=x_init, method=self.method,
                                  step_size=self.step_size,
                                  return_intermediates=self.return_intermediates

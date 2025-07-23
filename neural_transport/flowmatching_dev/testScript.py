@@ -2,7 +2,7 @@
 from typing import Optional, Dict
 
 # neural_transport
-from neural_transport.models import MODELS
+from neural_transport.models.unet import UNet
 #from neural_transport.models.regulargrid import RegularGridModel
 #from neural_transport.models.unet import UNet
 from neural_transport.models.layers import (
@@ -139,7 +139,7 @@ class RegularGridModel(nn.Module):
         return batch_normalized
 
     def preprocess_inputs(self, batch):
-
+        print("preprocess inputs")
         batch_normalized = self.normalize_batch(batch)
 
         x_in = torch.cat(list(batch_normalized.values()), dim=-1)
@@ -187,7 +187,7 @@ class RegularGridModel(nn.Module):
     def postprocess_outputs(self, x_out, batch):
 
         B, N, _ = batch[self.target_vars[0]].shape
-
+        print("postprocess outputs")
         if self.horizontal_interpolation == "multiscale_encoder":
             x_out = self.multiscale_decoder(x_out)
         elif self.horizontal_interpolation is not None:
@@ -391,8 +391,6 @@ class PeriodicPadding(nn.Module):
         )
 
         return x
-# J: Basically mimicks that the earth is a cylinder.
-# J: But is x not just replaced instead of added?
 
 class ResBlock(nn.Module):
 
@@ -573,7 +571,6 @@ TARGET_VARS = ["co2massmix"]
 FORCING_VARS_1D = [
     # "flow_time"
 ]
-
 # Uncomment for conditional Flow Matching
 FORCING_VARS_2D = [
     # "blh",
@@ -641,8 +638,11 @@ model_kwargs = dict(
     add_surfflux=True,
     dt=60 * 60 * 6,
     massfixer="scale",
-    targshift=True,
-    # time_embedding=False
+    targshift=True, ### does this make sense?
+    ### Where should they be added?
+    # return_intermediates=False,
+    # method="midpoint",
+    # step_size=0.05,
 )
 
 # %%
@@ -701,59 +701,11 @@ data_kwargs = dict(
 )
 
 # %%
-required_vars = ["x_t", "flow_time"]
-input_vars = model_kwargs.get("input_vars", [])
-print(f"Input variables: {input_vars}")
-for var in reversed(required_vars):
-    if var not in input_vars:
-        input_vars.insert(0, var)
-print(f"Input variables after adding required vars: {input_vars}")
-
-
-model_kwargs["input_vars"] = input_vars
-model_kwargs["model_kwargs"]["in_chans"] += 1 + nlev * 1 # + 1 for flow_time, + nlev for co2massmix
-
-# %%
-# required_input_vars = ["flow_time"]
-# input_vars = model_kwargs.get("input_vars", [])
-# print(f"Input variables: {input_vars}")
-# for var in reversed(required_input_vars):
-#     if var not in input_vars:
-#         input_vars.insert(0, var)
-# print(f"Input variables after adding required vars: {input_vars}")
-# required_target_vars = ["x_t"]
-# target_vars = model_kwargs.get("target_vars", [])
-# print(f"Target variables: {target_vars}")
-# for var in reversed(required_target_vars):
-#     if var not in target_vars:
-#         target_vars.insert(0, var)
-# print(f"Target variables after adding required vars: {target_vars}")
-
-# %%
-# instantiate UNet model
-
-model = UNet(**model_kwargs)
-
-# mimick FlowMatching
-
-class Cheating:
-    def __init__(self):
-        pass
-self = Cheating()
-self.model = model
-
-# %%
 dset = CarbonDataModule(**data_kwargs)
 dset
 
 # %%
-dir(dset)
-
-# %%
 dset.setup('fit')
-
-# %%
-dir(dset)
 
 # %%
 dset.val_dataset
@@ -769,97 +721,6 @@ batch
 
 # %%
 batch.keys()
-
-# %%
-batch['co2massmix'].shape
-
-# %%
-x_1 = batch[f"{self.model.target_vars[0]}_next"]
-x_1.shape
-
-# %%
-plt.imshow(x_1[0,:,0].reshape(32, 64).numpy()[::-1])
-
-# %%
-min_val = x_1.min()
-max_val = x_1.max()
-
-print(min_val, max_val)
-
-# %%
-batch_normalized = self.model.normalize_batch_target_vars(batch)
-x_1_normalized = batch_normalized[f"{self.model.target_vars[0]}_next"]
-min_normalized = x_1_normalized.min()
-max_normalized = x_1_normalized.max()
-
-print(min_normalized, max_normalized)
-print(self.model.target_vars)
-print(batch_normalized.keys())
-
-plt.imshow(x_1_normalized[0,:,0].reshape(32, 64).numpy()[::-1])
-
-
-# %%
-x_0 = torch.randn_like(x_1, device=x_1.device)
-plt.imshow(x_0[0,:,0].reshape(32, 64).numpy()[::-1])
-
-# %%
-t = torch.rand(x_1.shape[0], device=x_1.device)
-plt.figure(figsize=(10, 4))
-plt.bar(range(len(t)), t.cpu().numpy())
-plt.xlabel('Batch Index')
-plt.ylabel('Time Value')
-plt.title('Random Time Values per Batch Sample')
-plt.show()
-
-# %%
-path = AffineProbPath(scheduler=CondOTScheduler())
-path_sample = path.sample(
-            t=t,
-            x_0=x_0,
-            x_1=x_1_normalized
-        )
-
-# %%
-t_expanded = t[:, None, None].expand(x_1.shape[0], x_1.shape[1], 1)
-
-batch_pred = batch.copy()
-batch_pred["flow_time"] = t_expanded
-batch_pred["flow_time_offset"] = torch.zeros_like(t_expanded)
-batch_pred["flow_time_scale"] = torch.ones_like(t_expanded)
-
-batch_pred["x_t"] = path_sample.x_t + x_0
-batch_pred["x_t_offset"] = torch.zeros_like(batch_pred["x_t"])
-batch_pred["x_t_scale"] = batch_pred["x_t"].std(dim=(1, 2), keepdim=True)
-
-preds = self.model(batch_pred)
-
-# %%
-var = self.model.target_vars[0]
-x_pred = preds[var]
-
-# %%
-choose = [i*10 for i in range((x_0.shape[0]+10)//10)]
-min_max = [np.argmin(t).item(), np.argmax(t).item()]
-choose += min_max
-
-fig, axes = plt.subplots(3, 3, figsize=(12, 6))
-
-for i in range(3):
-    for j in range(3):
-        ax = axes[i,j]
-        batch_index = choose[j + i*3]
-        im = ax.imshow(x_pred[batch_index,:,0].reshape(32, 64).detach().numpy()[::-1])
-        ax.set_title(f"Predicted {var} at t={t[batch_index].item():.2f}")
-        ax.axis('off')
-        fig.colorbar(im, ax=ax, orientation='vertical', fraction=0.046, pad=0.04)
-
-plt.tight_layout()
-plt.show()
-
-
-# %% [markdown]
-# Should this not show for $t$ close to $0$ just pure noise and for $t$ close to $1$ some identifiable world map?
 
 # %%
 class VelocityWrapper(nn.Module):
@@ -890,11 +751,12 @@ class VelocityWrapper(nn.Module):
             "flow_time": t,
             f"{self.target_vars}_offset": self.offset,
             f"{self.target_vars}_scale": self.scale,
-            f"{self.target_vars}_delta_offset": self.delta_offset,
-            f"{self.target_vars}_delta_scale": self.delta_scale,
+            #f"{self.target_vars}_delta_offset": self.delta_offset,
+            #f"{self.target_vars}_delta_scale": self.delta_scale,
         }
 
         batch_vf.update(self.static_batch)
+        print("VelocityWrapper")
         out = self.model(batch_vf)
         return out[self.target_vars]
 
@@ -902,8 +764,8 @@ class VelocityWrapper(nn.Module):
 class FlowMatching(nn.Module):
     def __init__(
             self,
-            model="unet",
-            # model_kwargs={},
+            # model="unet",
+            model_kwargs={},
             return_intermediates=False,
             method='midpoint',
             step_size=0.01
@@ -918,15 +780,13 @@ class FlowMatching(nn.Module):
         model_kwargs["input_vars"] = input_vars
         model_kwargs["model_kwargs"]["in_chans"] += 1 + nlev * 1 # + 1 for flow_time, + nlev for co2massmix
 
-        self.model = model # MODELS[model](**model_kwargs)
+        self.model = UNet(**model_kwargs) # model
         self.return_intermediates = return_intermediates
         self.method = method
         self.step_size = step_size
         self.path = AffineProbPath(scheduler=CondOTScheduler())
         self.target_vars = self.model.target_vars[0] # Here target_vars[0] is supposed to be "co2massmix"
-        self.velocity_model = VelocityWrapper(self.model, self.target_vars)
-        self.solver = ODESolver(velocity_model=self.velocity_model)
-
+        # self.velocity_model = VelocityWrapper(self.model, self.target_vars)
 
     def forward(self, batch):
         if self.training:
@@ -971,26 +831,19 @@ class FlowMatching(nn.Module):
         batch["x_t_scale"] = batch["x_t"].std(dim=(1, 2), keepdim=True)
         ### why dim=(1, 2) everywhere? why not over the entire batch?
         preds = self.model(batch)
-        # preds = self.model(path_sample.x_t + x_0, path_sample.t)
-        ### UNet does not take t as input yet
 
         return preds # [B N C]
 
-    def set_velocity_stats(self, offset, scale, delta_offset, delta_scale, batch):
-        static_batch = batch
-        # for v in self.model.input_vars:
-        #     print(f"input_vars: {v}")
-        #     if v not in self.target_vars:
-        #         static_batch[v] = batch[v]        
-        self.velocity_model = VelocityWrapper(
+    def return_velocity_wrapper(self, offset, scale, delta_offset, delta_scale, batch):
+        return VelocityWrapper(
             self.model,
             self.target_vars,
-            offset=offset, scale=scale,
-            delta_offset=delta_offset, delta_scale=delta_scale,
-            static_batch=static_batch
+            offset=offset,
+            scale=scale,
+            delta_offset=delta_offset,
+            delta_scale=delta_scale,
+            static_batch=batch
         )
-        self.solver.velocity_model = self.velocity_model
-
 
     def inference_forward(self, batch):
         # sample noise to get x0 [B N C]
@@ -1003,7 +856,7 @@ class FlowMatching(nn.Module):
         time_grid = torch.linspace(0, 1, steps=10, device=x_init.device)
 
         # UNet expects normalization parameters
-        self.set_velocity_stats(
+        velocity_model = self.return_velocity_wrapper(
             batch[f"{self.target_vars}_offset"],
             batch[f"{self.target_vars}_scale"],
             batch[f"{self.target_vars}_delta_offset"],
@@ -1012,12 +865,25 @@ class FlowMatching(nn.Module):
         )
 
         # solve the ODE to get the trajectory
-        sol = self.solver.sample(time_grid=time_grid,
-                                 x_init=x_init, method=self.method,
-                                 step_size=self.step_size,
-                                 return_intermediates=self.return_intermediates
-                                )
-        # denormalize sol
+        solver = ODESolver(velocity_model=velocity_model)
+        print("Start solver")
+        sol = solver.sample(time_grid=time_grid,
+                            x_init=x_init, method=self.method,
+                            step_size=self.step_size,
+                            return_intermediates=self.return_intermediates
+        )
+        print("End solver")
+        # denormalize the solution
+        ### though RegularGridModel already does this. Can it handle intermediates?
+        # if self.return_intermediates:
+        #     denormalized_sol = []
+        #     for t in sol:   # t: [B N C]
+        #         t_denorm = (t * batch[f"{self.target_vars}_scale"]) + batch[f"{self.target_vars}_offset"]
+        #         denormalized_sol.append(t_denorm)
+        #     sol = torch.stack(denormalized_sol, dim=0)  # sol: [T B N C]
+        # else:
+        #     sol = (sol * batch[f"{self.target_vars}_scale"]) + batch[f"{self.target_vars}_offset"]
+
         return sol
     
     #def inference_obs_forward(self, batch):
@@ -1025,10 +891,11 @@ class FlowMatching(nn.Module):
 
 # %%
 flow = FlowMatching(
-    model=model,
+    # model="unet",
+    model_kwargs=model_kwargs,
     return_intermediates=True,
     method='midpoint',
-    step_size=0.01,
+    step_size=0.05,
 )
 
 # %%
@@ -1075,7 +942,8 @@ plt.colorbar(im, ax=axs, orientation='horizontal', fraction=0.05, pad=0.05)
 plt.show()
 
 # %% [markdown]
-# Haha, seem's like it works not at all
+# Haha, seem's like it works not at all.<br>
+# Adding the `denormalized_sol` part also messes up the noise for $t=0$.
 
 # %%
 
