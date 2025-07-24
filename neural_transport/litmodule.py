@@ -38,7 +38,10 @@ class NeuralTransport(pl.LightningModule):
     ):
         super().__init__()
         self.save_hyperparameters()
-        self.model = MODELS[model](**model_kwargs)
+        if isinstance(model, str):
+            self.model = MODELS[model](**model_kwargs)
+        else:
+            self.model = model
         if pretrained_ckptpath is not None:
             ckpt = torch.load(pretrained_ckptpath, map_location="cpu")
             model_state_dict = {
