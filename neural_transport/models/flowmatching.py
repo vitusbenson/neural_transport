@@ -11,7 +11,8 @@ from flow_matching.path import AffineProbPath
 from flow_matching.solver import ODESolver
 
 # neural_transport
-from neural_transport.models.unet import UNet
+from neural_transport.models import MODELS
+# from neural_transport.models.unet import UNet
 
 class VelocityWrapper(nn.Module):
     def __init__(
@@ -53,10 +54,12 @@ class VelocityWrapper(nn.Module):
 class FlowMatching(nn.Module):
     def __init__(
             self,
-            # model="unet",
+            model="unet",
             model_kwargs={},
+            input_vars=[],
             return_intermediates=False,
             method='midpoint',
+            nlev=1,
             step_size=0.01
             ):
         super().__init__()
@@ -66,16 +69,12 @@ class FlowMatching(nn.Module):
         for var in reversed(required_input_vars):
             if var not in input_vars:
                 input_vars.insert(0, var)
-        
-        if "model_kwargs" in model_kwargs:
-            sub_kwargs = model_kwargs["model_kwargs"]
-        else:
-            sub_kwargs = model_kwargs
 
-        sub_kwargs["input_vars"] = input_vars
-        sub_kwargs["in_chans"] += 1 + sub_kwargs["nlev"] * 1 # + 1 for flow_time, + nlev for co2massmix
+        model_kwargs = model_kwargs.copy()
+        model_kwargs["input_vars"] = input_vars
+        model_kwargs["model_kwargs"]["in_chans"] += 1 + nlev * 1 # + 1 for flow_time, + nlev for co2massmix
 
-        self.model = UNet(**sub_kwargs) # MODELS[model](**model_kwargs)
+        self.model = MODELS[model](**model_kwargs) # UNet(**sub_kwargs)
         self.return_intermediates = return_intermediates
         self.method = method
         self.step_size = step_size
