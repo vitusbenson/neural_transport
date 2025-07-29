@@ -82,7 +82,6 @@ class RegularGridModel(nn.Module):
         batch_normalized = {}
         vars_to_normalize = self.input_vars
         for v in vars_to_normalize:
-            # print(f"input: {v}")
             if v not in batch:
                 print(f"WARNING: skipping {v}, missing in batch")
                 continue
@@ -112,7 +111,7 @@ class RegularGridModel(nn.Module):
 
         x_in = torch.cat(list(batch_normalized.values()), dim=-1)
 
-        B, N, C = x_in.shape
+        B, _, C = x_in.shape
 
         x_in = x_in.reshape(B, self.in_nlat, self.in_nlon, C).permute(
             0, 3, 1, 2
@@ -138,7 +137,6 @@ class RegularGridModel(nn.Module):
         
         batch_normalized = {}
         for v in self.target_vars:
-            # print(f"target: {v}")
             for suffix in ['', '_next']:
                 key = f"{v}{suffix}"
                 if key in batch:
@@ -151,7 +149,7 @@ class RegularGridModel(nn.Module):
                     batch_normalized[key] = x_in_curr
 
         return batch_normalized
-    
+      
     def postprocess_outputs(self, x_out, batch):
 
         B, N, _ = batch[self.target_vars[0]].shape

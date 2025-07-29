@@ -2,7 +2,8 @@
 from typing import Optional, Dict
 
 # neural_transport
-from neural_transport.models.unet import UNet
+from neural_transport.models import MODELS
+from neural_transport.models.wrappers_registry import MODELWRAPPERS
 #from neural_transport.models.regulargrid import RegularGridModel
 #from neural_transport.models.unet import UNet
 from neural_transport.models.layers import (
@@ -95,7 +96,6 @@ class RegularGridModel(nn.Module):
                 out_shape=(self.nlat, self.nlon),
                 **multiscale_kwargs,
             )
-
         self.init_model(**model_kwargs)
 
     def init_model(self, **model_kwargs):
@@ -104,10 +104,10 @@ class RegularGridModel(nn.Module):
     def model(self):
         raise NotImplementedError
 
-    def forward(self, batch):
-        x_in = self.preprocess_inputs(batch)
+    def forward(self, batch, normalize=True, denormalize=True):
+        x_in = self.preprocess_inputs(batch, normalize=normalize)
         x_out = self.model(x_in)
-        preds = self.postprocess_outputs(x_out, batch)
+        preds = self.postprocess_outputs(x_out, batch, denormalize=denormalize)
         return preds
 
     def normalize_batch(self, batch):
@@ -138,9 +138,12 @@ class RegularGridModel(nn.Module):
 
         return batch_normalized
 
-    def preprocess_inputs(self, batch):
+    def preprocess_inputs(self, batch, normalize=True):
         print("preprocess inputs")
-        batch_normalized = self.normalize_batch(batch)
+        if normalize:
+            batch_normalized = self.normalize_batch(batch)
+        else:
+            batch_normalized = batch
 
         x_in = torch.cat(list(batch_normalized.values()), dim=-1)
 
@@ -173,18 +176,17 @@ class RegularGridModel(nn.Module):
             # print(f"target: {v}")
             for suffix in ['', '_next']:
                 key = f"{v}{suffix}"
-                if key in batch:
+                if key in batch.keys():
                     mean = batch[f"{v}_offset"]
                     std = batch[f"{v}_scale"]
                     x_in_curr = (batch[key] - mean) / std
-                if self.targshift:
-                    batch_normalized[key] = x_in_curr - x_in_curr.mean((1, 2), keepdim=True)
-                else:
-                    batch_normalized[key] = x_in_curr
-
+                    if self.targshift:
+                        batch_normalized[key] = x_in_curr - x_in_curr.mean((1, 2), keepdim=True)
+                    else:
+                        batch_normalized[key] = x_in_curr
         return batch_normalized
     
-    def postprocess_outputs(self, x_out, batch):
+    def postprocess_outputs(self, x_out, batch, denormalize=True):
 
         B, N, _ = batch[self.target_vars[0]].shape
         print("postprocess outputs")
@@ -200,42 +202,45 @@ class RegularGridModel(nn.Module):
 
         x_out = x_out.permute(0, 2, 3, 1).reshape(B, N, -1)
         
-        x_grid_offset = torch.cat(
-            [(batch[f"{v}_offset"]).expand_as(batch[v]) for v in self.target_vars],
-            dim=-1,
-        )
-        x_grid_scale = torch.cat(
-            [(batch[f"{v}_scale"]).expand_as(batch[v]) for v in self.target_vars],
-            dim=-1,
-        )
+        if denormalize:
+            x_grid_offset = torch.cat(
+                [(batch[f"{v}_offset"]).expand_as(batch[v]) for v in self.target_vars],
+                dim=-1,
+            )
+            x_grid_scale = torch.cat(
+                [(batch[f"{v}_scale"]).expand_as(batch[v]) for v in self.target_vars],
+                dim=-1,
+            )
 
-        x_out_prev = torch.cat(
-            [batch[v] for v in self.target_vars],
-            dim=-1,
-        )
-        
-        x_grid_delta_offset = torch.cat(
-            [
-                (batch[f"{v}_delta_offset"]).expand_as(batch[v])
-                for v in self.target_vars
-            ],
-            dim=-1,
-        )
-        x_grid_delta_scale = torch.cat(
-            [(batch[f"{v}_delta_scale"]).expand_as(batch[v]) for v in self.target_vars],
-            dim=-1,
-        )
+            x_out_prev = torch.cat(
+                [batch[v] for v in self.target_vars],
+                dim=-1,
+            )
+            
+            x_grid_delta_offset = torch.cat(
+                [
+                    (batch[f"{v}_delta_offset"]).expand_as(batch[v])
+                    for v in self.target_vars
+                ],
+                dim=-1,
+            )
+            x_grid_delta_scale = torch.cat(
+                [(batch[f"{v}_delta_scale"]).expand_as(batch[v]) for v in self.target_vars],
+                dim=-1,
+            )
 
-        # if not x_out.isfinite().all():
-        #     print("x_out not finite", x_out.min(), x_out.mean(), x_out.max())
+            # if not x_out.isfinite().all():
+            #     print("x_out not finite", x_out.min(), x_out.mean(), x_out.max())
 
-        if self.predict_delta:
-            x_out_resc = x_out * x_grid_delta_scale + x_grid_delta_offset
+            if self.predict_delta:
+                x_out_resc = x_out * x_grid_delta_scale + x_grid_delta_offset
 
-            x_out_next = x_out_prev + x_out_resc
+                x_out_next = x_out_prev + x_out_resc
+            else:
+                x_out_next = x_out * x_grid_scale + x_grid_offset
         else:
-            x_out_next = x_out * x_grid_scale + x_grid_offset
-
+            x_out_next = x_out
+            
         # if not x_out_next.isfinite().all():
         #     print(
         #         "x_out_next not finite",
@@ -616,33 +621,36 @@ MODEL_DIMS = {
 
 MODEL_SIZE = "S"
 
-model_kwargs = dict(
-    model_kwargs=dict(
-        in_chans=LEN_ALL_VARS,
-        out_chans=LEN_ALL_TARGET_VARS,
-        embed_dim=MODEL_DIMS[MODEL_SIZE]["embed_dim"],
-        act="leakyrelu",
-        norm="batch",
-        enc_filters=[[7], [3, 3], [3, 3], [3, 3]],
-        dec_filters=[[3, 3], [3, 3], [3, 3], [3, 3]],
-        in_interpolation="bilinear",
-        out_interpolation="nearest-exact",
-        out_clip=None,
+wrapper_kwargs = dict( # for FlowMatching
+    model="unet",
+    model_kwargs = dict( # for RegularGridModel
+        model_kwargs=dict( # for UNet
+            in_chans=LEN_ALL_VARS,
+            out_chans=LEN_ALL_TARGET_VARS,
+            embed_dim=MODEL_DIMS[MODEL_SIZE]["embed_dim"],
+            act="leakyrelu",
+            norm="batch",
+            enc_filters=[[7], [3, 3], [3, 3], [3, 3]],
+            dec_filters=[[3, 3], [3, 3], [3, 3], [3, 3]],
+            in_interpolation="bilinear",
+            out_interpolation="nearest-exact",
+            out_clip=None,
+        ),
+        input_vars=TARGET_VARS + FORCING_VARS,
+        target_vars=TARGET_VARS,
+        nlat=len(lat),
+        nlon=len(lon),
+        predict_delta=False,
+        add_surfflux=False,
+        dt=60 * 60 * 6,
+        massfixer="",
+        targshift=False,
     ),
     input_vars=TARGET_VARS + FORCING_VARS,
-    target_vars=TARGET_VARS,
-    nlat=len(lat),
-    nlon=len(lon),
+    return_intermediates=True,
+    method="midpoint",
     nlev=nlev,
-    predict_delta=True,
-    add_surfflux=True,
-    dt=60 * 60 * 6,
-    massfixer="scale",
-    targshift=True, ### does this make sense?
-    ### Where should they be added?
-    # return_intermediates=False,
-    # method="midpoint",
-    # step_size=0.05,
+    step_size=0.1,
 )
 
 # %%
@@ -654,7 +662,7 @@ print(f"Length of all forcing variables: {len(FORCING_VARS_1D)} + {len(FORCING_V
 print(f"Length of all target variables: {LEN_ALL_TARGET_VARS}")
 print(f"Length of all variables: {LEN_ALL_VARS}")
 
-print(f"Latitude: {model_kwargs['nlat']}, Longitude: {model_kwargs['nlon']}")
+print(f"Latitude: {wrapper_kwargs["model_kwargs"]['nlat']}, Longitude: {wrapper_kwargs["model_kwargs"]['nlon']}")
 
 # %%
 # train UNet parameters 2/2
@@ -726,92 +734,73 @@ batch.keys()
 class VelocityWrapper(nn.Module):
     def __init__(
         self,
-        model: nn.Module,
-        target_vars: str,
-        offset: Optional[torch.Tensor] = None,
-        scale: Optional[torch.Tensor] = None,
-        delta_offset: Optional[torch.Tensor] = None,
-        delta_scale: Optional[torch.Tensor] = None,
-        static_batch: Optional[Dict[str, torch.Tensor]] = None,
+        submodel: UNet,
+        nlev: int = 1,
+        static_inputs: Optional[torch.Tensor] = None,
     ):
         super().__init__()
-        self.model = model
-        self.target_vars = target_vars
-
-        self.offset = offset
-        self.scale = scale
-        self.delta_offset = delta_offset
-        self.delta_scale = delta_scale
-
-        self.static_batch = static_batch or {}
+        self.submodel = submodel
+        self.nlev = nlev
+        self.static_inputs = static_inputs if static_inputs is not None else torch.empty(0)
 
     def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        batch_vf = {
-            self.target_vars: x,
-            "flow_time": t,
-            f"{self.target_vars}_offset": self.offset,
-            f"{self.target_vars}_scale": self.scale,
-            #f"{self.target_vars}_delta_offset": self.delta_offset,
-            #f"{self.target_vars}_delta_scale": self.delta_scale,
-        }
-
-        batch_vf.update(self.static_batch)
-        print("VelocityWrapper")
-        out = self.model(batch_vf)
-        return out[self.target_vars]
+        B, _, Nlat, Nlon = x.shape
+        t_expanded = t.view(1, 1, 1, 1).expand(B, 1, Nlat, Nlon)
+        x_in = torch.cat(
+            [x, t_expanded] + [self.static_inputs], dim=1
+        ) # [B C_total Nlat Nlon]
+        out = self.submodel.model(x_in)
+        return out[:, :self.nlev, :, :]
 
 # %%
-class FlowMatching(nn.Module):
-    def __init__(
+class FlowMatching(RegularGridModel):
+    def init_model(
             self,
-            # model="unet",
+            # submodel="unet",
             model_kwargs={},
             return_intermediates=False,
             method='midpoint',
-            step_size=0.01
+            nlev=1,
+            step_size=0.01,
             ):
-        super().__init__()
-
-        required_input_vars = ["x_t", "flow_time"]
-        input_vars = model_kwargs.get("input_vars", [])
-        for var in reversed(required_input_vars):
-            if var not in input_vars:
-                input_vars.insert(0, var)
-        model_kwargs["input_vars"] = input_vars
-        model_kwargs["model_kwargs"]["in_chans"] += 1 + nlev * 1 # + 1 for flow_time, + nlev for co2massmix
-
-        self.model = UNet(**model_kwargs) # model
+        
+        self.submodel = UNet(**model_kwargs) # MODELS[submodel](**model_kwargs)
         self.return_intermediates = return_intermediates
         self.method = method
+        self.nlev = nlev
         self.step_size = step_size
         self.path = AffineProbPath(scheduler=CondOTScheduler())
-        self.target_vars = self.model.target_vars[0] # Here target_vars[0] is supposed to be "co2massmix"
-        # self.velocity_model = VelocityWrapper(self.model, self.target_vars)
-
+        self.target_vars = self.submodel.target_vars # Here target_vars[0] is supposed to be "co2massmix"
+        # self.velocity_model = VelocityWrapper(self.submodel, self.target_vars)
+    
     def forward(self, batch):
         if self.training:
             return self.training_forward(batch)
+        elif self.return_intermediates:
+            x_in = self.preprocess_inputs(batch)
+            trajectory = self.model(x_in)
+            x_out = trajectory[-1]
+            sol = self.postprocess_outputs(x_out, batch)
+            return sol, trajectory
         else:
-            return self.inference_forward(batch)
+            return super().forward(batch)
 
-
+    # training
     def training_forward(self, batch):
-        # extract target_vars to get x_1 and normalize, [B N C]
-        x_1 = batch[f"{self.target_vars}_next"]
-        batch_normalized = self.model.normalize_batch_target_vars(batch)
-        x_1_normalized = batch_normalized[f"{self.target_vars}_next"]
+        # sample data [B C Nlat Nlon]
+        x_in = self.preprocess_inputs(batch)
+        # extract target_vars to get x_1 [B C Nlat Nlon] and normalize
+        batch_normalized = self.normalize_batch_target_vars(batch)
+        x_1_normalized = batch_normalized[f"{self.target_vars[0]}_next"]
+        B, _, C = x_1_normalized.shape
+        x_1_normalized = x_1_normalized.reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)
 
-        # sample noise  x_0 ~ N(0, I), [B N C]
-        x_0 = torch.randn_like(x_1, device=x_1.device)
+        # sample noise  x_0 ~ N(0, I), [B C Nlat Nlon]
+        x_0 = torch.randn_like(x_in, device=x_in.device)
 
-        # sample time t \in [0,1], [B] -> [B N 1]
-        B, N, _ = x_1.shape
-        t = torch.rand(B, device=x_1.device)
-        t_expanded = t[:, None, None].expand(B, N, 1)  # expand [B N 1] to match x_1 shape
-        batch["flow_time"] = t_expanded
-        batch["flow_time_offset"] = torch.zeros_like(t_expanded)
-        batch["flow_time_scale"] = torch.ones_like(t_expanded)
-
+        # sample time t \in [0,1], [B] -> [B 1 Nlat Nlon]
+        B, _, nlat, nlon = x_in.shape
+        t = torch.rand(B, device=x_in.device)
         # sample path
         path_sample = self.path.sample(
             t=t,
@@ -819,37 +808,37 @@ class FlowMatching(nn.Module):
             x_1=x_1_normalized
         )
 
-        # compute flow matching loss and add denormalized x_1
+        # sample x_t from the path
         # access scheduler for affine path
         scheduler_out = self.path.scheduler(t)
-        d_sigma_t = scheduler_out.d_sigma_t.view(-1, 1, 1)
-        d_alpha_t = scheduler_out.d_alpha_t.view(-1, 1, 1)
+        d_sigma_t = scheduler_out.d_sigma_t.view(-1, 1, 1, 1)
+        d_alpha_t = scheduler_out.d_alpha_t.view(-1, 1, 1, 1)
 
-        batch["x_t"] = (path_sample.x_t - d_sigma_t * x_0) / d_alpha_t
-        # path_sample.x_t + x_0 (simplified version)
-        batch["x_t_offset"] = torch.zeros_like(batch["x_t"])
-        batch["x_t_scale"] = batch["x_t"].std(dim=(1, 2), keepdim=True)
-        ### why dim=(1, 2) everywhere? why not over the entire batch?
-        preds = self.model(batch)
+        x_t = (path_sample.x_t - d_sigma_t * x_0) / d_alpha_t
+        # x_t = path_sample.x_t + x_0 (simplified version)
+        # this requires target_vars to be first in input_vars and all nlev-dimensional
+        x_in[:, :self.nlev*len(self.target_vars), :, :] = x_t  # [B C Nlat Nlon] 
 
-        return preds # [B N C]
+        t_expanded = path_sample.t.view(-1, 1, 1, 1).expand(B, 1, nlat, nlon)
+        x_in = torch.cat([x_in, t_expanded], dim=1)  # [B C+1 Nlat Nlon]
 
-    def return_velocity_wrapper(self, offset, scale, delta_offset, delta_scale, batch):
+        x_out = self.submodel.model(x_in)
+
+        return x_out, x_1_normalized
+
+    def return_velocity_wrapper(self, submodel, static_inputs):
         return VelocityWrapper(
-            self.model,
-            self.target_vars,
-            offset=offset,
-            scale=scale,
-            delta_offset=delta_offset,
-            delta_scale=delta_scale,
-            static_batch=batch
+            submodel=submodel,
+            nlev=self.nlev,
+            static_inputs=static_inputs,
         )
 
-    def inference_forward(self, batch):
-        # sample noise to get x0 [B N C]
-        all_levels = batch[self.target_vars] # [B N C]
-        x_init = torch.randn(*all_levels.shape, device=batch[self.target_vars].device)
-        #surface_level = batch[self.target_vars][:,:,0:1] # [B N 1]
+    # inference_forward
+    def model(self, x_in):
+        # sample noise to get x_init [B C Nlat Nlon]
+        all_levels = x_in[:, :self.nlev*len(self.target_vars), :, :]  # [B C Nlat Nlon]
+        x_init = torch.randn(*all_levels.shape, device=x_in.device)
+        #surface_level = x_in[:, :1, :, :]  # [B 1 Nlat Nlon]
         #x_init = torch.randn(*surface_level.shape, device=batch[self.target_vars].device)
 
         # get timesteps for integration [T]
@@ -857,46 +846,116 @@ class FlowMatching(nn.Module):
 
         # UNet expects normalization parameters
         velocity_model = self.return_velocity_wrapper(
-            batch[f"{self.target_vars}_offset"],
-            batch[f"{self.target_vars}_scale"],
-            batch[f"{self.target_vars}_delta_offset"],
-            batch[f"{self.target_vars}_delta_scale"],
-            batch
+            submodel=self.submodel,
+            static_inputs=x_in[:, self.nlev*len(self.target_vars):, :, :],  # [B C Nlat Nlon] (static inputs)
         )
 
         # solve the ODE to get the trajectory
         solver = ODESolver(velocity_model=velocity_model)
         print("Start solver")
-        sol = solver.sample(time_grid=time_grid,
+        trajectory = solver.sample(time_grid=time_grid,
                             x_init=x_init, method=self.method,
                             step_size=self.step_size,
                             return_intermediates=self.return_intermediates
-        )
+        ) # [T B C Nlat Nlon]
         print("End solver")
-        # denormalize the solution
-        ### though RegularGridModel already does this. Can it handle intermediates?
-        # if self.return_intermediates:
-        #     denormalized_sol = []
-        #     for t in sol:   # t: [B N C]
-        #         t_denorm = (t * batch[f"{self.target_vars}_scale"]) + batch[f"{self.target_vars}_offset"]
-        #         denormalized_sol.append(t_denorm)
-        #     sol = torch.stack(denormalized_sol, dim=0)  # sol: [T B N C]
-        # else:
-        #     sol = (sol * batch[f"{self.target_vars}_scale"]) + batch[f"{self.target_vars}_offset"]
-
-        return sol
+        print("Trajectory shape:", trajectory.shape)
+        return trajectory
     
     #def inference_obs_forward(self, batch):
-    #    return sol
+    #    return trajectory
 
 # %%
-flow = FlowMatching(
-    # model="unet",
-    model_kwargs=model_kwargs,
-    return_intermediates=True,
-    method='midpoint',
-    step_size=0.05,
+# train UNet parameters 1/2
+
+TARGET_VARS = ["co2massmix"]
+FORCING_VARS_1D = [
+    # "flow_time"
+]
+# Uncomment for conditional Flow Matching
+FORCING_VARS_2D = [
+    # "blh",
+    # "cell_area",
+    # "co2flux_anthro",
+    # "co2flux_land",
+    # "co2flux_ocean",
+    # "orography",
+    # "tisr",
+]
+FORCING_VARS_3D = [
+    # "airmass",
+    # "gph_bottom",
+    # "gph_top",
+    # "p_bottom",
+    # "p_top",
+    # "q",
+    # "t",
+    # "u",
+    # "v",
+]
+grid = "latlon5.625"
+vertical_levels = "l10"
+freq = "6h"
+
+nlev = len(VERTICAL_LAYERS_PROTOTYPE_COORDS[vertical_levels]["level"])
+
+FORCING_VARS = FORCING_VARS_1D + FORCING_VARS_2D + FORCING_VARS_3D
+LEN_ALL_TARGET_VARS = nlev * len(TARGET_VARS)
+LEN_ALL_FORCING_VARS = len(FORCING_VARS_1D) + len(FORCING_VARS_2D) + nlev * len(FORCING_VARS_3D)
+LEN_ALL_VARS = LEN_ALL_TARGET_VARS + LEN_ALL_FORCING_VARS
+
+lat = LATLON_PROTOTYPE_COORDS[grid]["lat"]
+lon = LATLON_PROTOTYPE_COORDS[grid]["lon"]
+
+MODEL_DIMS = {
+    "XS": dict(embed_dim=64),
+    "S": dict(embed_dim=128),
+    "M": dict(embed_dim=256),
+    "L": dict(embed_dim=512),
+    "XL": dict(embed_dim=1024),
+}
+
+MODEL_SIZE = "S"
+
+regularGrid_kwargs = dict( # for RegularGridModel
+    input_vars=TARGET_VARS + FORCING_VARS,
+    target_vars=TARGET_VARS,
+    nlat=len(lat),
+    nlon=len(lon),
+    predict_delta=False,
+    add_surfflux=False,
+    dt=60 * 60 * 6,
+    massfixer="",
+    targshift=False,
 )
+
+wrapper_kwargs = dict( # for RegularGridModel (FlowMatching)
+    **regularGrid_kwargs,
+    model_kwargs=dict( # for FlowMatching
+        # submodel="unet",
+        model_kwargs=dict( # for RegularGridModel (UNet)
+            **regularGrid_kwargs,
+            model_kwargs=dict( # for UNet
+                in_chans=LEN_ALL_VARS + 1, # + 1 for flow_time
+                out_chans=LEN_ALL_TARGET_VARS,
+                embed_dim=MODEL_DIMS[MODEL_SIZE]["embed_dim"],
+                act="leakyrelu",
+                norm="batch",
+                enc_filters=[[7], [3, 3], [3, 3], [3, 3]],
+                dec_filters=[[3, 3], [3, 3], [3, 3], [3, 3]],
+                in_interpolation="bilinear",
+                out_interpolation="nearest-exact",
+                out_clip=None,
+            ),
+        ),
+        return_intermediates=True,
+        method="midpoint",  # 'midpoint' or 'euler'
+        nlev=nlev,
+        step_size=0.1,
+    ),
+)
+
+flow = FlowMatching(**wrapper_kwargs)
 
 # %%
 flow.train()
@@ -905,7 +964,7 @@ preds_flow = flow(batch)
 # %%
 flow.eval()
 with torch.no_grad():
-    sol = flow(batch)
+    sol, trajectory = flow(batch)
 
 # %%
 # anpassen von variables -> offset/scale/delta is loaded, even if not given into the model!?
@@ -921,19 +980,18 @@ with torch.no_grad():
 # same for scale
 
 # %%
-# sol.shape: (T=10, B=64, N=2048, C=10) -> one batch (B=0), surface level (C=0)
-sol_surface = sol[:, 0, :, 0]  # shape: [T, N]
+trajectory.shape
 
-# reshape to 2D grid [lat=32, lon=64]
-lat, lon = model_kwargs['nlat'], model_kwargs['nlon']
-sol_surface_2d = sol_surface.reshape((10, lat, lon))  # shape: [T, lat, lon]
+# %%
+# trajectory.shape: (T=10, B=64, C=10, Nlat=32, Nlon=64) -> one batch (B=0), surface level (C=0)
+sol_surface = trajectory[:, 0, 0, :, :]  # shape: [T, Nlat, Nlon]
 
 # plot
 fig, axs = plt.subplots(1, 10, figsize=(20, 2))
 
 vmin, vmax = -5, 5
 for i in range(10):
-    im = axs[i].imshow(sol_surface_2d[i], cmap="viridis", vmin=vmin, vmax=vmax)
+    im = axs[i].imshow(sol_surface[i], cmap="viridis", vmin=vmin, vmax=vmax)
     axs[i].set_title(f"t = {i/9:.2f}")
     axs[i].axis("off")
 

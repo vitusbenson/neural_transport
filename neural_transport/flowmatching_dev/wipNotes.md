@@ -4,9 +4,9 @@ Flow Matching Steps
 02. Get training_forward running (add offset/scale, dt_alpha/dt_sigma)   v
 03. Get inference_forward runnning                                       v
 04. Implement time embedding in UNet (a)                                 v
-05. Integrate into neural_transport                                      
-06. test a training                                                      
-07. create slurm script                                                  v                        
+05. Integrate into neural_transport                                      v
+06. create slurm script                                                  v
+07. test a training                                                      
 08. Add possibility of covariats and (CO_2)_{t-1}                        
 09. Load OCO-2 dataset into neural_transport                             
 10. Integrate OCO-2 data into carbonbench                                
