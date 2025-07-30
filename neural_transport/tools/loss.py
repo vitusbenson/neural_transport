@@ -55,10 +55,12 @@ class MSE(nn.Module):
         nlon=64,
         cutoff=None,
         scale_by_spectral_power=True,
+        normalize_batch=False,
     ):
         super().__init__()
 
         self.vars = list(weights.keys())
+        self.normalize_batch = normalize_batch
 
         for variable, weight in weights.items():
             self.register_buffer(
@@ -75,8 +77,21 @@ class MSE(nn.Module):
     def forward(self, preds, batch):
         loss = 0
         losses = {}
+        if self.normalize_batch:
+            batch_normalized = {}
+            for v in self.vars:
+                for suffix in ['', '_next']:
+                    key = f"{v}{suffix}"
+                    if key in batch:
+                        mean = batch[f"{v}_offset"]
+                        std = batch[f"{v}_scale"]
+                        x_in_curr = (batch[key] - mean) / std
+                        batch_normalized[key] = x_in_curr
         for v in self.vars:
-            se = (preds[v] - batch[f"{v}_next"]) ** 2
+            if self.normalize_batch:
+                se = (preds[v] - batch_normalized[f"{v}_next"]) ** 2
+            else:
+                se = (preds[v] - batch[f"{v}_next"]) ** 2
             wmse = torch.mean(se * getattr(self, f"weights_{v}"))
             losses[f"Loss_Vari/weighted_{v}"] = wmse
             losses[f"Loss_Vari/unweighted_{v}"] = torch.mean(se)
