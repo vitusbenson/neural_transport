@@ -149,10 +149,53 @@ class RegularGridModel(nn.Module):
                     batch_normalized[key] = x_in_curr
 
         return batch_normalized
-      
-    def postprocess_outputs(self, x_out, batch, denormalize=True):
+    
+    def denormalize_tensor(self, x_out, batch):
+        x_grid_offset = torch.cat(
+                [(batch[f"{v}_offset"]).expand_as(batch[v]) for v in self.target_vars],
+                dim=-1,
+        )
+        x_grid_scale = torch.cat(
+            [(batch[f"{v}_scale"]).expand_as(batch[v]) for v in self.target_vars],
+            dim=-1,
+        )
 
-        B, N, _ = batch[self.target_vars[0]].shape
+        x_out_prev = torch.cat(
+            [batch[v] for v in self.target_vars],
+            dim=-1,
+        )
+        x_grid_delta_offset = torch.cat(
+            [
+                (batch[f"{v}_delta_offset"]).expand_as(batch[v])
+                for v in self.target_vars
+            ],
+            dim=-1,
+        )
+        x_grid_delta_scale = torch.cat(
+            [(batch[f"{v}_delta_scale"]).expand_as(batch[v]) for v in self.target_vars],
+            dim=-1,
+        )
+
+        # if not x_out.isfinite().all():
+        #     print("x_out not finite", x_out.min(), x_out.mean(), x_out.max())
+
+        if self.predict_delta:
+            x_out_resc = x_out * x_grid_delta_scale + x_grid_delta_offset
+
+            x_out_next = x_out_prev + x_out_resc
+        else:
+            x_out_next = x_out * x_grid_scale + x_grid_offset
+
+        # if not x_out_next.isfinite().all():
+        #     print(
+        #         "x_out_next not finite",
+        #         x_out_next.min(),
+        #         x_out_next.mean(),
+        #         x_out_next.max(),
+        #     )
+        return x_out_next
+
+    def postprocess_outputs(self, x_out, batch, denormalize=True):
 
         if self.horizontal_interpolation == "multiscale_encoder":
             x_out = self.multiscale_decoder(x_out)
@@ -164,50 +207,11 @@ class RegularGridModel(nn.Module):
                 mode=self.horizontal_interpolation,
             )
 
+        B, N, _ = batch[self.target_vars[0]].shape
         x_out = x_out.permute(0, 2, 3, 1).reshape(B, N, -1)
+        
         if denormalize:
-            x_grid_offset = torch.cat(
-                [(batch[f"{v}_offset"]).expand_as(batch[v]) for v in self.target_vars],
-                dim=-1,
-            )
-            x_grid_scale = torch.cat(
-                [(batch[f"{v}_scale"]).expand_as(batch[v]) for v in self.target_vars],
-                dim=-1,
-            )
-
-            x_out_prev = torch.cat(
-                [batch[v] for v in self.target_vars],
-                dim=-1,
-            )
-            x_grid_delta_offset = torch.cat(
-                [
-                    (batch[f"{v}_delta_offset"]).expand_as(batch[v])
-                    for v in self.target_vars
-                ],
-                dim=-1,
-            )
-            x_grid_delta_scale = torch.cat(
-                [(batch[f"{v}_delta_scale"]).expand_as(batch[v]) for v in self.target_vars],
-                dim=-1,
-            )
-
-            # if not x_out.isfinite().all():
-            #     print("x_out not finite", x_out.min(), x_out.mean(), x_out.max())
-
-            if self.predict_delta:
-                x_out_resc = x_out * x_grid_delta_scale + x_grid_delta_offset
-
-                x_out_next = x_out_prev + x_out_resc
-            else:
-                x_out_next = x_out * x_grid_scale + x_grid_offset
-
-            # if not x_out_next.isfinite().all():
-            #     print(
-            #         "x_out_next not finite",
-            #         x_out_next.min(),
-            #         x_out_next.mean(),
-            #         x_out_next.max(),
-            #     )
+            x_out_next = self.denormalize_tensor(x_out, batch)
         else:
             x_out_next = x_out
         
