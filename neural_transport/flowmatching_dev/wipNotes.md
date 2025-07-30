@@ -6,13 +6,14 @@ Flow Matching Steps
 04. Implement time embedding in UNet (a)                                 v
 05. Integrate into neural_transport                                      v
 06. create slurm script                                                  v
-07. test a training                                                      
-08. Add possibility of covariats and (CO_2)_{t-1}                        
+07. test a training                                                      v
+08. adapt evaluation (plotting, ...)                                     
 09. Load OCO-2 dataset into neural_transport                             
 10. Integrate OCO-2 data into carbonbench                                
-11. Extend FlowMatching to use X_0 = noise + weight * OCO-2             
-12. Handle (OCO-2)_t                                                    
-13. Attack with Ruff
+11. Add possibility of covariats and (CO_2)_{t-1}                        
+12. Extend FlowMatching to use X_0 = noise + weight * OCO-2             
+13. Handle (OCO-2)_t                                                    
+14. Attack with Ruff
 
 (a): It is just stacked as another channel:
         `x_in = torch.cat(list(batch_normalized.values()), dim=-1)`
