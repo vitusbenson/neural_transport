@@ -100,7 +100,7 @@ class NeuralTransport(pl.LightningModule):
                 curr_preds = self.model(curr_data)
 
             if t == 0:
-                preds = {k: torch.empty_like(batch[k]) for k in curr_preds}
+                preds = {k : torch.empty((curr_preds[k].shape[0], T, *curr_preds[k].shape[1:]), device=curr_preds[k].device) for k in curr_preds}
 
             for v in preds:
                 preds[v][:, t] = curr_preds[v]
@@ -148,7 +148,7 @@ class NeuralTransport(pl.LightningModule):
             add_dataloader_idx=False,
         )
 
-        self.plots(preds, batch, batch_idx, dataloader_idx)
+        # self.plots(preds, batch, batch_idx, dataloader_idx)
 
     def plots(self, preds, batch, batch_idx, dataloader_idx):
         if (batch_idx < 1) and (dataloader_idx == 0) and (self.global_rank == 0):
