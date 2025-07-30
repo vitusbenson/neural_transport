@@ -58,13 +58,16 @@ class FlowMatching(RegularGridModel):
     
     def forward(self, batch):
         if self.training:
-            return self.training_forward(batch)
+            x_out = self.training_forward(batch)
+            preds = self.postprocess_outputs(x_out, batch, denormalize=False)
+            return preds
         elif self.return_intermediates:
             x_in = self.preprocess_inputs(batch)
             trajectory = self.model(x_in)
-            x_out = trajectory[-1]
+            x_out = trajectory[...,-1]
             sol = self.postprocess_outputs(x_out, batch)
-            return sol, trajectory
+            sol["trajectory"] = trajectory
+            return sol
         else:
             return super().forward(batch)
 
@@ -108,7 +111,7 @@ class FlowMatching(RegularGridModel):
 
         x_out = self.submodel.model(x_in)
 
-        return x_out #, x_1_normalized
+        return x_out #, x_1_normalized # return {self.target_vars[0]: x_out}
 
     def return_velocity_wrapper(self, submodel, static_inputs):
         return VelocityWrapper(
@@ -141,6 +144,7 @@ class FlowMatching(RegularGridModel):
                             step_size=self.step_size,
                             return_intermediates=self.return_intermediates
         ) # [T B C Nlat Nlon]
+        trajectory = trajectory.permute(1, 2, 3, 4, 0) # [B C Nlat Nlon T]
         return trajectory
     
     #def inference_obs_forward(self, batch):
