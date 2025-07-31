@@ -11,7 +11,11 @@ from neural_transport.models.layers import (
     MultiScaleDecoder,
     MultiScaleEncoder,
 )
+# from neural_transport.litmodule import NeuralTransport
 from neural_transport.tools.conversion import *
+from neural_transport.tools.loss import LOSSES
+from neural_transport.tools.metrics import ManyMetrics
+from neural_transport.tools.plot import plots_val_step
 from neural_transport.datasets.grids import (
     LATLON_PROTOTYPE_COORDS,
     VERTICAL_LAYERS_PROTOTYPE_COORDS,
@@ -29,6 +33,8 @@ import numpy as np
 import pytorch_lightning as pl
 import torch
 import torch.nn as nn
+
+import xarray as xr
 
 # flow_matching
 from flow_matching.path.scheduler import CondOTScheduler
@@ -138,12 +144,9 @@ class RegularGridModel(nn.Module):
 
         return batch_normalized
 
-    def preprocess_inputs(self, batch, normalize=True):
-        print("preprocess inputs")
-        if normalize:
-            batch_normalized = self.normalize_batch(batch)
-        else:
-            batch_normalized = batch
+    def preprocess_inputs(self, batch):
+
+        batch_normalized = self.normalize_batch(batch)
 
         x_in = torch.cat(list(batch_normalized.values()), dim=-1)
 
@@ -189,7 +192,7 @@ class RegularGridModel(nn.Module):
     def postprocess_outputs(self, x_out, batch, denormalize=True):
 
         B, N, _ = batch[self.target_vars[0]].shape
-        print("postprocess outputs")
+
         if self.horizontal_interpolation == "multiscale_encoder":
             x_out = self.multiscale_decoder(x_out)
         elif self.horizontal_interpolation is not None:
@@ -201,7 +204,6 @@ class RegularGridModel(nn.Module):
             )
 
         x_out = x_out.permute(0, 2, 3, 1).reshape(B, N, -1)
-        
         if denormalize:
             x_grid_offset = torch.cat(
                 [(batch[f"{v}_offset"]).expand_as(batch[v]) for v in self.target_vars],
@@ -238,17 +240,17 @@ class RegularGridModel(nn.Module):
                 x_out_next = x_out_prev + x_out_resc
             else:
                 x_out_next = x_out * x_grid_scale + x_grid_offset
+                
+            # if not x_out_next.isfinite().all():
+            #     print(
+            #         "x_out_next not finite",
+            #         x_out_next.min(),
+            #         x_out_next.mean(),
+            #         x_out_next.max(),
+            #     )
         else:
             x_out_next = x_out
-            
-        # if not x_out_next.isfinite().all():
-        #     print(
-        #         "x_out_next not finite",
-        #         x_out_next.min(),
-        #         x_out_next.mean(),
-        #         x_out_next.max(),
-        #     )
-
+        
         preds = {}
         i = 0
         for v in self.target_vars:
@@ -775,13 +777,16 @@ class FlowMatching(RegularGridModel):
     
     def forward(self, batch):
         if self.training:
-            return self.training_forward(batch)
+            x_out = self.training_forward(batch)
+            preds = self.postprocess_outputs(x_out, batch, denormalize=False)
+            return preds
         elif self.return_intermediates:
             x_in = self.preprocess_inputs(batch)
             trajectory = self.model(x_in)
-            x_out = trajectory[-1]
+            x_out = trajectory[...,-1]
             sol = self.postprocess_outputs(x_out, batch)
-            return sol, trajectory
+            sol["trajectory"] = trajectory
+            return sol
         else:
             return super().forward(batch)
 
@@ -801,6 +806,7 @@ class FlowMatching(RegularGridModel):
         # sample time t \in [0,1], [B] -> [B 1 Nlat Nlon]
         B, _, nlat, nlon = x_in.shape
         t = torch.rand(B, device=x_in.device)
+
         # sample path
         path_sample = self.path.sample(
             t=t,
@@ -824,7 +830,7 @@ class FlowMatching(RegularGridModel):
 
         x_out = self.submodel.model(x_in)
 
-        return x_out, x_1_normalized
+        return x_out #, x_1_normalized # return {self.target_vars[0]: x_out}
 
     def return_velocity_wrapper(self, submodel, static_inputs):
         return VelocityWrapper(
@@ -852,14 +858,12 @@ class FlowMatching(RegularGridModel):
 
         # solve the ODE to get the trajectory
         solver = ODESolver(velocity_model=velocity_model)
-        print("Start solver")
         trajectory = solver.sample(time_grid=time_grid,
                             x_init=x_init, method=self.method,
                             step_size=self.step_size,
                             return_intermediates=self.return_intermediates
         ) # [T B C Nlat Nlon]
-        print("End solver")
-        print("Trajectory shape:", trajectory.shape)
+        trajectory = trajectory.permute(1, 2, 3, 4, 0) # [B C Nlat Nlon T]
         return trajectory
     
     #def inference_obs_forward(self, batch):
@@ -964,7 +968,7 @@ preds_flow = flow(batch)
 # %%
 flow.eval()
 with torch.no_grad():
-    sol, trajectory = flow(batch)
+    sol = flow(batch)
 
 # %%
 # anpassen von variables -> offset/scale/delta is loaded, even if not given into the model!?
@@ -980,18 +984,19 @@ with torch.no_grad():
 # same for scale
 
 # %%
-trajectory.shape
+trajectory = sol["trajectory"]  # [B C Nlat Nlon T]
+sol["trajectory"].shape
 
 # %%
-# trajectory.shape: (T=10, B=64, C=10, Nlat=32, Nlon=64) -> one batch (B=0), surface level (C=0)
-sol_surface = trajectory[:, 0, 0, :, :]  # shape: [T, Nlat, Nlon]
+# trajectory.shape: (B=64, C=10, Nlat=32, Nlon=64, T=10) -> one batch (B=0), surface level (C=0)
+sol_surface = trajectory[0, 0, :, :, :]  # shape: [Nlat, Nlon, T]
 
 # plot
 fig, axs = plt.subplots(1, 10, figsize=(20, 2))
 
 vmin, vmax = -5, 5
 for i in range(10):
-    im = axs[i].imshow(sol_surface[i], cmap="viridis", vmin=vmin, vmax=vmax)
+    im = axs[i].imshow(sol_surface[:, :, i], cmap="viridis", vmin=vmin, vmax=vmax)
     axs[i].set_title(f"t = {i/9:.2f}")
     axs[i].axis("off")
 
@@ -1000,8 +1005,326 @@ plt.colorbar(im, ax=axs, orientation='horizontal', fraction=0.05, pad=0.05)
 plt.show()
 
 # %% [markdown]
-# Haha, seem's like it works not at all.<br>
-# Adding the `denormalized_sol` part also messes up the noise for $t=0$.
+# # Plot results after training completed
+# 
+# 1. Load model from best checkpoint
+# 2. prepare batch of input data
+# 3. run inference mode of model
+# 4. plot results
+
+# %%
+# checkpoint path
+# best
+best_ckpt_path = "/Net/Groups/BGI/work_5/CO2_diffusion/carbonbench/transport_models/carbontracker_lowres/flowmatching_dev/flowmatching_firstrun_20250730_dev/singlestep/checkpoints/Epoch=1-Step=776-LossVal=5596391.500000.ckpt"
+
+# last
+last_ckpt_path = "/Net/Groups/BGI/work_5/CO2_diffusion/carbonbench/transport_models/carbontracker_lowres/flowmatching_dev/flowmatching_firstrun_20250730_dev/singlestep/checkpoints/latest-Epoch=25-Step=10000-LossVal=5799775.000000.ckpt"
+
+# %%
+# lit module kwargs
+
+cos_lat = np.cos(np.radians(lat))[:, None, None].repeat(len(lon), axis=1).reshape(-1, 1)
+cos_lat = cos_lat / np.mean(cos_lat)
+
+ds_stats = xr.open_zarr(
+    f"/Net/Groups/BGI/tscratch/vbenson/graph_tm/data/Carbontracker/train/carbontracker_{grid}_{vertical_levels}_{freq}_stats.zarr"
+).compute()
+
+inv_std = {
+    k: 1
+    / (ds_stats[f"{k}_delta"].sel(stats="std").where(lambda x: x > 1e-14, 1).values)
+    ** 2
+    for k in TARGET_VARS  # CARBOSCOPE_CARBON3D_VARS
+}
+
+weights = {k: cos_lat * inv_std[k] for k in inv_std}
+
+LOSS_WEIGHTS = {k: (10 * v / LEN_ALL_TARGET_VARS) for k, v in weights.items()}
+
+METRIC_WEIGHTS = {f"{k}_delta": cos_lat for k in TARGET_VARS}
+
+
+lit_module_kwargs = dict(
+    model=flow,
+    model_kwargs=wrapper_kwargs["model_kwargs"],
+    loss="mse",
+    loss_kwargs=dict(
+        weights=LOSS_WEIGHTS, spectral_power_weight=0.0, nlat=len(lat), nlon=len(lon), normalize_batch=True,
+    ),
+    metrics=[
+        dict(name=m, kwargs=dict(weights=METRIC_WEIGHTS))
+        for m in ["rmse", "r2", "nse", "rabsbias", "rrmse"]
+    ],
+    # + [dict(name="mass_rmsev2", kwargs=dict(molecule=m)) for m in ["co2"]],
+    no_grad_step_shedule=None,
+    lr=1e-3,
+    weight_decay=0.1,
+    lr_shedule_kwargs=dict(
+        warmup_steps=1000, halfcosine_steps=99000, min_lr=3e-7, max_lr=1.0
+    ),
+    val_dataloader_names=["singlestep", "rollout"],
+    plot_kwargs=dict(
+        variables=["co2molemix"],
+        layer_idxs=[0, 3, 5, 8],
+        n_samples=2,
+        dataset="carbontracker",
+        grid=grid,
+        vertical_levels=vertical_levels,
+        max_workers=32,
+    ),
+)
+
+# %%
+# NeuralTransport
+
+class NeuralTransport(pl.LightningModule):
+    def __init__(
+        self,
+        model="gnn",
+        model_kwargs={},
+        loss="mse",
+        loss_kwargs={},
+        metrics=[
+            {"name": "rmse", "kwargs": {"weights": {"co2massmix": np.ones((1, 1, 1))}}}
+        ],
+        no_grad_step_shedule=None,
+        lr=1e-3,
+        weight_decay=0.1,
+        lr_shedule_kwargs=dict(
+            warmup_steps=1000, halfcosine_steps=299000, min_lr=3e-7, max_lr=1.0
+        ),
+        val_dataloader_names=["singlestep", "rollout"],
+        plot_kwargs=dict(
+            variables=["co2molemix"],
+            layer_idxs=[0, 1, 9, 15],
+            n_samples=4,
+            grid="latlon1",
+            max_workers=32,
+        ),
+        pretrained_ckptpath=None,
+    ):
+        super().__init__()
+        self.save_hyperparameters()
+        if isinstance(model, str):
+            self.model = MODELS[model](**model_kwargs)
+        else:
+            self.model = model
+        if pretrained_ckptpath is not None:
+            ckpt = torch.load(pretrained_ckptpath, map_location="cpu")
+            model_state_dict = {
+                k.replace("model.", ""): v
+                for k, v in ckpt["state_dict"].items()
+                if k.startswith("model.")
+            }
+            for key in [
+                "multiscale_encoder.position_feats",
+                "multiscale_decoder.position_feats",
+            ]:
+                model_state_dict.pop(key, None)
+
+            # if model == "sfno":
+            #     for i, block in enumerate(self.model.sfnonet.blocks):
+            #         old_weight = model_state_dict[
+            #             f"sfnonet.blocks.{i}.filter.filter.weight"
+            #         ]
+            #         # new_weight = torch.ones_like(block.filter.filter.weight)
+            #         C_out, C_in = block.filter.filter.weight.shape[:2]
+            #         new_weight = torch.eye(
+            #             C_out,
+            #             C_in,
+            #             dtype=block.filter.filter.weight.dtype,
+            #             device=block.filter.filter.weight.device,
+            #         )[:, :, None, None].expand_as(block.filter.filter.weight).clone()
+            #         new_weight[:, :, : old_weight.shape[2], :] = old_weight
+            #         model_state_dict[f"sfnonet.blocks.{i}.filter.filter.weight"] = (
+            #             new_weight
+            #         )
+
+            self.model.load_state_dict(model_state_dict, strict=False)
+
+        self.loss = LOSSES[loss](**loss_kwargs)
+        self.metrics = ManyMetrics(metrics)
+
+    def forward(self, batch):
+        
+        T = max(batch[v].shape[1] for v in batch if isinstance(batch[v], torch.Tensor))
+
+        for t in range(T):
+            if t == 0:
+                curr_preds = {}  # {batch[v][:, t] for v in self.hparams.target_vars}
+
+            curr_data = {
+                v: batch[v][:, t] if batch[v].shape[1] == T else batch[v][:, 0]
+                for v in batch
+                if isinstance(batch[v], torch.Tensor)
+            }
+
+            curr_data |= curr_preds
+
+            if self.no_grad_shedule(self.global_step, t):
+                with torch.no_grad():
+                    curr_preds = self.model(curr_data)
+            else:
+                curr_preds = self.model(curr_data)
+
+            if t == 0:
+                preds = {k : torch.empty((curr_preds[k].shape[0], T, *curr_preds[k].shape[1:]), device=curr_preds[k].device) for k in curr_preds}
+
+            for v in preds:
+                preds[v][:, t] = curr_preds[v]
+
+        return preds
+
+    def no_grad_shedule(self, global_step, t):
+        return (
+            self.hparams.no_grad_step_shedule
+            and (global_step > self.hparams.no_grad_step_shedule["from_step"])
+            and (t in self.hparams.no_grad_step_shedule["t_no_grad"])
+        )
+
+    def common_step(self, batch):
+        preds = self(batch)
+
+        loss, losses = self.loss(preds, batch)
+
+        return loss, losses, preds
+
+    def training_step(self, batch, batch_idx):
+        loss, losses, preds = self.common_step(batch)
+
+        self.log("Loss/Train", loss, prog_bar=True)
+        self.log_dict(losses)
+        return loss
+
+    def validation_step(self, batch, batch_idx, dataloader_idx=0):
+        dataloader_name = self.hparams.val_dataloader_names[dataloader_idx]
+
+        loss, losses, preds = self.common_step(batch)
+
+        self.log(
+            f"Loss/Val_{dataloader_name}",
+            loss,
+            sync_dist=True,
+            add_dataloader_idx=False,
+        )
+
+        metrics = self.metrics(preds, batch)
+
+        self.log_dict(
+            {f"{k}_Val_{dataloader_name}": v for k, v in metrics.items()},
+            sync_dist=True,
+            add_dataloader_idx=False,
+        )
+
+        # self.plots(preds, batch, batch_idx, dataloader_idx)
+
+    def plots(self, preds, batch, batch_idx, dataloader_idx):
+        if (batch_idx < 1) and (dataloader_idx == 0) and (self.global_rank == 0):
+            plots_val_step(
+                self.logger.experiment,
+                self.current_epoch,
+                preds,
+                batch,
+                batch_idx=batch_idx,
+                **self.hparams.plot_kwargs,
+            )
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.AdamW(
+            self.parameters(),
+            lr=self.hparams.lr,
+            betas=(0.9, 0.95),
+            weight_decay=self.hparams.weight_decay,
+        )
+
+        def lr_lambda(warmup_steps, halfcosine_steps, min_lr=3e-7, max_lr=1.0):
+            def ret_lambda(current_step):
+                if current_step <= warmup_steps:
+                    return min_lr + (max_lr - min_lr) * current_step / warmup_steps
+                elif current_step <= warmup_steps + halfcosine_steps:
+                    return min_lr + (max_lr - min_lr) * (
+                        (
+                            math.cos(
+                                ((current_step - warmup_steps) / (halfcosine_steps))
+                                * math.pi
+                            )
+                            + 1
+                        )
+                        / 2
+                    )
+                else:
+                    return min_lr
+
+            return ret_lambda
+
+        lr_scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimizer, lr_lambda=lr_lambda(**self.hparams.lr_shedule_kwargs)
+        )
+        lr_scheduler_config = {
+            "scheduler": lr_scheduler,
+            "interval": "step",
+            "frequency": 1,
+        }
+        return {"optimizer": optimizer, "lr_scheduler": lr_scheduler_config}
+
+
+# %%
+transport_model =  NeuralTransport.load_from_checkpoint(last_ckpt_path, map_location="cpu")
+transport_model.eval()
+
+# %%
+flow_model = transport_model.model
+
+# %%
+dl_val = dset.val_dataloader()
+batch_val = next(iter(dl_val[0]))
+
+# %%
+with torch.no_grad():
+    output = transport_model(batch_val)
+
+# %%
+target = batch_val["co2massmix"][0].cpu().numpy()
+
+# %%
+target = batch_val["co2massmix"][0].cpu().numpy()
+pred = output["co2massmix"][0].cpu().numpy()
+
+vlev = 0
+target_2d = target[0, :, vlev]
+pred_2d = pred[0, :, vlev]
+
+nlat, nlon = 32, 64
+target_2d = target_2d.reshape(nlat, nlon)
+pred_2d = pred_2d.reshape(nlat, nlon)
+
+# vmin = min(target_2d.min(), pred_2d.min())
+# vmax = max(target_2d.max(), pred_2d.max())
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+# Plot target
+im0 = axes[0].imshow(target_2d[::-1], cmap="viridis") #, vmin=vmin, vmax=vmax
+axes[0].set_title("Target")
+axes[0].set_xlabel("Longitude index")
+axes[0].set_ylabel("Latitude index")
+
+# Plot prediction
+im1 = axes[1].imshow(pred_2d[::-1], cmap="viridis") #, vmin=vmin, vmax=vmax
+axes[1].set_title("Prediction")
+axes[1].set_xlabel("Longitude index")
+axes[1].set_ylabel("Latitude index")
+
+# Adjust horizontal spacing between subplots
+plt.subplots_adjust(wspace=0.3)
+
+plt.savefig("flowmatching_target_prediction.png")
+plt.show()
+
+
+# %%
+print("Target min/max:", target.min(), target.max())
+print("Pred   min/max:", pred.min(), pred.max())
 
 # %%
 

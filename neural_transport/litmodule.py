@@ -79,6 +79,7 @@ class NeuralTransport(pl.LightningModule):
         self.metrics = ManyMetrics(metrics)
 
     def forward(self, batch):
+
         T = max(batch[v].shape[1] for v in batch if isinstance(batch[v], torch.Tensor))
 
         for t in range(T):
