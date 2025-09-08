@@ -162,3 +162,14 @@ cython_debug/
 slurm*.out
 *.egg-info
 */__pycache__/*
+
+
+# Plots generated (Jonathan)
+neural_transport/flowmatching_dev/*.png
+
+# Old/Test versions (Jonathan)
+neural_transport/flowmatching_dev/flow_matching_mini.ipynb
+neural_transport/flowmatching_dev/flow_matching_mini_mlp_2d.ipynb
+neural_transport/flowmatching_dev/flow_matching_mini_unet_2d.ipynb
+neural_transport/flowmatching_dev/testScript_ancient.ipynb
+neural_transport/flowmatching_dev/testScript_old.py

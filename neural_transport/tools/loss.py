@@ -75,6 +75,7 @@ class MSE(nn.Module):
             self.sht = torch_harmonics.RealSHT(nlat, nlon, grid="equiangular")
 
     def forward(self, preds, batch):
+        print("Forward pass")
         loss = 0
         losses = {}
         if self.normalize_batch:
@@ -89,6 +90,7 @@ class MSE(nn.Module):
                         batch_normalized[key] = x_in_curr
         for v in self.vars:
             if self.normalize_batch:
+                print(f"mean and std of {v}_next in batch_normalized: ", batch_normalized[f"{v}_next"].mean().item(), batch_normalized[f"{v}_next"].std().item())
                 se = (preds[v] - batch_normalized[f"{v}_next"]) ** 2
             else:
                 se = (preds[v] - batch[f"{v}_next"]) ** 2
