@@ -96,12 +96,8 @@ class FlowMatching(RegularGridModel):
         )
 
         # sample x_t from the path
-        # access scheduler for affine path
-        scheduler_out = self.path.scheduler(t)
-        d_sigma_t = scheduler_out.d_sigma_t.view(-1, 1, 1, 1)
-        d_alpha_t = scheduler_out.d_alpha_t.view(-1, 1, 1, 1)
-
-        x_t = (path_sample.x_t - d_sigma_t * x_0) / d_alpha_t
+    
+        x_t = path_sample.x_t
         # x_t = path_sample.x_t + x_0 (simplified version)
         # this requires target_vars to be first in input_vars and all nlev-dimensional
         x_in[:, :self.nlev*len(self.target_vars), :, :] = x_t  # [B C Nlat Nlon] 
@@ -110,6 +106,12 @@ class FlowMatching(RegularGridModel):
         x_in = torch.cat([x_in, t_expanded], dim=1)  # [B C+1 Nlat Nlon]
 
         x_out = self.submodel.model(x_in)
+        # access scheduler for affine path
+        scheduler_out = self.path.scheduler(t)
+        d_sigma_t = scheduler_out.d_sigma_t.view(-1, 1, 1, 1)
+        d_alpha_t = scheduler_out.d_alpha_t.view(-1, 1, 1, 1)
+
+        x_out = (x_out - d_sigma_t * x_0) / d_alpha_t # to adjust for loss function definition
 
         return x_out #, x_1_normalized # return {self.target_vars[0]: x_out}
 

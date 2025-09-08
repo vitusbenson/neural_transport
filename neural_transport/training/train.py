@@ -18,14 +18,8 @@ from neural_transport.litmodule import NeuralTransport
 
 
 def train_singlestep(
-    run_dir, data_kwargs, lit_module_kwargs, trainer_kwargs, ckptpath=None
-):
-    run_dir = Path(run_dir)
-
-    logger = pl.loggers.tensorboard.TensorBoardLogger(
-        run_dir, name="", version="singlestep"
-    )
-    checkpoint_callback = pl.callbacks.ModelCheckpoint(
+    run_dir, data_kwargs, lit_module_kwargs, trainer_kwargs, ckptpath=None,
+    ckpt_kwargs=dict(
         save_top_k=1,  # -1,
         save_last=True,
         monitor="Loss/Val_rollout",
@@ -33,16 +27,23 @@ def train_singlestep(
         auto_insert_metric_name=False,
         every_n_epochs=1,
     )
+):
+    run_dir = Path(run_dir)
+
+    logger = pl.loggers.tensorboard.TensorBoardLogger(
+        run_dir, name="", version="singlestep"
+    )
+    checkpoint_callback = pl.callbacks.ModelCheckpoint(
+        **ckpt_kwargs
+    )
     checkpoint_callback.CHECKPOINT_NAME_LAST = "best"
 
+    ckpt_kwargs["monitor"] = "step"
+    ckpt_kwargs["mode"] = "max"
+    ckpt_kwargs["filename"] = "latest-" + ckpt_kwargs["filename"]
+
     latest_checkpoint_callback = pl.callbacks.ModelCheckpoint(
-        save_top_k=1,
-        save_last=True,
-        monitor="step",
-        mode="max",
-        filename="latest-Epoch={epoch}-Step={step}-LossVal={Loss/Val_rollout:.6f}",
-        auto_insert_metric_name=False,
-        every_n_epochs=1,
+        **ckpt_kwargs
     )
 
     lr_monitor = pl.callbacks.LearningRateMonitor()
@@ -323,6 +324,14 @@ def train_and_eval_singlestep(
     ckpt="last",
     massfixer="default",
     pretrained_ckptpath=None,
+    ckpt_kwargs=dict(
+        save_top_k=1,  # -1,
+        save_last=True,
+        monitor="Loss/Val_rollout",
+        filename="Epoch={epoch}-Step={step}-LossVal={Loss/Val_rollout:.6f}",
+        auto_insert_metric_name=False,
+        every_n_epochs=1,
+    )
 ):
     if train:
         train_singlestep(
@@ -331,6 +340,7 @@ def train_and_eval_singlestep(
             lit_module_kwargs,
             trainer_kwargs,
             ckptpath=pretrained_ckptpath,
+            ckpt_kwargs=ckpt_kwargs,
         )
 
     if ("SLURM_PROCID" in os.environ) and (int(os.environ["SLURM_PROCID"]) > 0):

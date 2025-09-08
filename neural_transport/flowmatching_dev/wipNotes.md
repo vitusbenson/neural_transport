@@ -17,3 +17,14 @@ Flow Matching Steps
 
 (a): It is just stacked as another channel:
         `x_in = torch.cat(list(batch_normalized.values()), dim=-1)`
+
+Next steps:
+predict -> predict_forecasting
+add predict_generative
+
+add loss for generations that check probability distribution
+
+investigate into std.
+
+plot predictions during training (x_0 + x_t) for checkerboard
+

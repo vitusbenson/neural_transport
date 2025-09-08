@@ -132,7 +132,14 @@ class NeuralTransport(pl.LightningModule):
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         dataloader_name = self.hparams.val_dataloader_names[dataloader_idx]
 
+        if type(self.model).__name__ == "FlowMatching":
+            self.model.train()
+
         loss, losses, preds = self.common_step(batch)
+
+        if type(self.model).__name__ == "FlowMatching":
+            for v in preds:
+                preds[v] = preds[v] * batch[f"{v}_scale"] + batch[f"{v}_offset"]
 
         self.log(
             f"Loss/Val_{dataloader_name}",
@@ -149,7 +156,7 @@ class NeuralTransport(pl.LightningModule):
             add_dataloader_idx=False,
         )
 
-        # self.plots(preds, batch, batch_idx, dataloader_idx)
+        self.plots(preds, batch, batch_idx, dataloader_idx)
 
     def plots(self, preds, batch, batch_idx, dataloader_idx):
         if (batch_idx < 1) and (dataloader_idx == 0) and (self.global_rank == 0):

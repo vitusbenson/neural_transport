@@ -173,3 +173,4 @@ neural_transport/flowmatching_dev/flow_matching_mini_mlp_2d.ipynb
 neural_transport/flowmatching_dev/flow_matching_mini_unet_2d.ipynb
 neural_transport/flowmatching_dev/testScript_ancient.ipynb
 neural_transport/flowmatching_dev/testScript_old.py
+neural_transport/flowmatching_dev/debug_test.ipynb
