@@ -9,6 +9,7 @@ import xarray as xr
 from neural_transport.datamodule import CarbonDataModule, CarbonDataset
 from neural_transport.inference.analyse import compute_local_scores, compute_score_df
 from neural_transport.inference.forecast import iterative_forecast
+from neural_transport.inference.generative import iterative_generate
 from neural_transport.inference.plot_results import (
     animate_predictions,
     plot_metrics,
@@ -171,6 +172,7 @@ def predict(
     lit_module_kwargs={},
     massfixer="default",
     zero_surfflux=False,
+    save_obs=False,
 ):
     log_path = Path(log_path)
 
@@ -190,22 +192,41 @@ def predict(
 
     dataset = load_dataset(data_path_forecast, data_kwargs)
 
-    print(f"Forecasting {ckptpath} {ckpt} CKPT")
-    model = NeuralTransport.load_from_checkpoint(ckptpath, **lit_module_kwargs)
-    outpath.mkdir(parents=True, exist_ok=True)
-    iterative_forecast(
-        model,
-        dataset,
-        outpath,
-        rollout=(freq != "singlestep"),
-        device=device,
-        verbose=True,
-        freq=freq,
-        remap=("latlon" not in data_kwargs["grid"]),
-        target_vars_3d=["co2massmix"],
-        target_vars_2d=[],
-        zero_surfflux=zero_surfflux,
-    )
+    if type(lit_module_kwargs['model']).__name__ == "FlowMatching":
+        print(f"Generating {ckptpath} {ckpt} CKPT")
+        model = NeuralTransport.load_from_checkpoint(ckptpath, **lit_module_kwargs)
+        outpath.mkdir(parents=True, exist_ok=True)
+        iterative_generate(
+            model,
+            dataset,
+            outpath,
+            rollout=(freq != "singlestep"),
+            device=device,
+            freq=freq,
+            zero_surfflux=zero_surfflux,
+            remap=("latlon" not in data_kwargs["grid"]),
+            target_vars_3d=["co2massmix"],
+            target_vars_2d=[],
+            save_obs=save_obs,
+            n_samples=10,
+        )
+    else:
+        print(f"Forecasting {ckptpath} {ckpt} CKPT")
+        model = NeuralTransport.load_from_checkpoint(ckptpath, **lit_module_kwargs)
+        outpath.mkdir(parents=True, exist_ok=True)
+        iterative_forecast(
+            model,
+            dataset,
+            outpath,
+            rollout=(freq != "singlestep"),
+            device=device,
+            verbose=True,
+            freq=freq,
+            remap=("latlon" not in data_kwargs["grid"]),
+            target_vars_3d=["co2massmix"],
+            target_vars_2d=[],
+            zero_surfflux=zero_surfflux,
+        )
 
 
 def load_pred_targ(target_path, pred_path):

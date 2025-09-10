@@ -7,7 +7,7 @@ Flow Matching Steps
 05. Integrate into neural_transport                                      v
 06. create slurm script                                                  v
 07. test a training                                                      v
-08. adapt evaluation (plotting, ...)                                     
+08. adapt evaluation (plotting, iterative_generate, loss) (b)            
 09. Load OCO-2 dataset into neural_transport                             
 10. Integrate OCO-2 data into carbonbench                                
 11. Add possibility of covariats and (CO_2)_{t-1}                        
@@ -17,14 +17,4 @@ Flow Matching Steps
 
 (a): It is just stacked as another channel:
         `x_in = torch.cat(list(batch_normalized.values()), dim=-1)`
-
-Next steps:
-predict -> predict_forecasting
-add predict_generative
-
-add loss for generations that check probability distribution
-
-investigate into std.
-
-plot predictions during training (x_0 + x_t) for checkerboard
-
+(b): add `iterative_generate()` to `iterative_forecast()` in `predict()`
