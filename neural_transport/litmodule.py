@@ -139,7 +139,8 @@ class NeuralTransport(pl.LightningModule):
 
         if type(self.model).__name__ == "FlowMatching":
             for v in preds:
-                preds[v] = preds[v] * batch[f"{v}_scale"] + batch[f"{v}_offset"]
+                if v != "dx_t":
+                    preds[v] = preds[v] * batch[f"{v}_scale"] + batch[f"{v}_offset"]
 
         self.log(
             f"Loss/Val_{dataloader_name}",

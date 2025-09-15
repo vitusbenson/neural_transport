@@ -58,8 +58,9 @@ class FlowMatching(RegularGridModel):
     
     def forward(self, batch):
         if self.training:
-            x_out = self.training_forward(batch)
+            x_out, dx_t = self.training_forward(batch)
             preds = self.postprocess_outputs(x_out, batch, denormalize=False)
+            preds["dx_t"] = dx_t.permute(0, 2, 3, 1).reshape(*preds[self.target_vars[0]].shape) # [B N C]
             return preds
         elif self.return_intermediates:
             x_in = self.preprocess_inputs(batch)
@@ -106,14 +107,17 @@ class FlowMatching(RegularGridModel):
         x_in = torch.cat([x_in, t_expanded], dim=1)  # [B C+1 Nlat Nlon]
 
         x_out = self.submodel.model(x_in)
-        # access scheduler for affine path
-        scheduler_out = self.path.scheduler(t)
-        d_sigma_t = scheduler_out.d_sigma_t.view(-1, 1, 1, 1)
-        d_alpha_t = scheduler_out.d_alpha_t.view(-1, 1, 1, 1)
 
-        x_out = (x_out - d_sigma_t * x_0) / d_alpha_t # to adjust for loss function definition
+        dx_t = path_sample.dx_t
 
-        return x_out #, x_1_normalized # return {self.target_vars[0]: x_out}
+        # # access scheduler for affine path
+        # scheduler_out = self.path.scheduler(t)
+        # d_sigma_t = scheduler_out.d_sigma_t.view(-1, 1, 1, 1)
+        # d_alpha_t = scheduler_out.d_alpha_t.view(-1, 1, 1, 1)
+
+        # x_out = (x_out - d_sigma_t * x_0) / d_alpha_t # to adjust for loss function definition
+
+        return x_out, dx_t #, x_1_normalized # return {self.target_vars[0]: x_out}
 
     def return_velocity_wrapper(self, submodel, static_inputs):
         return VelocityWrapper(
@@ -126,7 +130,7 @@ class FlowMatching(RegularGridModel):
     def model(self, x_in):
         # sample noise to get x_init [B C Nlat Nlon]
         all_levels = x_in[:, :self.nlev*len(self.target_vars), :, :]  # [B C Nlat Nlon]
-        x_init = torch.randn(*all_levels.shape, device=x_in.device)
+        x_init = torch.randn_like(all_levels, device=x_in.device)
         #surface_level = x_in[:, :1, :, :]  # [B 1 Nlat Nlon]
         #x_init = torch.randn(*surface_level.shape, device=batch[self.target_vars].device)
 
