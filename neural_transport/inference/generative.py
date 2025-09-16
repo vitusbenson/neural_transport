@@ -115,10 +115,6 @@ def iterative_generate(
         for k, v in preds.items():
             if isinstance(v, list):
                 v = v[0]
-            if k == "trajectory":
-                v = v.squeeze(1)
-                B, C, Nlat, Nlon, T = v.shape
-                v = v.reshape(B, T, Nlat*Nlon, C)
             preds_fixed[k] = v
 
         if save_obs:
@@ -129,11 +125,16 @@ def iterative_generate(
             {k: dataset.tensor_to_xarray(pred) for k, pred in preds_fixed.items()}
         )
 
+        # ds = ds.assign_coords(
+        #     time=prototype_zarr.time[:traj.shape[1]],
+        #     sample=("sample", [i]),
+        # )
         ds = ds.assign_coords(
-            time=prototype_zarr.time[:traj.shape[-1]],
+            time=("time", prototype_zarr.time[:traj.shape[1]].values if traj.ndim > 0 else [0]),
             sample=("sample", [i]),
         )
-
+        print(ds.dims)
+        
         if remap:
             ds = remap_with_cdo(dataset, prototype_zarr.isel(time=0), ds)
 

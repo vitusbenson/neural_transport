@@ -64,8 +64,11 @@ class FlowMatching(RegularGridModel):
         elif self.return_intermediates:
             x_in = self.preprocess_inputs(batch)
             trajectory = self.model(x_in)
-            x_out = trajectory[...,-1]
+            x_out = trajectory[-1,...]
             sol = self.postprocess_outputs(x_out, batch)
+            T, B, C, Nlat, Nlon = trajectory.shape
+            trajectory = trajectory.permute(0, 1, 3, 4, 2) # [T B Nlat Nlon C]
+            trajectory = trajectory.reshape(T, B, Nlat*Nlon, C) # [T B Nlat*Nlon C]
             sol["trajectory"] = trajectory
             return sol
         else:
@@ -146,7 +149,6 @@ class FlowMatching(RegularGridModel):
                             step_size=self.step_size,
                             return_intermediates=self.return_intermediates
         ) # [T B C Nlat Nlon]
-        trajectory = trajectory.permute(1, 2, 3, 4, 0) # [B C Nlat Nlon T]
         return trajectory
     
     #def inference_obs_forward(self, batch):

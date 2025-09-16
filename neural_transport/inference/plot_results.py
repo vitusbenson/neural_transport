@@ -143,12 +143,40 @@ def get_metric_limits(metric, metric_pred):
 METRIC_THRESH = dict(r2=0.9, nse=0.5, rel_mean=1.0, rel_std=0.9)
 
 
+def compute_metric_over_samples(metric_func, pred, targ, weights, dims=None):
+    """
+    Computes a metric over a generative forecast (sample dimension) for single timestep.
+    Returns the mean metric across samples.
+    """
+    if dims is None:
+        dims = [d for d in ["lat", "lon", "time"] if d in pred.dims]
+    
+    targ_aligned = targ
+    if "time" not in pred.dims and "time" in targ.dims:
+        targ_aligned = targ.isel(time=0, drop=True)
+        weights = weights.isel(time=0, drop=True) if "time" in weights.dims else weights
+        dims = [d for d in dims if d != "time"]
+    
+    metrics = []
+    for s in range(pred.sizes["sample"]):
+        metrics.append(
+            metric_func(
+                pred.isel(sample=s).compute(),
+                targ_aligned.compute(),
+                weights,
+                dims=dims,
+            )
+        )
+
+    metric_mean = xr.concat(metrics, dim="sample").mean("sample")
+    return metric_mean
+
 def plot_metric_over_leadtime(pred, targ, metric, figsize=(8, 5), freq="QS"):
     weights = np.cos(np.deg2rad(targ.lat.compute()))
     _, weights = xr.broadcast(targ, weights)
 
     metric_func = METRICS[metric]
-
+    
     metric_pred = metric_func(pred.compute(), targ.compute(), weights)
 
     ylim = get_metric_limits(metric, metric_pred)
@@ -210,7 +238,14 @@ def plot_metric_over_space(pred, targ, metric, figsize=(8, 4)):
 
     metric_func = METRICS[metric]
 
-    metric_pred = metric_func(pred.compute(), targ.compute(), weights, dims=["time"])
+    reduce_dims = []
+    if "time" in pred.dims:
+        reduce_dims.append("time")
+    
+    if "sample" in pred.dims:
+        metric_pred = compute_metric_over_samples(metric_func, pred, targ, weights, dims=reduce_dims)
+    else:
+        metric_pred = metric_func(pred.compute(), targ.compute(), weights, dims=reduce_dims)
 
     ylim = get_metric_limits(metric, metric_pred)
 
@@ -257,7 +292,10 @@ def plot_metric_over_latheight(pred, targ, metric, figsize=(8, 4)):
 
     metric_func = METRICS[metric]
 
-    metric_pred = metric_func(pred.compute(), targ.compute(), weights, dims=["time"])
+    if "sample" in pred.dims:
+        metric_pred = compute_metric_over_samples(metric_func, pred, targ, weights, dims=["time"])
+    else:
+        metric_pred = metric_func(pred.compute(), targ.compute(), weights, dims=["time"])
 
     ylim = get_metric_limits(metric, metric_pred)
 
@@ -289,12 +327,17 @@ def get_zonal_spectrum(pred, targ):
 def plot_zonal_spectrum_line(pred, targ, figsize=(8, 5), **kwargs):
     Specpred, Spectarg = get_zonal_spectrum(pred, targ)
 
+    mean_dims_pred = [d for d in ["time", "sample"] if d in Specpred.dims]
+    mean_dims_targ = [d for d in ["time", "sample"] if d in Spectarg.dims]
+    Specpred_mean = Specpred.mean(mean_dims_pred) if mean_dims_pred else Specpred
+    Spectarg_mean = Spectarg.mean(mean_dims_targ) if mean_dims_targ else Spectarg
+
     with mpl.rc_context(mpl_rc_params):
         fig = plt.figure(figsize=figsize)
         ax = plt.subplot()
 
         xr.concat(
-            [Specpred.mean("time"), Spectarg.mean("time")], dim=["Prediction", "Target"]
+            [Specpred_mean, Spectarg_mean], dim=["Prediction", "Target"]
         ).rename({"concat_dim": "Variable"}).plot(yscale="log", hue="Variable", ax=ax)
         ax.set_title("Zonal Power Spectrum")
         ax.set_xlabel("Frequency")
@@ -308,23 +351,34 @@ def plot_zonal_spectrum_line(pred, targ, figsize=(8, 5), **kwargs):
 def plot_zonal_spectrum_heatmap(pred, targ, figsize=(8, 5), freq="QS", **kwargs):
     Specpred, Spectarg = get_zonal_spectrum(pred, targ)
 
-    Specpredf = freq_mean(Specpred, freq=freq)
-    Spectargf = freq_mean(Spectarg, freq=freq)
+    rename_dict = {"concat_dim": "Variable", "freq_lon": "Frequency"}
 
+    average_time = False
+    if "time" not in Specpred.dims:
+        average_time = True
+    else:
+        rename_dict["time"] = "Lead time [days]"
+    
+    Specpredf = freq_mean(Specpred, freq=freq)
+    Spectargf = freq_mean(Spectarg, freq=freq, average_time=average_time)
+
+    result = xr.concat([Specpredf, Spectargf], dim=["Prediction", "Target"])
+    result = result.rename(rename_dict)
+    
     with mpl.rc_context(mpl_rc_params):
-        xr.concat([Specpredf, Spectargf], dim=["Prediction", "Target"]).rename(
-            {
-                "concat_dim": "Variable",
-                "freq_lon": "Frequency",
-                "time": "Lead time [days]",
-            }
-        ).plot(
-            cmap="Spectral",
-            norm=mpl.colors.LogNorm(),
-            col="Variable",
-            figsize=figsize,
-            cbar_kwargs={"label": "Power"},
-        )
+        if "time" in Specpredf.dims:
+            result.plot(
+                cmap="Spectral",
+                norm=mpl.colors.LogNorm(),
+                col="Variable",
+                figsize=figsize,
+                cbar_kwargs={"label": "Power"},
+            )
+        else:
+            result.plot.line(
+                hue="Variable",
+                figsize=figsize,
+            )
         fig = plt.gcf()
         plt.suptitle("Zonal Power Spectrum")
 
@@ -368,9 +422,11 @@ def get_pred_targ_from_varname(preds, targs, varname):
 
     pred = preds[varname].compute()
     targ = targs[varname].compute()
-    pred["time"] = targ["time"]
-    pred["level"] = targ["level"]
 
+    if "sample" not in pred.dims:
+        pred["time"] = targ["time"]
+    
+    pred["level"] = targ["level"]
     return pred, targ
 
 
@@ -383,14 +439,14 @@ def plot_metrics(
     over_latheight=True,
     zonal_spectrum=True,
     varnames=["co2molemix"],
-    metrics=["rmse", "mae", "bias", "r2", "nse", "rel_mean", "rel_std"],
+    metrics=["rmse", "mae", "bias", "rel_mean", "rel_std"], # "r2", "nse",
     imgformats=["svg", "png", "pdf"],
 ):
     out_dir = Path(out_dir)
     out_dir.mkdir(exist_ok=True, parents=True)
 
     plt_fcts = []
-    if over_leadtime:
+    if over_leadtime and "sample" not in preds.dims:
         plt_fcts.append(["over_leadtime", plot_metric_over_leadtime])
     if over_space:
         plt_fcts.append(["over_space", plot_metric_over_space])
@@ -596,6 +652,14 @@ def animate_predictions(
 
     for varname in varnames:
         pred, targ = get_pred_targ_from_varname(preds, targs, varname)
+
+        # !!!Caution!!! this is a quick fix producing random movie snippets of different samples, not a continuous time frame
+        if "sample" in pred.dims and "time" in targ.dims:
+            pred = pred.rename({"sample": "time"})
+            min_len = min(pred.sizes["time"], targ.sizes["time"])
+            pred = pred.isel(time=slice(0, min_len))
+            targ = targ.isel(time=slice(0, min_len))
+            pred = pred.assign_coords(time=targ.time)
 
         vmin = targ.isel(level=levels).quantile(0.02).compute().item()
         vmax = targ.isel(level=levels).quantile(0.98).compute().item()

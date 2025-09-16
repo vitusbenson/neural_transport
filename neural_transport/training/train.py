@@ -7,7 +7,7 @@ import pytorch_lightning as pl
 import xarray as xr
 
 from neural_transport.datamodule import CarbonDataModule, CarbonDataset
-from neural_transport.inference.analyse import compute_local_scores, compute_score_df
+from neural_transport.inference.analyse import compute_local_scores, compute_score_df, compute_score_df_generate
 from neural_transport.inference.forecast import iterative_forecast
 from neural_transport.inference.generative import iterative_generate
 from neural_transport.inference.plot_results import (
@@ -208,7 +208,7 @@ def predict(
             target_vars_3d=["co2massmix"],
             target_vars_2d=[],
             save_obs=save_obs,
-            n_samples=10,
+            n_samples=lit_module_kwargs['model'].n_samples,
         )
     else:
         print(f"Forecasting {ckptpath} {ckpt} CKPT")
@@ -242,7 +242,7 @@ def load_pred_targ(target_path, pred_path):
     return co2targ, co2pred
 
 
-def score(target_path, pred_path, obs_pred_path=None, freq="QS"):
+def score(target_path, pred_path, obs_pred_path=None, freq="QS", FM=False):
     co2targ, co2pred = load_pred_targ(target_path, pred_path)
     co2pred = co2pred.isel(time=slice(1, None))
     co2targ = co2targ.isel(time=slice(1, None)).isel(time=slice(len(co2pred.time)))
@@ -253,15 +253,27 @@ def score(target_path, pred_path, obs_pred_path=None, freq="QS"):
     score_path = pred_path.parent.parent.parent / "scores" / ckpt_name
 
     metrics = {}
-    metrics[f"{model_name}_{singlestep_or_rollout}_{ckpt_name}"] = compute_score_df(
-        co2targ,
-        co2pred,
-        freq=freq,
-    )
+    if FM:
+        df_full = compute_score_df_generate(co2targ, co2pred)
+        df_full.index = pd.MultiIndex.from_product(
+            [[f"{model_name}_{singlestep_or_rollout}_{ckpt_name}"], df_full.index],
+            names=["model", "sample"],
+        )
+        score_path.mkdir(parents=True, exist_ok=True)
+        df_full.to_csv(score_path / ("metrics_fullsamples.csv" if freq == "QS" else f"metrics_fullsamples_{freq}.csv"))
 
-    df = pd.DataFrame(metrics).T
-    score_path.mkdir(parents=True, exist_ok=True)
-    df.to_csv(score_path / ("metrics.csv" if freq == "QS" else f"metrics_{freq}.csv"))
+        idx = pd.IndexSlice
+        df_summary = df_full.loc[idx[f"{model_name}_{singlestep_or_rollout}_{ckpt_name}", ["mean", "std"]], :]
+        df_summary.to_csv(score_path / ("metrics.csv" if freq == "QS" else f"metrics_{freq}.csv"))
+    else:
+        metrics[f"{model_name}_{singlestep_or_rollout}_{ckpt_name}"] = compute_score_df(
+            co2targ,
+            co2pred,
+            freq=freq,
+        )
+        df = pd.DataFrame(metrics).T
+        score_path.mkdir(parents=True, exist_ok=True)
+        df.to_csv(score_path / ("metrics.csv" if freq == "QS" else f"metrics_{freq}.csv"))
 
     if obs_pred_path:
         obspreds = xr.open_zarr(obs_pred_path)  # .isel(time = slice(1,None))
@@ -311,6 +323,9 @@ def plot(
             num_workers=num_workers,
         )
 
+    if "samples" in plot_types:
+        pass
+    
     if obs_pred_path and ("obspack" in plot_types):
         obspreds = xr.open_zarr(obs_pred_path)
 
@@ -395,7 +410,12 @@ def train_and_eval_singlestep(
         / f"ckpt={ckpt}_massfixer={massfixer}"
         / f"obs_co2_pred_rollout_{freq}.zarr"
     )
-    score(target_path, pred_path, obs_pred_path)
+    if type(lit_module_kwargs['model']).__name__ == "FlowMatching":
+        FM = True
+        obs_pred_path = None
+    else:
+        FM = False
+    score(target_path, pred_path, obs_pred_path, FM=FM)
     plot(
         target_path,
         pred_path,

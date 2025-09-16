@@ -7,7 +7,7 @@ Flow Matching Steps
 05. Integrate into neural_transport                                      v
 06. create slurm script                                                  v
 07. test a training                                                      v
-08. adapt evaluation (plotting, iterative_generate, loss) (b)            
+08. adapt evaluation (plotting, iterative_generate, score, loss) (b)     
 09. Load OCO-2 dataset into neural_transport                             
 10. Integrate OCO-2 data into carbonbench                                
 11. Add possibility of covariats and (CO_2)_{t-1}                        

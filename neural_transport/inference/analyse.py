@@ -10,7 +10,13 @@ from tensorboard.backend.event_processing.event_accumulator import EventAccumula
 from neural_transport.tools.conversion import *
 
 
-def freq_mean(data, freq="QS"):
+def freq_mean(data, freq="QS", average_time=False):
+    if "sample" in data.dims:
+        data = data.mean("sample")
+
+    if "time" not in data.dims:
+        return data
+    
     if freq:
         dates = pd.date_range(
             data.time[0].values, data.time[-1].values, freq=freq, inclusive="left"
@@ -36,6 +42,9 @@ def freq_mean(data, freq="QS"):
         ).astype("timedelta64[D]")
     except:
         dataf["time"] = dataf.time / 4
+
+    if average_time:
+        dataf = dataf.mean("time")
 
     return dataf
 
@@ -284,6 +293,118 @@ def compute_score_df(targs, preds, freq="QS"):
 
     df = pd.Series(metrics)
 
+    return df
+
+def compute_score_df_generate(targs, preds):
+    """
+    Compute metrics for generated samples where:
+      - targs has dims: [time, level, lat, lon]
+      - preds has dims: [sample, level, lat, lon] (or [sample, (flow)time, level, lat, lon] if trajectory)
+    """
+
+    preds["lat"] = targs["lat"]
+    preds["lon"] = targs["lon"]
+    preds["level"] = targs["level"]
+    
+    targs = targs.isel(time=-1)
+    if "time" in preds.dims:
+        preds = preds.isel(time=-1)
+
+    start = pytime.time()
+
+    # Convert to mole fraction
+    molemix_targ = massmix_to_molemix(targs.co2massmix).transpose("level", "lat", "lon")
+    molemix_pred = massmix_to_molemix(preds.co2massmix).transpose("sample", "level", "lat", "lon")
+
+    # Weights (cos(lat)) – no time dependence, just lat dimension
+    weights = np.cos(np.deg2rad(targs.lat))
+    _, weights = xr.broadcast(targs.co2massmix, weights)
+
+    print(f"Data Loading {pytime.time() - start}")
+
+    results = []
+
+    for i in range(preds.sizes["sample"]):
+        pred_i = molemix_pred.isel(sample=i)
+
+        metrics = {}
+
+        ### Metrics
+        start = pytime.time()
+
+        # Mass balance metrics
+        if "airmass" in targs and "airmass" in preds:
+            targ_mass = (targs.co2massmix * targs.airmass) / 1e6
+            pred_mass = (preds.co2massmix.isel(sample=i) * targs.airmass) / 1e6
+        else:
+            targ_mass = targs.co2massmix
+            pred_mass = preds.co2massmix.isel(sample=i)
+
+        targ_mass_sum = targ_mass.sum(["lat", "lon", "level"]).compute() / 3.664
+        pred_mass_sum = pred_mass.sum(["lat", "lon", "level"]).compute() / 3.664
+
+        metrics["Mass_RMSE"] = ((targ_mass_sum - pred_mass_sum) ** 2).mean().item() ** 0.5
+        print(f"Mass RMSE {pytime.time() - start}")
+        start = pytime.time()
+
+        metrics["RelMass_RMSE"] = (
+            ((targ_mass_sum - pred_mass_sum) / (targ_mass_sum + 1e-12)) ** 2
+        ).mean().item() ** 0.5
+        print(f"RelMass_RMSE {pytime.time() - start}")
+        start = pytime.time()
+
+        ### RMSE / R² across lat, lon, level
+        mse = xskillscore.mse(
+            molemix_targ.chunk({"lat": -1, "lon": -1, "level": -1}),
+            pred_i.chunk({"lat": -1, "lon": -1, "level": -1}),
+            dim=["lat", "lon", "level"],
+            weights=weights,
+        ).compute()
+
+        metrics["RMSE_3D_co2molemix"] = mse.item() ** 0.5
+        print(f"RMSE_3D_co2molemix {pytime.time() - start}")
+        start = pytime.time()
+
+        r = xskillscore.pearson_r(
+            molemix_targ.chunk({"lat": -1, "lon": -1, "level": -1}),
+            pred_i.chunk({"lat": -1, "lon": -1, "level": -1}),
+            dim=["lat", "lon", "level"],
+            weights=weights,
+        ).compute()
+        print(f"Pearson_R {pytime.time() - start}")
+        start = pytime.time()
+
+        metrics["PearsonCorrCoef_3D_co2molemix"] = r.item()
+        metrics["R2_3D_co2molemix"] = (r**2).item()
+        print(f"R2_3D_co2molemix {pytime.time() - start}")
+        start = pytime.time()
+
+        # Relative RMSE
+        targ_mean = molemix_targ.weighted(weights).mean().compute().item()
+        metrics["RelRMSE_3D_co2molemix"] = (mse.item() ** 0.5) / (targ_mean + 1e-12)
+        print(f"RelRMSE_3D_co2molemix {pytime.time() - start}")
+        start = pytime.time()
+
+        # Per-dimension metrics (lat, lon, level)
+        for dim in ["lat", "lon", "level"]:
+            mse_dim = (
+                ((pred_i - molemix_targ) ** 2)
+                .weighted(weights)
+                .mean(dim)
+                .compute()
+            )
+            metrics[f"RMSE_{dim}_co2molemix"] = float(mse_dim.mean()**0.5)
+
+            print(f"RMSE_{dim}_co2molemix {pytime.time() - start}")
+            start = pytime.time()
+        
+        results.append(metrics)
+    
+    df = pd.DataFrame(results)
+    df.loc["mean"] = df.mean()
+    df.loc["std"] = df.std()
+
+    print(f"Metrics {results} {pytime.time() - start}")
     return df
 
 

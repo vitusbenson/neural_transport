@@ -99,14 +99,16 @@ class NeuralTransport(pl.LightningModule):
                     curr_preds = self.model(curr_data)
             else:
                 curr_preds = self.model(curr_data)
-
             if t == 0:
                 preds = {k : torch.empty((curr_preds[k].shape[0], T, *curr_preds[k].shape[1:]), device=curr_preds[k].device) for k in curr_preds}
 
             for v in preds:
                 preds[v][:, t] = curr_preds[v]
-
-        return preds
+                
+        if T == 1 and "trajectory" in preds:
+            preds["trajectory"] = preds["trajectory"].squeeze(1) # [T_Flow T B N C] -> [T_Flow B N C]
+            preds["trajectory"] = preds["trajectory"].permute(1, 0, 2, 3)
+        return preds # [B, T, Nlat*Nlon, C]
 
     def no_grad_shedule(self, global_step, t):
         return (
