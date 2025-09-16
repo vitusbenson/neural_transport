@@ -44,6 +44,20 @@ class MAE(nn.Module):
 
         return loss, losses
 
+class FlowMatchingMSE(nn.Module):
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self, preds, batch):
+        loss = 0
+        losses = {}
+        se = (preds["co2massmix"] - preds["dx_t"])**2
+        mse = torch.mean(se)
+
+        loss += mse
+        losses["Loss_FlowMatching/mse"] = mse
+
+        return loss, losses
 
 class MSE(nn.Module):
     def __init__(
@@ -169,4 +183,5 @@ class MSE(nn.Module):
 LOSSES = {
     "mse": MSE,
     "mae": MAE,
+    "flowmatching_mse": FlowMatchingMSE,
 }
