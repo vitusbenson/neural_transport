@@ -29,9 +29,11 @@ class VelocityWrapper(nn.Module):
     def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         B, _, Nlat, Nlon = x.shape
         t_expanded = t.view(1, 1, 1, 1).expand(B, 1, Nlat, Nlon)
-        x_in = torch.cat(
-            [x, t_expanded] + [self.static_inputs], dim=1
-        ) # [B C_total Nlat Nlon]
+        if self.static_inputs.numel() > 0:
+            static_inputs = self.static_inputs.to(x.device)
+            x_in = torch.cat([x, t_expanded, static_inputs], dim=1) # [B C_total Nlat Nlon]
+        else:
+            x_in = torch.cat([x, t_expanded], dim=1)
         out = self.submodel.model(x_in)
         return out[:, :self.nlev, :, :]
     
@@ -54,8 +56,7 @@ class FlowMatching(RegularGridModel):
         self.step_size = step_size
         self.path = AffineProbPath(scheduler=CondOTScheduler())
         self.target_vars = self.submodel.target_vars # Here target_vars[0] is supposed to be "co2massmix"
-        # self.velocity_model = VelocityWrapper(self.submodel, self.target_vars)
-    
+
     def forward(self, batch):
         if self.training:
             x_out, dx_t = self.training_forward(batch)
@@ -64,7 +65,14 @@ class FlowMatching(RegularGridModel):
             return preds
         elif self.return_intermediates:
             x_in = self.preprocess_inputs(batch)
-            trajectory = self.model(x_in)
+            all_levels = x_in[:, :self.nlev*len(self.target_vars), :, :]  # [B C Nlat Nlon]
+            if "noise" in batch:
+                noise = batch["noise"]
+                B, N, C = noise.shape
+                x_init = noise.reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2) # [B C Nlat Nlon]
+            else:
+                x_init = torch.randn_like(all_levels, device=x_in.device)
+            trajectory = self.inference_forward(x_in, x_init)
             x_out = trajectory[-1,...]
             sol = self.postprocess_outputs(x_out, batch)
             T, B, C, Nlat, Nlon = trajectory.shape
@@ -100,7 +108,6 @@ class FlowMatching(RegularGridModel):
         )
 
         # sample x_t from the path
-    
         x_t = path_sample.x_t
         # x_t = path_sample.x_t + x_0 (simplified version)
         # this requires target_vars to be first in input_vars and all nlev-dimensional
@@ -122,7 +129,7 @@ class FlowMatching(RegularGridModel):
 
         return x_out, dx_t #, x_1_normalized # return {self.target_vars[0]: x_out}
 
-    def return_velocity_wrapper(self, submodel, static_inputs):
+    def return_velocity_wrapper(self, submodel, static_inputs=None):
         return VelocityWrapper(
             submodel=submodel,
             nlev=self.nlev,
@@ -130,12 +137,11 @@ class FlowMatching(RegularGridModel):
         )
 
     # inference_forward
-    def model(self, x_in):
+    def inference_forward(self, x_in, x_init):
+
         # sample noise to get x_init [B C Nlat Nlon]
         all_levels = x_in[:, :self.nlev*len(self.target_vars), :, :]  # [B C Nlat Nlon]
-        x_init = torch.randn_like(all_levels, device=x_in.device)
         #surface_level = x_in[:, :1, :, :]  # [B 1 Nlat Nlon]
-        #x_init = torch.randn(*surface_level.shape, device=batch[self.target_vars].device)
 
         # get timesteps for integration [T]
         time_grid = torch.linspace(0, 1, steps=10, device=x_init.device)
@@ -143,7 +149,7 @@ class FlowMatching(RegularGridModel):
         # UNet expects normalization parameters
         velocity_model = self.return_velocity_wrapper(
             submodel=self.submodel,
-            static_inputs=x_in[:, self.nlev*len(self.target_vars):, :, :],  # [B C Nlat Nlon] (static inputs)
+            # static_inputs=x_in[:, self.nlev*len(self.target_vars):, :, :],  # [B C Nlat Nlon] (static inputs for conditioning later)
         )
 
         # solve the ODE to get the trajectory

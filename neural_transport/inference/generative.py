@@ -71,6 +71,55 @@ def remap_with_cdo(dataset, prototype_zarr, ds):
     return ds_remap
 
 
+def generate_noise(batch, n_samples=10, noise=None):
+
+    all_levels = batch["co2massmix"].unsqueeze(0)
+    if noise is None:
+        return [torch.randn_like(all_levels) for _ in range(n_samples)]
+    
+    elif noise == "spiral_noise":
+        x0 = torch.randn_like(all_levels)
+        v = torch.randn_like(all_levels)
+        x0_unit = x0 / x0.norm()
+        v_unit = v / v.norm()
+        angles = torch.linspace(0, 4*torch.pi, n_samples)
+
+        spiral_noises = []
+        for a in angles:
+            x_init = torch.cos(a) * x0_unit + torch.sin(a) * v_unit
+            spiral_noises.append(x_init)
+        return spiral_noises
+
+    elif noise == "hypersphere_noise":
+        # Step 1: pick a reference noise vector
+        x0 = torch.randn_like(all_levels)
+        # Step 2: pick a direction vector (independent random noise)
+        v = torch.randn_like(all_levels)
+        # Step 3: normalize both to have unit norm
+        x0_unit = x0 / x0.norm()
+        v_unit = v / v.norm()
+        angles = torch.linspace(0, 4*torch.pi, n_samples)
+
+        spiral_noises = []
+        for a in angles:
+            # Step 4: rotate between x0 and v
+            x_init = torch.cos(a) * x0_unit + torch.sin(a) * v_unit
+            # Step 5: scale radius outward
+            r = 1.0 + 0.2 * (a / angles[-1])  # gradually increase radius
+            x_init_scaled = r * x_init
+            spiral_noises.append(x_init_scaled)
+        return spiral_noises
+    elif noise == "geodesic_noise":
+        x0 = torch.randn_like(all_levels)
+        v = torch.randn_like(all_levels)
+        x0_unit = x0 / x0.norm()
+        v_unit = v / v.norm()
+        alphas = torch.linspace(0, 1, n_samples)
+        return [(1 - a) * x0_unit + a * v_unit for a in alphas]
+    else:
+        raise ValueError(f"Unknown noise type: {noise}")
+
+
 def iterative_generate(
     model,
     dataset,
@@ -100,8 +149,13 @@ def iterative_generate(
 
     dss = []
     obss = []
+
+    # noise_list = generate_noise(dataset[0], n_samples=n_samples, noise="geodesic_noise")
+
     for i in range(n_samples):
         batch = {k: v.unsqueeze(0).to(device) for k, v in dataset[0].items()} # condition on the first timestep
+
+        # batch["noise"] = noise_list[i]
 
         if zero_surfflux:
             for var in ["co2flux_anthro", "co2flux_land", "co2flux_ocean"]:
