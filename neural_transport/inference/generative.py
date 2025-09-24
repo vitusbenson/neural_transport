@@ -73,37 +73,35 @@ def remap_with_cdo(dataset, prototype_zarr, ds):
 
 def generate_noise(batch, n_samples=10, noise=None):
 
-    all_levels = batch["co2massmix"].unsqueeze(0)
+    all_levels = batch["co2massmix"] # [T N C]
+    all_levels = all_levels.unsqueeze(0) # [B T N C]
+
     if noise is None:
         return [torch.randn_like(all_levels) for _ in range(n_samples)]
     
     elif noise == "spiral_noise":
         x0 = torch.randn_like(all_levels)
         v = torch.randn_like(all_levels)
-        x0_unit = x0 / x0.norm()
-        v_unit = v / v.norm()
         angles = torch.linspace(0, 4*torch.pi, n_samples)
 
         spiral_noises = []
         for a in angles:
-            x_init = torch.cos(a) * x0_unit + torch.sin(a) * v_unit
+            x_init = torch.cos(a) * x0 + torch.sin(a) * v
             spiral_noises.append(x_init)
         return spiral_noises
 
-    elif noise == "hypersphere_noise":
+    elif noise == "spiral_outward_noise":
         # Step 1: pick a reference noise vector
         x0 = torch.randn_like(all_levels)
         # Step 2: pick a direction vector (independent random noise)
         v = torch.randn_like(all_levels)
-        # Step 3: normalize both to have unit norm
-        x0_unit = x0 / x0.norm()
-        v_unit = v / v.norm()
+        # Step 3: create spiral path
         angles = torch.linspace(0, 4*torch.pi, n_samples)
 
         spiral_noises = []
         for a in angles:
             # Step 4: rotate between x0 and v
-            x_init = torch.cos(a) * x0_unit + torch.sin(a) * v_unit
+            x_init = torch.cos(a) * x0 + torch.sin(a) * v
             # Step 5: scale radius outward
             r = 1.0 + 0.2 * (a / angles[-1])  # gradually increase radius
             x_init_scaled = r * x_init
@@ -112,10 +110,8 @@ def generate_noise(batch, n_samples=10, noise=None):
     elif noise == "geodesic_noise":
         x0 = torch.randn_like(all_levels)
         v = torch.randn_like(all_levels)
-        x0_unit = x0 / x0.norm()
-        v_unit = v / v.norm()
         alphas = torch.linspace(0, 1, n_samples)
-        return [(1 - a) * x0_unit + a * v_unit for a in alphas]
+        return [(1 - alpha) * x0 + alpha * v for alpha in alphas]
     else:
         raise ValueError(f"Unknown noise type: {noise}")
 
