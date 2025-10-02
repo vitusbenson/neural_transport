@@ -111,6 +111,11 @@ def generate_noise(batch, n_samples=10, noise=None):
         x0 = torch.randn_like(all_levels)
         v = torch.randn_like(all_levels)
         alphas = torch.linspace(0, 1, n_samples)
+        return [torch.sqrt((1 - alpha)) * x0 + torch.sqrt(alpha) * v for alpha in alphas]
+    elif noise == "linear_noise":
+        x0 = torch.randn_like(all_levels)
+        v = torch.randn_like(all_levels)
+        alphas = torch.linspace(0, 1, n_samples)
         return [(1 - alpha) * x0 + alpha * v for alpha in alphas]
     else:
         raise ValueError(f"Unknown noise type: {noise}")

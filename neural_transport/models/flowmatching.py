@@ -66,6 +66,7 @@ class FlowMatching(RegularGridModel):
         elif self.return_intermediates:
             x_in = self.preprocess_inputs(batch)
             all_levels = x_in[:, :self.nlev*len(self.target_vars), :, :]  # [B C Nlat Nlon]
+            # surface_level = x_in[:, :1, :, :]  # [B 1 Nlat Nlon]
             if "noise" in batch:
                 noise = batch["noise"]
                 B, N, C = noise.shape
@@ -139,10 +140,6 @@ class FlowMatching(RegularGridModel):
     # inference_forward
     def inference_forward(self, x_in, x_init):
 
-        # sample noise to get x_init [B C Nlat Nlon]
-        all_levels = x_in[:, :self.nlev*len(self.target_vars), :, :]  # [B C Nlat Nlon]
-        #surface_level = x_in[:, :1, :, :]  # [B 1 Nlat Nlon]
-
         # get timesteps for integration [T]
         time_grid = torch.linspace(0, 1, steps=10, device=x_init.device)
 
@@ -160,6 +157,3 @@ class FlowMatching(RegularGridModel):
                             return_intermediates=self.return_intermediates
         ) # [T B C Nlat Nlon]
         return trajectory
-    
-    #def inference_obs_forward(self, batch):
-    #    return sol

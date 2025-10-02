@@ -11,6 +11,11 @@ from tqdm.contrib.concurrent import process_map
 FREQ = "3h"
 
 
+def set_freq(freq):
+    global FREQ
+    FREQ = freq
+
+
 def download_obspack(data_dir):
     """
     Download Data from https://gml.noaa.gov/ccgg/obspack/data.php
