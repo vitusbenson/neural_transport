@@ -9,16 +9,18 @@
 06. Create SLURM script
 07. Test a training run
 08. Adapt evaluation (plotting, iterative_generate, score, loss) **(b)**
+09. Create mask for observations
 
 ## 🔄 In Progress
-09. Create mask for observations
-10. Test different hyperparameters **(c)**
-11. Load OCO-2 dataset into `neural_transport`
-12. Integrate OCO-2 data into `carbonbench`
-13. Add possibility of covariats and $(CO_2)_{t-1}$
-14. Extend FlowMatching to use $X_0 = noise + weight \cdot \text{OCO-2}$
-15. Handle $(\text{OCO-2})_t$
-16. Attack with Ruff
+10. Run conditional generation
+11. Implement CRPS
+12. Test different hyperparameters **(c)**
+13. Load OCO-2 dataset into `neural_transport`
+14. Integrate OCO-2 data into `carbonbench`
+15. Add possibility of covariats and $(CO_2)_{t-1}$
+16. Extend FlowMatching to use $X_0 = noise + weight \cdot \text{OCO-2}$
+17. Handle $(\text{OCO-2})_t$
+18. Attack with Ruff
 
 **(a)**: It is just stacked as another channel:
 `x_in = torch.cat(list(batch_normalized.values()), dim=-1)`
