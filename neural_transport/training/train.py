@@ -173,6 +173,7 @@ def predict(
     massfixer="default",
     zero_surfflux=False,
     save_obs=False,
+    generate_kwargs={},
 ):
     log_path = Path(log_path)
 
@@ -208,7 +209,7 @@ def predict(
             target_vars_3d=["co2massmix"],
             target_vars_2d=[],
             save_obs=save_obs,
-            n_samples=lit_module_kwargs['model'].n_samples,
+            **generate_kwargs,
         )
     else:
         print(f"Forecasting {ckptpath} {ckpt} CKPT")
@@ -367,8 +368,12 @@ def train_and_eval_singlestep(
         filename="Epoch={epoch}-Step={step}-LossVal={Loss/Val_rollout:.6f}",
         auto_insert_metric_name=False,
         every_n_epochs=1,
-    )
+    ),
+    generate_kwargs=None,
 ):
+    if generate_kwargs is None:
+        generate_kwargs = {}
+
     if train:
         train_singlestep(
             run_dir,
@@ -391,6 +396,7 @@ def train_and_eval_singlestep(
         ckpt=ckpt,
         lit_module_kwargs=lit_module_kwargs,
         massfixer=massfixer,
+        generate_kwargs=generate_kwargs,
     )
     target_path = (
         data_path_forecast
@@ -449,7 +455,11 @@ def train_and_eval_rollout(
     run_forecast=True,
     plot_types=["metrics", "animations", "obspack"],
     zero_surfflux=False,
+    generate_kwargs=None,
 ):
+    if generate_kwargs is None:
+        generate_kwargs = {}
+
     if train:
         train_rollout(
             run_dir,
@@ -476,6 +486,7 @@ def train_and_eval_rollout(
                 lit_module_kwargs=lit_module_kwargs,
                 massfixer=massfixer,
                 zero_surfflux=zero_surfflux,
+                generate_kwargs=generate_kwargs,
             )
         target_path = (
             data_path_forecast

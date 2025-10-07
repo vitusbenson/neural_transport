@@ -181,10 +181,18 @@ class RegularGridModel(nn.Module):
 
         if self.predict_delta:
             x_out_resc = x_out * x_grid_delta_scale + x_grid_delta_offset
-
             x_out_next = x_out_prev + x_out_resc
         else:
-            x_out_next = x_out * x_grid_scale + x_grid_offset
+            if self.targshift:
+                x_out_next = torch.cat(
+                    [batch[f"{v}_next"] for v in self.target_vars],
+                    dim=-1,
+                )
+                x_out_next_normalized = (x_out_next - x_grid_offset) / x_grid_scale
+                x_out_next_normalized_mean = x_out_next_normalized.mean((1, 2), keepdim=True)
+                x_out_next = (x_out + x_out_next_normalized_mean) * x_grid_scale + x_grid_offset
+            else:
+                x_out_next = x_out * x_grid_scale + x_grid_offset
 
         # if not x_out_next.isfinite().all():
         #     print(

@@ -36,7 +36,25 @@ class VelocityWrapper(nn.Module):
             x_in = torch.cat([x, t_expanded], dim=1)
         out = self.submodel.model(x_in)
         return out[:, :self.nlev, :, :]
-    
+
+
+class MaskedVelocityWrapper(VelocityWrapper):
+    def __init__(
+        self,
+        submodel,
+        nlev=1,
+        static_inputs=None,
+        obs_mask=None,
+        obs_values=None,
+    ):
+        super().__init__(submodel=submodel, nlev=nlev, static_inputs=static_inputs)
+        self.obs_mask = obs_mask
+        self.obs_values = obs_values
+
+    def forward(self, x, t):
+        x = torch.where(self.obs_mask, self.obs_values, x)
+        return super().forward(x, t)    
+
 
 class FlowMatching(RegularGridModel):
     def init_model(
@@ -73,7 +91,13 @@ class FlowMatching(RegularGridModel):
                 x_init = noise.reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2) # [B C Nlat Nlon]
             else:
                 x_init = torch.randn_like(all_levels, device=x_in.device)
-            trajectory = self.inference_forward(x_in, x_init)
+            if "obs_mask" in batch and "obs_values" in batch:
+                obs_mask = batch["obs_mask"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2) # [B C Nlat Nlon]
+                obs_values = batch["obs_values"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)
+            else:
+                obs_mask = None
+                obs_values = None
+            trajectory = self.inference_forward(x_in, x_init, obs_mask, obs_values)
             x_out = trajectory[-1,...]
             sol = self.postprocess_outputs(x_out, batch)
             T, B, C, Nlat, Nlon = trajectory.shape
@@ -130,15 +154,24 @@ class FlowMatching(RegularGridModel):
 
         return x_out, dx_t #, x_1_normalized # return {self.target_vars[0]: x_out}
 
-    def return_velocity_wrapper(self, submodel, static_inputs=None):
-        return VelocityWrapper(
-            submodel=submodel,
-            nlev=self.nlev,
-            static_inputs=static_inputs,
-        )
+    def return_velocity_wrapper(self, submodel, obs_mask=None, obs_values=None, static_inputs=None):
+        if obs_mask is not None and obs_values is not None:
+            return MaskedVelocityWrapper(
+                submodel=submodel,
+                nlev=self.nlev,
+                static_inputs=static_inputs,
+                obs_mask=obs_mask,
+                obs_values=obs_values,
+            )
+        else:
+            return VelocityWrapper(
+                submodel=submodel,
+                nlev=self.nlev,
+                static_inputs=static_inputs,
+            )
 
     # inference_forward
-    def inference_forward(self, x_in, x_init):
+    def inference_forward(self, x_in, x_init, obs_mask, obs_values):
 
         # get timesteps for integration [T]
         time_grid = torch.linspace(0, 1, steps=10, device=x_init.device)
@@ -146,7 +179,10 @@ class FlowMatching(RegularGridModel):
         # UNet expects normalization parameters
         velocity_model = self.return_velocity_wrapper(
             submodel=self.submodel,
-            # static_inputs=x_in[:, self.nlev*len(self.target_vars):, :, :],  # [B C Nlat Nlon] (static inputs for conditioning later)
+            static_inputs=None,
+            obs_mask=obs_mask,
+            obs_values=obs_values,
+            # static_inputs=x_in[:,:self.nlev*len(self.target_vars),:,:],  # [B C Nlat Nlon] (static inputs for conditioning later)
         )
 
         # solve the ODE to get the trajectory

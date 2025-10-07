@@ -15,6 +15,10 @@ from xmovie.core import convert_gif
 from neural_transport.inference.analyse import freq_mean
 from neural_transport.tools.conversion import *
 
+from sklearn.decomposition import PCA
+
+import torch
+
 mpl_rc_params = {
     "xtick.labelsize": 8,
     "ytick.labelsize": 8,
@@ -792,3 +796,71 @@ def plot_obspack_stations(
             for imgformat in imgformats:
                 plt.savefig(out_dir / f"obspack_{row['id']}.{imgformat}", dpi=300)
             plt.close()
+
+
+def plot_analyze_noise_path(noises, angles, label="$\\theta$"):
+    """
+    Analyze a sequence of high-dimensional noise tensors.
+    Returns matplotlib figures for norm, cosine similarity, and PCA projection.
+    """
+    noises_flat = [x.flatten().cpu() for x in noises]
+    norms = torch.tensor([x.norm().item() for x in noises_flat])
+    cosine_sims = [
+        torch.nn.functional.cosine_similarity(noises_flat[0], x, dim=0).item()
+        for x in noises_flat
+    ]
+
+    figs = []
+
+    # Norm vs θ
+    fig1, ax1 = plt.subplots(figsize=(6, 3))
+    ax1.plot(angles.cpu(), norms, marker="o")
+    ax1.set_ylabel("Norm of noise vector")
+    ax1.set_xlabel(label)
+    ax1.set_title(f"Norm of x({label}) along path")
+    ax1.grid(True)
+    figs.append(fig1)
+
+    # Cosine similarity vs θ
+    fig2, ax2 = plt.subplots(figsize=(6, 3))
+    ax2.plot(angles.cpu(), cosine_sims, marker="o")
+    ax2.set_ylabel("Cosine similarity with start")
+    ax2.set_xlabel(label)
+    ax2.set_title(f"Cosine similarity with starting noise")
+    ax2.grid(True)
+    figs.append(fig2)
+
+    # PCA projection
+    X = torch.stack(noises_flat).numpy()
+    pca = PCA(n_components=2)
+    X_pca = pca.fit_transform(X)
+
+    fig3, ax3 = plt.subplots(figsize=(5, 5))
+    ax3.plot(X_pca[:, 0], X_pca[:, 1], marker="o")
+    for i, a in enumerate(angles):
+        ax3.text(X_pca[i, 0], X_pca[i, 1], f"{a:.2f}")
+    ax3.set_xlabel("PC1")
+    ax3.set_ylabel("PC2")
+    ax3.set_title("Noise path projected via PCA")
+    figs.append(fig3)
+
+    return figs
+
+
+def plot_noise_diagnostics(noises, angles, out_dir, label="$\\theta$", imgformats=["svg", "png", "pdf"]):
+    """
+    Save diagnostics for noise interpolation or flow matching analysis.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(exist_ok=True, parents=True)
+
+    figs = plot_analyze_noise_path(noises, angles, label=label)
+    names = ["norm_vs_angle", "cosine_vs_angle", "pca_projection"]
+
+    for name, fig in zip(names, figs):
+        for fmt in imgformats:
+            fig.savefig(out_dir / f"noise_{name}.{fmt}", dpi=300)
+        plt.close(fig)
+
+    return
+

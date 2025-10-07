@@ -10,6 +10,8 @@ import xarray as xr
 from cdo import Cdo
 from tqdm import tqdm
 
+from neural_transport.neural_transport.inference.plot_results import plot_noise_diagnostics
+
 
 def get_zarrpath_obspath(out_path, rollout, freq, zarr_filename=None, zero_surfflux=False):
     if zarr_filename is None:
@@ -78,17 +80,6 @@ def generate_noise(batch, n_samples=10, noise=None):
 
     if noise is None:
         return [torch.randn_like(all_levels) for _ in range(n_samples)]
-    
-    elif noise == "spiral_noise":
-        x0 = torch.randn_like(all_levels)
-        v = torch.randn_like(all_levels)
-        angles = torch.linspace(0, 4*torch.pi, n_samples)
-
-        spiral_noises = []
-        for a in angles:
-            x_init = torch.cos(a) * x0 + torch.sin(a) * v
-            spiral_noises.append(x_init)
-        return spiral_noises
 
     elif noise == "spiral_outward_noise":
         # Step 1: pick a reference noise vector
@@ -107,18 +98,105 @@ def generate_noise(batch, n_samples=10, noise=None):
             x_init_scaled = r * x_init
             spiral_noises.append(x_init_scaled)
         return spiral_noises
+
+    elif noise == "spiral_noise":
+        x0 = torch.randn_like(all_levels)
+        v = torch.randn_like(all_levels)
+        angles = torch.linspace(0, 4*torch.pi, n_samples)
+
+        spiral_noises = []
+        for a in angles:
+            x_init = torch.cos(a) * x0 + torch.sin(a) * v
+            spiral_noises.append(x_init)
+        return spiral_noises
+
     elif noise == "geodesic_noise":
         x0 = torch.randn_like(all_levels)
         v = torch.randn_like(all_levels)
         alphas = torch.linspace(0, 1, n_samples)
         return [torch.sqrt((1 - alpha)) * x0 + torch.sqrt(alpha) * v for alpha in alphas]
+
     elif noise == "linear_noise":
         x0 = torch.randn_like(all_levels)
         v = torch.randn_like(all_levels)
         alphas = torch.linspace(0, 1, n_samples)
         return [(1 - alpha) * x0 + alpha * v for alpha in alphas]
+
     else:
         raise ValueError(f"Unknown noise type: {noise}")
+
+
+def create_mask(batch, target_var="co2massmix", obs_fraction=0.1, pattern="random"):
+    """
+    Create a random observation mask for the input batch.
+    Args:
+        batch: dict of tensors, each of shape [B T N C]
+        target_var: the variable to create the mask for
+        obs_fraction: fraction of points to keep as observations
+        pattern: "random", "vertical", "horizontal", "checkerboard", "satellite"
+    """
+    device = batch[target_var].device
+    B, T, N, C = batch[target_var].shape
+
+    nlat = 32
+    nlon = 64
+
+    obs_mask = torch.zeros((B, T, N, C), dtype=torch.bool, device=device)
+    obs_values = torch.zeros_like(batch[target_var], device=device)
+
+    for t in range(T):
+        if pattern == "random":
+            num_obs = int(obs_fraction * N)
+            obs_indices = torch.randperm(N, device=device)[:num_obs]
+
+        elif pattern == "vertical":
+            # keep a fixed fraction of longitude columns
+            num_cols = max(1, int(obs_fraction * nlon))
+            cols = torch.arange(0, nlon, nlon // num_cols, device=device)
+            grid = torch.arange(N, device=device).reshape(nlat, nlon)
+            obs_indices = grid[:, cols].reshape(-1)
+
+        elif pattern == "horizontal":
+            # keep a fixed fraction of latitude rows
+            num_rows = max(1, int(obs_fraction * nlat))
+            rows = torch.arange(0, nlat, nlat // num_rows, device=device)
+            grid = torch.arange(N, device=device).reshape(nlat, nlon)
+            obs_indices = grid[rows, :].reshape(-1)
+
+        elif pattern == "checkerboard":
+            grid = torch.arange(N, device=device).reshape(nlat, nlon)
+            mask2d = (torch.arange(nlat, device=device)[:, None] +
+                      torch.arange(nlon, device=device)[None, :]) % 2 == 0
+            obs_indices = grid[mask2d].reshape(-1)
+
+        elif pattern == "satellite":
+            # grid = [nlat, nlon]
+            grid = torch.arange(N, device=device).reshape(nlat, nlon)
+            # choose swath width (fraction of nlon)
+            swath_width = max(1, int(obs_fraction * nlon / 8))
+            # tilt angle in radians (small tilt)
+            tilt = -5 * np.pi / 180.0  
+            cols = []
+            for i in range(0, nlon, swath_width * 8):  # spacing between swaths
+                for w in range(swath_width):
+                    col_idx = i + w
+                    if col_idx < nlon:
+                        # apply tilt shift proportional to latitude
+                        lat_offsets = ((torch.arange(nlat, device=device) * np.tan(tilt)).long()) % nlon
+                        col_with_tilt = (col_idx + lat_offsets) % nlon
+                        cols.append(col_with_tilt.unsqueeze(0))
+            # stack and mask
+            cols = torch.cat(cols, dim=0)  # shape [n_swath, nlat]
+            obs_indices = grid[torch.arange(nlat).unsqueeze(0), cols].reshape(-1)
+
+        else:
+            raise ValueError(f"Unknown mask pattern: {pattern}")
+
+        # fill mask + values
+        obs_mask[:, t, obs_indices, :] = True
+        obs_values[:, t, obs_indices, :] = batch[target_var][:, t, obs_indices, :]
+
+    return obs_mask, obs_values  # [B T N C] each
 
 
 def iterative_generate(
@@ -134,8 +212,14 @@ def iterative_generate(
     target_vars_3d=[],
     target_vars_2d=[],
     save_obs=True,
-    n_samples=10,
+    **generate_kwargs,
 ):
+    n_samples = generate_kwargs.get("n_samples", 10)
+    masking = generate_kwargs.get("masking", False)
+    pattern = generate_kwargs.get("pattern", "vertical")
+    noise = generate_kwargs.get("noise", None)
+    analyze_noise = generate_kwargs.get("analyze_noise", False)
+
     zarrpath, obspath = get_zarrpath_obspath(outpath, rollout, freq, zarr_filename, zero_surfflux = zero_surfflux)
 
     prototype_zarr = dataset.create_prototype_zarr(
@@ -151,12 +235,33 @@ def iterative_generate(
     dss = []
     obss = []
 
-    # noise_list = generate_noise(dataset[0], n_samples=n_samples, noise="geodesic_noise")
+    # Noise
+    noise_list = generate_noise(dataset[0], n_samples=n_samples, noise=noise)
+    if analyze_noise and noise is not None:
+        if noise in ["spiral_noise", "spiral_outward_noise"]:
+            angles = torch.linspace(0, 4*torch.pi, n_samples) # thetas
+            param_name = "$\\theta$"
+        elif noise in ["geodesic_noise", "linear_noise"]:
+            angles = torch.linspace(0, 1, n_samples)  # alphas
+            param_name = "$\\alpha$"
+        plot_noise_diagnostics(noise_list, angles, str(outpath).replace("preds", "plots"),
+                               label=param_name, imgformats=["pdf"])
 
     for i in range(n_samples):
         batch = {k: v.unsqueeze(0).to(device) for k, v in dataset[0].items()} # condition on the first timestep
 
-        # batch["noise"] = noise_list[i]
+        batch["noise"] = noise_list[i].to(device)
+        if masking:
+            target_var = target_vars_3d[0]
+            obs_mask, obs_values = create_mask(batch, target_var=target_var, obs_fraction=0.2, pattern=pattern)
+            obs_dict = {
+                target_var: obs_values,
+                f"{target_var}_offset": batch[f"{target_var}_offset"],
+                f"{target_var}_scale": batch[f"{target_var}_scale"],
+            }
+            obs_values = model.model.normalize_batch_target_vars(obs_dict)[target_var]
+            batch["obs_mask"] = obs_mask
+            batch["obs_values"] = obs_values
 
         if zero_surfflux:
             for var in ["co2flux_anthro", "co2flux_land", "co2flux_ocean"]:
