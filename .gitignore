@@ -165,7 +165,9 @@ slurm*.out
 
 
 # Plots generated (Jonathan)
+neural_transport/flowmatching_dev/*.svg
 neural_transport/flowmatching_dev/*.png
+neural_transport/flowmatching_dev/*.pdf
 neural_transport/flowmatching_dev/test_preds/*
 
 # Old/Test versions (Jonathan)

@@ -10,7 +10,7 @@ import xarray as xr
 from cdo import Cdo
 from tqdm import tqdm
 
-from neural_transport.neural_transport.inference.plot_results import plot_noise_diagnostics
+from neural_transport.inference.plot_results import plot_noise_diagnostics
 
 
 def get_zarrpath_obspath(out_path, rollout, freq, zarr_filename=None, zero_surfflux=False):
@@ -126,7 +126,7 @@ def generate_noise(batch, n_samples=10, noise=None):
         raise ValueError(f"Unknown noise type: {noise}")
 
 
-def create_mask(batch, target_var="co2massmix", obs_fraction=0.1, pattern="random"):
+def create_mask(batch, target_var="co2massmix", obs_fraction=0.1, pattern="random", nlat=32, nlon=64):
     """
     Create a random observation mask for the input batch.
     Args:
@@ -138,11 +138,8 @@ def create_mask(batch, target_var="co2massmix", obs_fraction=0.1, pattern="rando
     device = batch[target_var].device
     B, T, N, C = batch[target_var].shape
 
-    nlat = 32
-    nlon = 64
-
     obs_mask = torch.zeros((B, T, N, C), dtype=torch.bool, device=device)
-    obs_values = torch.zeros_like(batch[target_var], device=device)
+    obs_values = torch.full_like(batch[target_var], float('nan'), device=device)
 
     for t in range(T):
         if pattern == "random":
@@ -217,8 +214,11 @@ def iterative_generate(
     n_samples = generate_kwargs.get("n_samples", 10)
     masking = generate_kwargs.get("masking", False)
     pattern = generate_kwargs.get("pattern", "vertical")
+    obs_fraction = generate_kwargs.get("obs_fraction", 0.2)
     noise = generate_kwargs.get("noise", None)
     analyze_noise = generate_kwargs.get("analyze_noise", False)
+
+    nlat, nlon = model.model.in_nlat, model.model.in_nlon
 
     zarrpath, obspath = get_zarrpath_obspath(outpath, rollout, freq, zarr_filename, zero_surfflux = zero_surfflux)
 
@@ -253,15 +253,10 @@ def iterative_generate(
         batch["noise"] = noise_list[i].to(device)
         if masking:
             target_var = target_vars_3d[0]
-            obs_mask, obs_values = create_mask(batch, target_var=target_var, obs_fraction=0.2, pattern=pattern)
-            obs_dict = {
-                target_var: obs_values,
-                f"{target_var}_offset": batch[f"{target_var}_offset"],
-                f"{target_var}_scale": batch[f"{target_var}_scale"],
-            }
-            obs_values = model.model.normalize_batch_target_vars(obs_dict)[target_var]
+            obs_mask, obs_values = create_mask(batch, target_var=target_var, obs_fraction=obs_fraction, pattern=pattern, nlat=nlat, nlon=nlon)
             batch["obs_mask"] = obs_mask
-            batch["obs_values"] = obs_values
+            obs_values_normed = model.model.normalize_observations(obs_values, batch, target_var=target_var)
+            batch["obs_values"] = obs_values_normed
 
         if zero_surfflux:
             for var in ["co2flux_anthro", "co2flux_land", "co2flux_ocean"]:

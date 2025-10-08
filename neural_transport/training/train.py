@@ -14,6 +14,7 @@ from neural_transport.inference.plot_results import (
     animate_predictions,
     plot_metrics,
     plot_obspack_stations,
+    plot_samples,
 )
 from neural_transport.litmodule import NeuralTransport
 
@@ -299,7 +300,11 @@ def plot(
     movie_interval=["2018-01-01", "2018-03-31"],
     num_workers=multiprocessing.cpu_count() // 2,
     plot_types=["metrics", "animations", "obspack"],
+    generate_kwargs=None,
 ):
+    if generate_kwargs is None:
+        generate_kwargs = {}
+
     co2targ, co2pred = load_pred_targ(target_path, pred_path)
 
     ckpt_name = pred_path.parent.name
@@ -313,6 +318,19 @@ def plot(
     if "metrics" in plot_types:
         plot_metrics(co2pred, co2targ, plot_path, imgformats=["pdf"])
 
+    if "samples" in plot_types:
+        plot_samples(
+            co2pred,
+            plot_path,
+            tests=co2targ,
+            varnames=["co2massmix"],
+            avg_over_levels=True,
+            normalize=False,
+            center_to_test_mean=False,
+            imgformats=["pdf"],
+            generate_kwargs=generate_kwargs,
+        )
+
     t0, tend = movie_interval
 
     if "animations" in plot_types:
@@ -323,9 +341,6 @@ def plot(
             postfix=f"3d_anim_t0={t0}-tend={tend}",
             num_workers=num_workers,
         )
-
-    if "samples" in plot_types:
-        pass
     
     if obs_pred_path and ("obspack" in plot_types):
         obspreds = xr.open_zarr(obs_pred_path)
@@ -369,6 +384,7 @@ def train_and_eval_singlestep(
         auto_insert_metric_name=False,
         every_n_epochs=1,
     ),
+    plot_types=["metrics", "animations", "obspack"],
     generate_kwargs=None,
 ):
     if generate_kwargs is None:
@@ -419,6 +435,7 @@ def train_and_eval_singlestep(
     if type(lit_module_kwargs['model']).__name__ == "FlowMatching":
         FM = True
         obs_pred_path = None
+        plot_types += ["samples"]
     else:
         FM = False
     score(target_path, pred_path, obs_pred_path, FM=FM)
@@ -431,6 +448,8 @@ def train_and_eval_singlestep(
         data_kwargs,
         movie_interval,
         num_workers,
+        plot_types=plot_types,
+        generate_kwargs=generate_kwargs,
     )
 
 

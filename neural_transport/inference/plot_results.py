@@ -657,7 +657,7 @@ def animate_predictions(
     for varname in varnames:
         pred, targ = get_pred_targ_from_varname(preds, targs, varname)
 
-        # !!!Caution!!! this is a quick fix producing random movie snippets of different samples, not a continuous time frame
+        # !!!Caution!!! this is a quick fix producing random movie snippets of different samples, not a continuous time frame, though is noise is generated in a path, it shows this path in latent space
         if "sample" in pred.dims and "time" in targ.dims:
             pred = pred.rename({"sample": "time"})
             min_len = min(pred.sizes["time"], targ.sizes["time"])
@@ -864,3 +864,163 @@ def plot_noise_diagnostics(noises, angles, out_dir, label="$\\theta$", imgformat
 
     return
 
+
+def plot_samples(
+        preds,
+        out_dir,
+        tests=None,
+        varnames=["co2massmix"],
+        avg_over_levels=True,
+        normalize=False,
+        center_to_test_mean=False,
+        imgformats=["svg", "png", "pdf"],
+        generate_kwargs=None):
+    """
+    Wrapper for sample diagnostics plots
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    plot_sample_cdf(preds, out_dir,
+                    tests=tests,
+                    varnames=varnames,
+                    avg_over_levels=avg_over_levels,
+                    normalize=normalize,
+                    center_to_test_mean=center_to_test_mean,
+                    imgformats=imgformats,)
+
+    if generate_kwargs is not None and generate_kwargs.get("noise") is not None:
+        plot_pairwise_sample_distances(preds, out_dir,
+                                       varnames=varnames,
+                                       avg_over_levels=avg_over_levels,
+                                       imgformats=imgformats)
+
+
+def plot_pairwise_sample_distances(preds, out_dir,
+                                   varnames=["co2massmix"], avg_over_levels=True,
+                                   imgformats=["svg", "png", "pdf"]):
+    """
+    Plot pairwise L2 distances between samples for a given variable at one vertical level.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for varname in varnames:
+        if varname not in preds:
+            raise KeyError(f"{varname} not found in dataset")
+
+        preds_var = preds[varname]
+
+        # Determine levels
+        if "level" in preds_var.dims and not avg_over_levels:
+            levels = preds_var.level.values
+        else:
+            levels = [None]
+
+        for level in levels:
+            if level is not None:
+                ds_slice = preds_var.sel(level=level)
+            else:
+                ds_slice = preds_var.mean(dim="level") if "level" in preds_var.dims else preds_var
+
+            data = ds_slice.values  # shape: (n_samples, lat, lon)
+            if data.ndim != 3:
+                raise ValueError(f"Expected 3D array (sample, lat, lon), got shape {data.shape}")
+
+            # Flatten spatial dims and compute pairwise L2 distances
+            data_flat = data.reshape(data.shape[0], -1)
+            dist_matrix = np.linalg.norm(data_flat[:, None, :] - data_flat[None, :, :], axis=-1)
+
+            fig, ax = plt.subplots(figsize=(5, 4))
+            im = ax.imshow(dist_matrix, cmap="cividis")
+            fig.colorbar(im, ax=ax, label="L2 distance between samples")
+            ax.set_title(f"Pairwise distances ({varname}" + (f", level={level}" if level is not None else "") + ")")
+            ax.set_xlabel("Sample index")
+            ax.set_ylabel("Sample index")
+
+            for fmt in imgformats:
+                fig.savefig(out_dir / f"pairwise_distances_{varname}" + (f"_level{level}" if level is not None else "") + f".{fmt}", dpi=300)
+
+            plt.close(fig)
+
+
+def plot_sample_cdf(preds, out_dir, tests=None,
+                    varnames=["co2massmix"], avg_over_levels=True,
+                    normalize=False,
+                    center_to_test_mean=False,
+                    imgformats=["svg", "png", "pdf"]):
+    """
+    Plot cumulative distribution functions (CDFs) of normalized mean values per sample
+    for one or multiple variables. Optionally compare to test data.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for varname in varnames:
+        if varname not in preds:
+            raise KeyError(f"{varname} not found in dataset")
+
+        preds_var = preds[varname]
+
+        if "level" in preds_var.dims and avg_over_levels:
+            preds_var = preds_var.mean(dim="level")  # shape: (sample, lat, lon)
+
+        pred_mean = preds_var.mean(dim=["lat", "lon"]).values  # shape: (sample)
+
+        if tests is not None:
+            tests_var = tests[varname]
+            if isinstance(tests_var, torch.Tensor):
+                tests_var = tests_var.cpu().numpy()
+            if tests_var.ndim == 3:  # [B, lat, lon]
+                dims = ("sample", "lat", "lon")
+            elif tests_var.ndim == 4:  # [B, level, lat, lon]
+                dims = ("sample", "level", "lat", "lon")
+            else:
+                raise ValueError(f"tests must be 3D or 4D, got shape {tests_var.shape}")
+
+            test_da = xr.DataArray(tests_var, dims=dims)
+            avg_dims = [d for d in ["level", "lat", "lon"] if d in test_da.dims]
+            test_mean = test_da.mean(dim=avg_dims).values
+
+            if normalize:
+                test_mean = (test_mean - test_mean.mean()) / test_mean.std()
+        else:
+            test_mean = None
+
+        if center_to_test_mean and test_mean is not None:
+            pred_mean = pred_mean - test_mean.mean()
+            test_mean = None
+
+        if normalize:
+            pred_mean = (pred_mean - pred_mean.mean()) / pred_mean.std()
+
+        # CDF values
+        x_pred = np.sort(pred_mean)
+        y_pred = np.arange(1, len(pred_mean)+1) / len(pred_mean)
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+
+        if test_mean is not None:
+            x_test = np.sort(test_mean)
+            y_test = np.arange(1, len(test_mean)+1) / len(test_mean)
+            ax.plot(x_test, y_test, label="Tests", marker="o")
+        if center_to_test_mean:
+            ax.plot(x_pred, y_pred, color="red")
+        else:
+            ax.plot(x_pred, y_pred, label="Predictions", marker="x")
+
+        xlabel = f"{'Normalized ' if normalize else ''}Mean {varname} {'[ppm]' if not normalize else ''}"
+        title = f"CDF of {'Normalized ' if normalize else ''}Mean {varname} per Sample"
+        if center_to_test_mean:
+            xlabel = f"Deviation from Test Mean {varname} {'[ppm]' if not normalize else ''}"
+            title = f"CDF of Predictions Relative to Test Mean ({varname})"
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel("CDF")
+        ax.set_title(title)
+        ax.legend()
+        ax.grid(True)
+
+        for fmt in imgformats:
+            fig.savefig(out_dir / f"cdf_{varname}.{fmt}", dpi=300)
+
+        plt.close(fig)

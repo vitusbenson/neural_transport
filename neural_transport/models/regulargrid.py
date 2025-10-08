@@ -1,3 +1,4 @@
+from numpy import nanstd
 import torch
 import torch.nn as nn
 
@@ -149,6 +150,22 @@ class RegularGridModel(nn.Module):
                     batch_normalized[key] = x_in_curr
 
         return batch_normalized
+    
+
+    def normalize_observations(self, obs_values, batch, target_var):
+        mean = batch[f"{target_var}_offset"]
+        std = batch[f"{target_var}_scale"]
+        
+        obs_norm = (obs_values - mean) / std
+        
+        if self.targshift:
+            obs_mask = batch["obs_mask"]
+            mask = obs_mask.bool()
+            mean = torch.nanmean(obs_norm, dim=(1,2), keepdim=True)
+            obs_norm = torch.where(mask, obs_norm - mean, obs_norm)
+
+        return obs_norm
+
     
     def denormalize_tensor(self, x_out, batch):
         x_grid_offset = torch.cat(

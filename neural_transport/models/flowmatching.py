@@ -53,7 +53,7 @@ class MaskedVelocityWrapper(VelocityWrapper):
 
     def forward(self, x, t):
         x = torch.where(self.obs_mask, self.obs_values, x)
-        return super().forward(x, t)    
+        return super().forward(x, t)
 
 
 class FlowMatching(RegularGridModel):
