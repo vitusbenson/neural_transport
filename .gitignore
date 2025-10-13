@@ -168,6 +168,9 @@ slurm*.out
 neural_transport/flowmatching_dev/*.svg
 neural_transport/flowmatching_dev/*.png
 neural_transport/flowmatching_dev/*.pdf
+neural_transport/flowmatching_dev/plots/*.svg
+neural_transport/flowmatching_dev/plots/*.png
+neural_transport/flowmatching_dev/plots/*.pdf
 neural_transport/flowmatching_dev/test_preds/*
 
 # Old/Test versions (Jonathan)

@@ -14,6 +14,7 @@ from xmovie.core import convert_gif
 
 from neural_transport.inference.analyse import freq_mean
 from neural_transport.tools.conversion import *
+from neural_transport.tools.metrics import crps
 
 from sklearn.decomposition import PCA
 
@@ -657,7 +658,7 @@ def animate_predictions(
     for varname in varnames:
         pred, targ = get_pred_targ_from_varname(preds, targs, varname)
 
-        # !!!Caution!!! this is a quick fix producing random movie snippets of different samples, not a continuous time frame, though is noise is generated in a path, it shows this path in latent space
+        # !!!Caution!!! this is a quick fix producing random movie snippets of different samples, not a continuous time frame, though if noise is generated in a path, it shows this path in latent space
         if "sample" in pred.dims and "time" in targ.dims:
             pred = pred.rename({"sample": "time"})
             min_len = min(pred.sizes["time"], targ.sizes["time"])
@@ -872,7 +873,6 @@ def plot_samples(
         varnames=["co2massmix"],
         avg_over_levels=True,
         normalize=False,
-        center_to_test_mean=False,
         imgformats=["svg", "png", "pdf"],
         generate_kwargs=None):
     """
@@ -881,23 +881,53 @@ def plot_samples(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    plot_sample_cdf(preds, out_dir,
-                    tests=tests,
-                    varnames=varnames,
-                    avg_over_levels=avg_over_levels,
-                    normalize=normalize,
-                    center_to_test_mean=center_to_test_mean,
-                    imgformats=imgformats,)
+    for varname in varnames:
+        if varname not in preds:
+            raise KeyError(f"{varname} not found in preds")
 
-    if generate_kwargs is not None and generate_kwargs.get("noise") is not None:
-        plot_pairwise_sample_distances(preds, out_dir,
-                                       varnames=varnames,
-                                       avg_over_levels=avg_over_levels,
-                                       imgformats=imgformats)
+        preds_var = preds[varname]
+
+        plot_sample_cdf(preds_var, out_dir,
+                        tests=tests,
+                        varname=varname,
+                        avg_over_levels=avg_over_levels,
+                        normalize=normalize,
+                        center_to_test_mean=False,
+                        imgformats=imgformats,)
+
+        plot_sample_cdf(preds_var, out_dir,
+                        tests=tests,
+                        varname=varname,
+                        avg_over_levels=avg_over_levels,
+                        normalize=normalize,
+                        center_to_test_mean=True,
+                        imgformats=imgformats,)
+
+        if generate_kwargs is not None and generate_kwargs.get("noise") is not None:
+            plot_pairwise_sample_distances(preds_var, out_dir,
+                                        varname=varname,
+                                        avg_over_levels=avg_over_levels,
+                                        imgformats=imgformats)
+
+        if tests is not None and varname not in tests:
+            raise KeyError(f"{varname} not found in tests")
+
+        tests_var = tests[varname]
+
+        if avg_over_levels:
+            preds_var_mean = preds_var.mean(dim="level")  # shape: (sample, lat, lon)
+        else:
+            preds_var_mean = preds_var
+
+        plot_crps(preds_var_mean, tests_var,
+                  out_dir,
+                  varname=varname,
+                  imgformats=imgformats)
 
 
-def plot_pairwise_sample_distances(preds, out_dir,
-                                   varnames=["co2massmix"], avg_over_levels=True,
+def plot_pairwise_sample_distances(preds_var, out_dir,
+                                   varname="co2massmix",
+                                   avg_over_levels=True,
                                    imgformats=["svg", "png", "pdf"]):
     """
     Plot pairwise L2 distances between samples for a given variable at one vertical level.
@@ -905,47 +935,44 @@ def plot_pairwise_sample_distances(preds, out_dir,
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    for varname in varnames:
-        if varname not in preds:
-            raise KeyError(f"{varname} not found in dataset")
+    
+    # Determine levels
+    if "level" in preds_var.dims and not avg_over_levels:
+        levels = preds_var.level.values
+    else:
+        levels = [None]
 
-        preds_var = preds[varname]
-
-        # Determine levels
-        if "level" in preds_var.dims and not avg_over_levels:
-            levels = preds_var.level.values
+    for level in levels:
+        if level is not None:
+            ds_slice = preds_var.sel(level=level)
         else:
-            levels = [None]
+            ds_slice = preds_var.mean(dim="level") if "level" in preds_var.dims else preds_var
 
-        for level in levels:
-            if level is not None:
-                ds_slice = preds_var.sel(level=level)
-            else:
-                ds_slice = preds_var.mean(dim="level") if "level" in preds_var.dims else preds_var
+        data = ds_slice.values  # shape: (n_samples, lat, lon)
+        if data.ndim != 3:
+            raise ValueError(f"Expected 3D array (sample, lat, lon), got shape {data.shape}")
 
-            data = ds_slice.values  # shape: (n_samples, lat, lon)
-            if data.ndim != 3:
-                raise ValueError(f"Expected 3D array (sample, lat, lon), got shape {data.shape}")
+        # Flatten spatial dims and compute pairwise L2 distances
+        data_flat = data.reshape(data.shape[0], -1)
+        dist_matrix = np.linalg.norm(data_flat[:, None, :] - data_flat[None, :, :], axis=-1)
 
-            # Flatten spatial dims and compute pairwise L2 distances
-            data_flat = data.reshape(data.shape[0], -1)
-            dist_matrix = np.linalg.norm(data_flat[:, None, :] - data_flat[None, :, :], axis=-1)
+        fig, ax = plt.subplots(figsize=(5, 4))
+        im = ax.imshow(dist_matrix, cmap="cividis")
+        fig.colorbar(im, ax=ax, label="L2 distance between samples")
+        ax.set_title(f"Pairwise distances ({varname}" + (f", level={level}" if level is not None else "") + ")")
+        ax.set_xlabel("Sample index")
+        ax.set_ylabel("Sample index")
 
-            fig, ax = plt.subplots(figsize=(5, 4))
-            im = ax.imshow(dist_matrix, cmap="cividis")
-            fig.colorbar(im, ax=ax, label="L2 distance between samples")
-            ax.set_title(f"Pairwise distances ({varname}" + (f", level={level}" if level is not None else "") + ")")
-            ax.set_xlabel("Sample index")
-            ax.set_ylabel("Sample index")
-
-            for fmt in imgformats:
-                fig.savefig(out_dir / f"pairwise_distances_{varname}" + (f"_level{level}" if level is not None else "") + f".{fmt}", dpi=300)
-
-            plt.close(fig)
+        for fmt in imgformats:
+            filename = f"pairwise_distances_{varname}" + (f"_level{level}" if level is not None else "") + f".{fmt}"
+            fig.savefig(out_dir / filename, dpi=300)
 
 
-def plot_sample_cdf(preds, out_dir, tests=None,
-                    varnames=["co2massmix"], avg_over_levels=True,
+        plt.close(fig)
+
+
+def plot_sample_cdf(preds_var, out_dir, tests=None,
+                    varname="co2massmix", avg_over_levels=True,
                     normalize=False,
                     center_to_test_mean=False,
                     imgformats=["svg", "png", "pdf"]):
@@ -955,72 +982,116 @@ def plot_sample_cdf(preds, out_dir, tests=None,
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+  
+    if "level" in preds_var.dims and avg_over_levels:
+        preds_var = preds_var.mean(dim="level")  # shape: (sample, lat, lon)
 
-    for varname in varnames:
-        if varname not in preds:
-            raise KeyError(f"{varname} not found in dataset")
+    pred_mean = preds_var.mean(dim=["lat", "lon"]).values  # shape: (sample)
 
-        preds_var = preds[varname]
-
-        if "level" in preds_var.dims and avg_over_levels:
-            preds_var = preds_var.mean(dim="level")  # shape: (sample, lat, lon)
-
-        pred_mean = preds_var.mean(dim=["lat", "lon"]).values  # shape: (sample)
-
-        if tests is not None:
-            tests_var = tests[varname]
-            if isinstance(tests_var, torch.Tensor):
-                tests_var = tests_var.cpu().numpy()
-            if tests_var.ndim == 3:  # [B, lat, lon]
-                dims = ("sample", "lat", "lon")
-            elif tests_var.ndim == 4:  # [B, level, lat, lon]
-                dims = ("sample", "level", "lat", "lon")
-            else:
-                raise ValueError(f"tests must be 3D or 4D, got shape {tests_var.shape}")
-
-            test_da = xr.DataArray(tests_var, dims=dims)
-            avg_dims = [d for d in ["level", "lat", "lon"] if d in test_da.dims]
-            test_mean = test_da.mean(dim=avg_dims).values
-
-            if normalize:
-                test_mean = (test_mean - test_mean.mean()) / test_mean.std()
+    if tests is not None:
+        tests_var = tests[varname]
+        if isinstance(tests_var, torch.Tensor):
+            tests_var = tests_var.cpu().numpy()
+        # !!!Caution!!! this is a dirty fix especially for long time series.
+        if isinstance(tests_var, xr.DataArray) and "time" in tests_var.dims:
+            tests_var = tests_var.rename({"time": "sample"})
+        if tests_var.ndim == 3:  # [B, lat, lon]
+            dims = ("sample", "lat", "lon")
+        elif tests_var.ndim == 4:  # [B, level, lat, lon]
+            dims = ("sample", "level", "lat", "lon")
         else:
-            test_mean = None
+            raise ValueError(f"tests must be 3D or 4D, got shape {tests_var.shape}")
 
-        if center_to_test_mean and test_mean is not None:
-            pred_mean = pred_mean - test_mean.mean()
-            test_mean = None
+        test_da = xr.DataArray(tests_var, dims=dims)
+        avg_dims = [d for d in ["level", "lat", "lon"] if d in test_da.dims]
+        test_mean = test_da.mean(dim=avg_dims).values
 
         if normalize:
-            pred_mean = (pred_mean - pred_mean.mean()) / pred_mean.std()
+            test_mean = (test_mean - test_mean.mean()) / test_mean.std()
+    else:
+        test_mean = None
 
-        # CDF values
-        x_pred = np.sort(pred_mean)
-        y_pred = np.arange(1, len(pred_mean)+1) / len(pred_mean)
+    if center_to_test_mean and test_mean is not None:
+        pred_mean = pred_mean - test_mean.mean()
+        test_mean = None
 
-        fig, ax = plt.subplots(figsize=(8, 5))
+    if normalize:
+        pred_mean = (pred_mean - pred_mean.mean()) / pred_mean.std()
 
-        if test_mean is not None:
-            x_test = np.sort(test_mean)
-            y_test = np.arange(1, len(test_mean)+1) / len(test_mean)
-            ax.plot(x_test, y_test, label="Tests", marker="o")
-        if center_to_test_mean:
-            ax.plot(x_pred, y_pred, color="red")
-        else:
-            ax.plot(x_pred, y_pred, label="Predictions", marker="x")
+    # CDF values
+    x_pred = np.sort(pred_mean)
+    y_pred = np.arange(1, len(pred_mean)+1) / len(pred_mean)
 
-        xlabel = f"{'Normalized ' if normalize else ''}Mean {varname} {'[ppm]' if not normalize else ''}"
-        title = f"CDF of {'Normalized ' if normalize else ''}Mean {varname} per Sample"
-        if center_to_test_mean:
-            xlabel = f"Deviation from Test Mean {varname} {'[ppm]' if not normalize else ''}"
-            title = f"CDF of Predictions Relative to Test Mean ({varname})"
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel("CDF")
-        ax.set_title(title)
-        ax.legend()
-        ax.grid(True)
+    fig, ax = plt.subplots(figsize=(8, 5))
 
-        for fmt in imgformats:
-            fig.savefig(out_dir / f"cdf_{varname}.{fmt}", dpi=300)
+    if test_mean is not None:
+        x_test = np.sort(test_mean)
+        y_test = np.arange(1, len(test_mean)+1) / len(test_mean)
+        ax.plot(x_test, y_test, label="Tests", marker="o")
+    if center_to_test_mean:
+        ax.plot(x_pred, y_pred, color="red")
+    else:
+        ax.plot(x_pred, y_pred, label="Predictions", marker="x")
 
-        plt.close(fig)
+    xlabel = f"{'Normalized ' if normalize else ''}Mean {varname} {'[ppm]' if not normalize else ''}"
+    title = f"CDF of {'Normalized ' if normalize else ''}Mean {varname} per Sample"
+    if center_to_test_mean:
+        xlabel = f"Deviation from Test Mean {varname} {'[ppm]' if not normalize else ''}"
+        title = f"CDF of Predictions Relative to Test Mean ({varname})"
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("CDF")
+    ax.set_title(title)
+    ax.legend()
+    ax.grid(True)
+
+    for fmt in imgformats:
+        fig.savefig(out_dir / f"cdf{"_centered" if center_to_test_mean else ""}_{varname}.{fmt}", dpi=300)
+
+    plt.close(fig)
+
+
+def plot_crps(preds_var, tests_var, out_dir, varname="co2massmix", imgformats=["svg", "png", "pdf"]):
+    """
+    Compute and plot CRPS maps.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    crps_map, crps_mean = crps(preds_var, tests_var)
+
+    lat = preds_var.lat.values
+    lon = preds_var.lon.values
+
+    if crps_map.ndim == 3:
+        # shape: (lat, lon, level)
+        level = preds_var.level.values
+        crps_map = xr.DataArray(crps_map, dims=("lat", "lon", "level"),
+                                coords={"lat": lat, "lon": lon, "level": level})
+    else:
+        # shape: (lat, lon)
+        crps_map = xr.DataArray(crps_map, dims=("lat", "lon"),
+                                coords={"lat": lat, "lon": lon})
+
+    if crps_map.ndim == 3:
+        for i, lvl in enumerate(crps_map.level.values):
+            da_lvl = crps_map.isel(level=i)
+            fig, ax = plt.subplots(figsize=(8, 4), subplot_kw=dict(projection=ccrs.PlateCarree()))
+            im = da_lvl.plot(ax=ax, transform=ccrs.PlateCarree(), cmap="cividis", add_colorbar=True, rasterized=True)
+            ax.coastlines(linewidth=0.5)
+            ax.set_title(f"CRPS ({varname}) - level {lvl:.0f}")
+            for fmt in imgformats:
+                fig.savefig(out_dir / f"crps_{varname}_level{lvl}.{fmt}", dpi=300, bbox_inches="tight")
+            plt.close(fig)
+
+        crps_map_mean = crps_map.mean(dim="level")
+    else:
+        crps_map_mean = crps_map 
+
+    fig, ax = plt.subplots(figsize=(8, 4), subplot_kw=dict(projection=ccrs.PlateCarree()))
+    im = crps_map_mean.plot(ax=ax, transform=ccrs.PlateCarree(), cmap="cividis", add_colorbar=True)
+    ax.coastlines(linewidth=0.5)
+    ax.set_title(f"CRPS ({varname}) - mean over levels")
+    fig.text(0.5, 0.01, f"Global mean CRPS = {crps_mean:.4f}", ha="center", fontsize=10)
+    for fmt in imgformats:
+        fig.savefig(out_dir / f"crps_{varname}.{fmt}", dpi=300, bbox_inches="tight")
+    plt.close(fig)

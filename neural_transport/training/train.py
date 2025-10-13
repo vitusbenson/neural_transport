@@ -326,7 +326,6 @@ def plot(
             varnames=["co2massmix"],
             avg_over_levels=True,
             normalize=False,
-            center_to_test_mean=False,
             imgformats=["pdf"],
             generate_kwargs=generate_kwargs,
         )

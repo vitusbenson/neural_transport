@@ -1,6 +1,9 @@
 import torch
 import torch.nn as nn
 from torchmetrics.functional import pearson_corrcoef, r2_score
+import numpy as np
+import xarray as xr
+from typing import Tuple, Optional
 
 from neural_transport.tools.conversion import *
 
@@ -179,3 +182,66 @@ class ManyMetrics(nn.Module):
         for m in self.metrics:
             metrics.update(m(preds, batch))
         return metrics
+
+
+def crps(preds, tests) -> Tuple[xr.DataArray | np.ndarray, float]:
+    """
+    Compute the Continuous Ranked Probability Score (CRPS)
+    for ensemble predictions vs. ground truth.
+
+    Parameters
+    ----------
+    preds : xarray.DataArray or np.ndarray
+        Ensemble predictions. Expected shape:
+          - with levels: (sample, lat, lon, level)
+          - without levels: (sample, lat, lon)
+    tests : xarray.DataArray, torch.Tensor, or np.ndarray
+        Ground truth / test samples. Shape:
+          - with levels: (time, level, lat, lon)
+          - without levels: (time, lat, lon)
+
+    Returns
+    -------
+    crps_map : xarray.DataArray or np.ndarray
+        CRPS per gridpoint (lat x lon) or (lat x lon x level) if levels present.
+    crps_mean : float
+        Mean CRPS averaged over all gridpoints and levels.
+    """
+    if isinstance(preds, xr.DataArray):
+        preds = preds.values
+    if isinstance(tests, xr.DataArray):
+        tests = tests.values
+    if torch.is_tensor(tests):
+        tests = tests.cpu().numpy()
+
+    tests = np.moveaxis(tests, 1, -1)  # [time, lat, lon, level]
+    T, lat_t, lon_t, C_t = tests.shape
+    tests_mean = tests.mean(axis=0)  # [lat, lon, level]
+    tests_flat = tests_mean.reshape(-1, C_t)  # [N, C]
+
+    if preds.ndim == 4:
+        # preds: [samples, lat, lon, C]
+        S, lat, lon, C = preds.shape
+        assert C == C_t, f"Level mismatch: {C} vs {C_t}"
+        assert lat == lat_t and lon == lon_t, f"Spatial mismatch: {lat}x{lon} vs {lat_t}x{lon_t}"
+        preds_flat = preds.reshape(S, -1, C)  #  [samples, N, C]
+        tests_flat_mean = tests_flat  # [N, C]
+
+    elif preds.ndim == 3:
+        # preds: [samples, lat, lon]
+        S, lat, lon = preds.shape
+        preds_flat = preds.reshape(S, lat*lon)  # [samples, N]
+        tests_flat_mean = tests_flat.mean(axis=1)  # [N,]
+    
+    # Compute CRPS across ensemble dimension
+    # term1 = mean(|x_i - obs|)
+    term1 = np.mean(np.abs(preds_flat - tests_flat_mean[None, ...]), axis=0)  # [N, (C)]
+    # term2 = 0.5 * mean(|x_i - x_j|)
+    diffs = np.abs(preds_flat[:, None, ...] - preds_flat[None, :, ...])  # [2xsamples, N, (C)]
+    term2 = 0.5 * np.mean(diffs, axis=(0, 1))  # [N, (C)]
+
+    crps_flat = term1 - term2  # [N, (C)]
+    crps_map = crps_flat.reshape(lat, lon, C_t) if preds.ndim == 4 else crps_flat.reshape(lat, lon)  # [lat, lon, (level)]
+    crps_mean = float(np.mean(crps_map))
+    return crps_map, crps_mean
+    
