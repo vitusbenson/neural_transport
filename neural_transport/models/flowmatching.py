@@ -46,14 +46,121 @@ class MaskedVelocityWrapper(VelocityWrapper):
         static_inputs=None,
         obs_mask=None,
         obs_values=None,
+        dt=None,
     ):
         super().__init__(submodel=submodel, nlev=nlev, static_inputs=static_inputs)
         self.obs_mask = obs_mask
         self.obs_values = obs_values
+        self.dt = dt
 
     def forward(self, x, t):
-        x = torch.where(self.obs_mask, self.obs_values, x)
-        return super().forward(x, t)
+        x_masked = self.masking_simple(x)
+        dtx = (x_masked - x) / self.dt + super().forward(x_masked, t)
+        return dtx
+        # version mimicking dxt = f(x,t)
+        # dxt = torch.where(self.obs_mask, self.obs_values - x, super().forward(x, t))
+        # return dxt
+
+    def masking_simple(self, x):
+        x_masked = torch.where(self.obs_mask, self.obs_values.detach(), x)
+        return x_masked
+    
+    def masking_preserve_global_mean(self, x):
+        spatial_dims = (-2, -1)  # x.shape [B, C, Nlat, Nlon]
+        obs_values = torch.where(self.obs_mask, self.obs_values, torch.zeros_like(x))
+
+        # Fraction observed (per batch, per channel)
+        m = self.obs_mask.float().mean(dim=spatial_dims, keepdim=True)  # shape [B, C, 1, 1]
+        
+        # Calculate means
+        # Global mean before: s_all_before = m * s_mask_before + (1-m) * s_unmask_before
+        s_all_before = x.mean(dim=spatial_dims, keepdim=True)  # [B, C, 1, 1]
+        # mean of obs values (only over masked cells)
+        mask_count = self.obs_mask.float().sum(dim=spatial_dims, keepdim=True)  # [B,C,1,1]
+        s_mask_obs = torch.where(
+            mask_count > 0,
+            (obs_values * self.obs_mask.float()).sum(dim=spatial_dims, keepdim=True) / mask_count,
+            s_all_before,
+        )
+        # Mean over unmasked cells before
+        unmask = ~self.obs_mask
+        unmask_count = unmask.float().sum(dim=spatial_dims, keepdim=True)
+        s_unmask_before = torch.where(
+            unmask_count > 0,
+            (x * unmask.float()).sum(dim=spatial_dims, keepdim=True) / unmask_count,
+            s_all_before,  # degenerate
+        )
+        # desired new mean on unmasked region to preserve global mean
+        denom = (1.0 - m).clamp(min=1e-12)
+        s_unmask_new = (s_all_before - m * s_mask_obs) / denom
+        # additive correction applied only to unmasked cells:
+        a_add = s_unmask_new - s_unmask_before  # shape [B,C,1,1]
+        x_masked = torch.where(self.obs_mask, self.obs_values, x + a_add)
+
+        return x_masked
+
+    def masking_preserve_global_mean_and_var(self, x):
+        """
+        Replace masked cells with observations, and renormalize unmasked region
+        so that global mean and variance of x are preserved.
+        """
+        spatial_dims = (-2, -1)  # x.shape [B, C, Nlat, Nlon]
+        obs_values = torch.where(self.obs_mask, self.obs_values, torch.zeros_like(x))
+
+        # Fraction observed (per batch, per channel)
+        m = self.obs_mask.float().mean(dim=spatial_dims, keepdim=True)  # [B,C,1,1]
+
+        # Means
+        s_all_before = x.mean(dim=spatial_dims, keepdim=True)
+        mask_count = self.obs_mask.float().sum(dim=spatial_dims, keepdim=True)
+        s_mask_obs = torch.where(
+            mask_count > 0,
+            (obs_values * self.obs_mask.float()).sum(dim=spatial_dims, keepdim=True) / mask_count,
+            s_all_before,
+        )
+
+        unmask = ~self.obs_mask
+        unmask_count = unmask.float().sum(dim=spatial_dims, keepdim=True)
+        s_unmask_before = torch.where(
+            unmask_count > 0,
+            (x * unmask.float()).sum(dim=spatial_dims, keepdim=True) / unmask_count,
+            s_all_before,
+        )
+
+        denom = (1.0 - m).clamp(min=1e-12)
+        s_unmask_new = (s_all_before - m * s_mask_obs) / denom
+
+        # Mean correction
+        a_add = s_unmask_new - s_unmask_before
+
+        # Compute variances
+        v_before = x.var(dim=spatial_dims, unbiased=False, keepdim=True)
+
+        v_mask_obs = torch.where(
+            mask_count > 0,
+            ((obs_values - s_mask_obs) ** 2 * self.obs_mask.float()).sum(dim=spatial_dims, keepdim=True) / mask_count,
+            v_before,
+        )
+
+        v_unmask = torch.where(
+            unmask_count > 0,
+            (((x + a_add) - s_unmask_new) ** 2 * unmask.float()).sum(dim=spatial_dims, keepdim=True) / unmask_count,
+            v_before,
+        )
+
+        # Scale factor for unmasked region to preserve total variance
+        denom_var = ((1.0 - m) * v_unmask).clamp(min=1e-12)
+        numer_var = (v_before - m * v_mask_obs).clamp(min=0.0)
+        s_scale = torch.sqrt(numer_var / denom_var)
+
+        # Apply scaling only to unmasked region
+        x_final = torch.where(
+            self.obs_mask,
+            self.obs_values,
+            s_unmask_new + s_scale * (x - s_unmask_before),
+        )
+
+        return x_final
 
 
 class FlowMatching(RegularGridModel):
@@ -154,7 +261,10 @@ class FlowMatching(RegularGridModel):
 
         return x_out, dx_t #, x_1_normalized # return {self.target_vars[0]: x_out}
 
-    def return_velocity_wrapper(self, submodel, obs_mask=None, obs_values=None, static_inputs=None):
+    def return_velocity_wrapper(self, submodel,
+                                obs_mask=None, obs_values=None,
+                                static_inputs=None,
+                                dt=None,):
         if obs_mask is not None and obs_values is not None:
             return MaskedVelocityWrapper(
                 submodel=submodel,
@@ -162,6 +272,7 @@ class FlowMatching(RegularGridModel):
                 static_inputs=static_inputs,
                 obs_mask=obs_mask,
                 obs_values=obs_values,
+                dt=dt,
             )
         else:
             return VelocityWrapper(
@@ -175,6 +286,7 @@ class FlowMatching(RegularGridModel):
 
         # get timesteps for integration [T]
         time_grid = torch.linspace(0, 1, steps=10, device=x_init.device)
+        dt = (time_grid[-1] - time_grid[0]) / (len(time_grid) - 1)
 
         # UNet expects normalization parameters
         velocity_model = self.return_velocity_wrapper(
@@ -182,6 +294,7 @@ class FlowMatching(RegularGridModel):
             static_inputs=None,
             obs_mask=obs_mask,
             obs_values=obs_values,
+            dt=dt,
             # static_inputs=x_in[:,:self.nlev*len(self.target_vars),:,:],  # [B C Nlat Nlon] (static inputs for conditioning later)
         )
 

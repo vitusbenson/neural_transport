@@ -161,7 +161,8 @@ class RegularGridModel(nn.Module):
         if self.targshift:
             obs_mask = batch["obs_mask"]
             mask = obs_mask.bool()
-            mean = torch.nanmean(obs_norm, dim=(1,2), keepdim=True)
+            # mean = torch.nanmean(obs_norm, dim=(1,2), keepdim=True)
+            mean = ((batch[target_var] - mean) / std).mean((1, 2), keepdim=True)
             obs_norm = torch.where(mask, obs_norm - mean, obs_norm)
 
         return obs_norm

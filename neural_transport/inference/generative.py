@@ -10,7 +10,7 @@ import xarray as xr
 from cdo import Cdo
 from tqdm import tqdm
 
-from neural_transport.inference.plot_results import plot_noise_diagnostics
+from neural_transport.inference.plot_results import plot_noise_diagnostics, plot_masking_diagnostics
 
 
 def get_zarrpath_obspath(out_path, rollout, freq, zarr_filename=None, zero_surfflux=False):
@@ -214,6 +214,7 @@ def iterative_generate(
     n_samples = generate_kwargs.get("n_samples", 10)
     masking = generate_kwargs.get("masking", False)
     pattern = generate_kwargs.get("pattern", "vertical")
+    analyze_masking = generate_kwargs.get("analyze_masking", False)
     obs_fraction = generate_kwargs.get("obs_fraction", 0.2)
     noise = generate_kwargs.get("noise", None)
     analyze_noise = generate_kwargs.get("analyze_noise", False)
@@ -245,18 +246,20 @@ def iterative_generate(
             angles = torch.linspace(0, 1, n_samples)  # alphas
             param_name = "$\\alpha$"
         plot_noise_diagnostics(noise_list, angles, str(outpath).replace("preds", "plots"),
-                               label=param_name, imgformats=["pdf"])
+                               label=param_name, imgformats=["png"])
+
+    base_batch = {k: v.unsqueeze(0).to(device) for k, v in dataset[0].items()} # condition on the first timestep
+
+    if masking:
+        target_var = target_vars_3d[0]
+        obs_mask, obs_values = create_mask(base_batch, target_var=target_var, obs_fraction=obs_fraction, pattern=pattern, nlat=nlat, nlon=nlon)
+        base_batch["obs_mask"] = obs_mask
+        obs_values_normed = model.model.normalize_observations(obs_values, base_batch, target_var=target_var)
+        base_batch["obs_values"] = obs_values_normed
 
     for i in range(n_samples):
-        batch = {k: v.unsqueeze(0).to(device) for k, v in dataset[0].items()} # condition on the first timestep
-
+        batch = {k: v.clone() for k, v in base_batch.items()}
         batch["noise"] = noise_list[i].to(device)
-        if masking:
-            target_var = target_vars_3d[0]
-            obs_mask, obs_values = create_mask(batch, target_var=target_var, obs_fraction=obs_fraction, pattern=pattern, nlat=nlat, nlon=nlon)
-            batch["obs_mask"] = obs_mask
-            obs_values_normed = model.model.normalize_observations(obs_values, batch, target_var=target_var)
-            batch["obs_values"] = obs_values_normed
 
         if zero_surfflux:
             for var in ["co2flux_anthro", "co2flux_land", "co2flux_ocean"]:
@@ -300,7 +303,19 @@ def iterative_generate(
 
         dss.append(ds)
 
-    ds_all = xr.concat(dss, dim="sample")
+    ### !!! Caution: need to fix this properly!!!
+    def is_bad_sample(arr, thresh=1e6):
+        return np.isnan(arr).any() or np.isinf(arr).any() or np.nanmax(np.abs(arr)) > thresh
+
+    good_dss = []
+    for i, ds in enumerate(dss):
+        if is_bad_sample(ds["co2massmix"].values):
+            print(f"Skipping bad sample {i}")
+            continue
+        good_dss.append(ds)
+
+    ds_all = xr.concat(good_dss, dim="sample")
+    ### !!!
 
     if save_obs:
         obs_all = xr.concat(obss, dim="sample").fillna({"obs_filename": ""})
@@ -308,6 +323,11 @@ def iterative_generate(
         ds_all = ds_all.fillna({"obs_filename": ""})
 
     ds_all.to_zarr(zarrpath, mode="w")
+
+    if analyze_masking and masking:
+        plot_masking_diagnostics(batch, ds_all, str(outpath).replace("preds", "plots"),
+                                 varnames=target_vars_3d, nlat=nlat, nlon=nlon,
+                                 imgformats=["png"])
 
     return ds_all
         

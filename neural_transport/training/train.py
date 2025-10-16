@@ -324,10 +324,9 @@ def plot(
             plot_path,
             tests=co2targ,
             varnames=["co2massmix"],
-            avg_over_levels=True,
             normalize=False,
-            imgformats=["pdf"],
-            generate_kwargs=generate_kwargs,
+            imgformats=["png"],
+            **generate_kwargs,
         )
 
     t0, tend = movie_interval

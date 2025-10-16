@@ -10,17 +10,18 @@
 07. Test a training run
 08. Adapt evaluation (plotting, iterative_generate, score, loss) **(b)**
 09. Create mask for observations
+10. Run conditional generation
+11. Implement evaluation for conditional generation **(c)**
 
 ## 🔄 In Progress
-10. Run conditional generation
-11. Implement CRPS
-12. Test different hyperparameters **(c)**
-13. Load OCO-2 dataset into `neural_transport`
-14. Integrate OCO-2 data into `carbonbench`
-15. Add possibility of covariats and $(CO_2)_{t-1}$
-16. Extend FlowMatching to use $X_0 = noise + weight \cdot \text{OCO-2}$
-17. Handle $(\text{OCO-2})_t$
-18. Attack with Ruff
+12. Test different models: swintransformer, sfno
+13. Test different hyperparameters **(d)**
+14. Load OCO-2 dataset into `neural_transport`
+15. Integrate OCO-2 data into `carbonbench`
+16. Add possibility of covariats and $(CO_2)_{t-1}$
+17. Extend FlowMatching to use $X_0 = noise + weight \cdot \text{OCO-2}$
+18. Handle $(\text{OCO-2})_t$
+19. Attack with Ruff
 
 **(a)**: It is just stacked as another channel:
 `x_in = torch.cat(list(batch_normalized.values()), dim=-1)`
@@ -30,7 +31,10 @@
 - `compute_metric_over_samples` added in `plot_results.py`
 - `compute_score_df_generate` added in `analyse.py`
 
-**(c)**:
+**(c)**
+done in a messy, redundant, lazy way that needs to be fixed. seperation of concerns! and plotting/metrics in the right places
+
+**(d)**:
 - `MODEL_SIZE`: ["S", "M", "L"]<br>
         - `enc_filters`, `dec_filters`
 - `lr`: [1e−4,3e−4,1e−3,3e−3] or `lr_find`<br>

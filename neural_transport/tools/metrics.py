@@ -197,8 +197,8 @@ def crps(preds, tests) -> Tuple[xr.DataArray | np.ndarray, float]:
           - without levels: (sample, lat, lon)
     tests : xarray.DataArray, torch.Tensor, or np.ndarray
         Ground truth / test samples. Shape:
-          - with levels: (time, level, lat, lon)
-          - without levels: (time, lat, lon)
+          - with levels: (level, lat, lon)
+          - without levels: (lat, lon)
 
     Returns
     -------
@@ -214,10 +214,14 @@ def crps(preds, tests) -> Tuple[xr.DataArray | np.ndarray, float]:
     if torch.is_tensor(tests):
         tests = tests.cpu().numpy()
 
-    tests = np.moveaxis(tests, 1, -1)  # [time, lat, lon, level]
-    T, lat_t, lon_t, C_t = tests.shape
-    tests_mean = tests.mean(axis=0)  # [lat, lon, level]
-    tests_flat = tests_mean.reshape(-1, C_t)  # [N, C]
+    if tests.ndim == 3:
+        tests = np.moveaxis(tests, 0, -1)  # [lat, lon, level]
+        lat_t, lon_t, C_t = tests.shape
+        tests_flat = tests.reshape(-1, C_t)  # [N, C]
+    elif tests.ndim == 2:
+        lat_t, lon_t = tests.shape
+        C_t = None
+        tests_flat = tests.reshape(-1)  # [N,]
 
     if preds.ndim == 4:
         # preds: [samples, lat, lon, C]
@@ -225,17 +229,15 @@ def crps(preds, tests) -> Tuple[xr.DataArray | np.ndarray, float]:
         assert C == C_t, f"Level mismatch: {C} vs {C_t}"
         assert lat == lat_t and lon == lon_t, f"Spatial mismatch: {lat}x{lon} vs {lat_t}x{lon_t}"
         preds_flat = preds.reshape(S, -1, C)  #  [samples, N, C]
-        tests_flat_mean = tests_flat  # [N, C]
 
     elif preds.ndim == 3:
         # preds: [samples, lat, lon]
         S, lat, lon = preds.shape
         preds_flat = preds.reshape(S, lat*lon)  # [samples, N]
-        tests_flat_mean = tests_flat.mean(axis=1)  # [N,]
     
     # Compute CRPS across ensemble dimension
     # term1 = mean(|x_i - obs|)
-    term1 = np.mean(np.abs(preds_flat - tests_flat_mean[None, ...]), axis=0)  # [N, (C)]
+    term1 = np.mean(np.abs(preds_flat - tests_flat[None, ...]), axis=0)  # [N, (C)]
     # term2 = 0.5 * mean(|x_i - x_j|)
     diffs = np.abs(preds_flat[:, None, ...] - preds_flat[None, :, ...])  # [2xsamples, N, (C)]
     term2 = 0.5 * np.mean(diffs, axis=(0, 1))  # [N, (C)]
@@ -244,4 +246,32 @@ def crps(preds, tests) -> Tuple[xr.DataArray | np.ndarray, float]:
     crps_map = crps_flat.reshape(lat, lon, C_t) if preds.ndim == 4 else crps_flat.reshape(lat, lon)  # [lat, lon, (level)]
     crps_mean = float(np.mean(crps_map))
     return crps_map, crps_mean
-    
+
+
+def compute_error_maps(gen_samples, gt):
+    """
+    Compute spatial bias, RMSE, and ensemble spread maps.
+
+    Parameters
+    ----------
+    gen_samples : np.ndarray or xr.DataArray, shape [n_samples, lat, lon]
+        Generated ensemble samples.
+    gt : np.ndarray or xr.DataArray, shape [B, lat, lon]
+        Ground truth field.
+
+    Returns
+    -------
+    bias, rmse, spread : np.ndarray, shape [lat, lon]
+    """
+    # Convert xarray to numpy if needed
+    if isinstance(gen_samples, xr.DataArray):
+        gen_samples = gen_samples.values
+    if isinstance(gt, xr.DataArray):
+        gt = gt.values
+
+    gt = gt[0, ...]
+    mean_pred = np.mean(gen_samples, axis=0)
+    bias = mean_pred - gt
+    rmse = np.sqrt(np.mean((gen_samples - gt)**2, axis=0))
+    spread = np.std(gen_samples, axis=0)
+    return bias, rmse, spread

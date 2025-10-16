@@ -14,8 +14,10 @@ from xmovie.core import convert_gif
 
 from neural_transport.inference.analyse import freq_mean
 from neural_transport.tools.conversion import *
-from neural_transport.tools.metrics import crps
+from neural_transport.tools.metrics import compute_error_maps, crps
 
+from scipy.interpolate import interp1d
+from scipy.stats import linregress
 from sklearn.decomposition import PCA
 
 import torch
@@ -175,6 +177,7 @@ def compute_metric_over_samples(metric_func, pred, targ, weights, dims=None):
 
     metric_mean = xr.concat(metrics, dim="sample").mean("sample")
     return metric_mean
+
 
 def plot_metric_over_leadtime(pred, targ, metric, figsize=(8, 5), freq="QS"):
     weights = np.cos(np.deg2rad(targ.lat.compute()))
@@ -337,6 +340,23 @@ def plot_zonal_spectrum_line(pred, targ, figsize=(8, 5), **kwargs):
     Specpred_mean = Specpred.mean(mean_dims_pred) if mean_dims_pred else Specpred
     Spectarg_mean = Spectarg.mean(mean_dims_targ) if mean_dims_targ else Spectarg
 
+    # This is not so nicely implemented, but works for now (can be removed without breaking the code)
+    freq_coord = Specpred_mean["freq_lon"].values
+    lat_mean = float(pred["lat"].mean().values) if "lat" in pred.coords else 0.0
+    N = len(freq_coord)
+    k_indices = np.arange(1, N)
+    km_for_k = zonal_wavenumber_to_wavelength(k_indices, lat_mean)
+    freq_nonzero = freq_coord[1:]
+    freq_to_km_interp = interp1d(
+        freq_nonzero, km_for_k, kind="linear", bounds_error=False,
+        fill_value=(km_for_k.max(), km_for_k.min())
+    )
+    km_to_freq_interp = interp1d(
+        km_for_k[::-1], freq_nonzero[::-1], kind="linear", bounds_error=False,
+        fill_value=(freq_nonzero[0], freq_nonzero[-1])
+    )
+    # End
+
     with mpl.rc_context(mpl_rc_params):
         fig = plt.figure(figsize=figsize)
         ax = plt.subplot()
@@ -347,6 +367,17 @@ def plot_zonal_spectrum_line(pred, targ, figsize=(8, 5), **kwargs):
         ax.set_title("Zonal Power Spectrum")
         ax.set_xlabel("Frequency")
         ax.set_ylabel("Power")
+ 
+        # This is not so nicely implemented, but works for now (can be removed without breaking the code)
+        secax = ax.secondary_xaxis('top', functions=(freq_to_km_interp, km_to_freq_interp))
+        secax.set_xlabel("Wavelength [km]")
+        bottom_ticks = ax.get_xticks()
+        top_tick_km = freq_to_km_interp(np.array(bottom_ticks))
+        km_min, km_max = float(km_for_k.min()), float(km_for_k.max())
+        top_tick_km = np.where(np.isnan(top_tick_km), km_max, top_tick_km)
+        top_tick_km = np.clip(top_tick_km, km_min, km_max)
+        secax.set_xticks(top_tick_km)
+        # End
 
         plt.tight_layout()
 
@@ -866,18 +897,138 @@ def plot_noise_diagnostics(noises, angles, out_dir, label="$\\theta$", imgformat
     return
 
 
+def plot_panel(ax, data, title, vmin=None, vmax=None, aspect_ratio=2.0, bold=False):
+    """Helper to plot one panel with consistent style."""
+    im = ax.imshow(
+        data[::-1, :],
+        cmap="cividis",
+        vmin=vmin,
+        vmax=vmax,
+        aspect=aspect_ratio / 2,
+    )
+    ax.set_title(title, fontsize=13 if bold else 11, fontweight="bold" if bold else "normal")
+    ax.axis("off")
+    return im
+
+
+def plot_obs_mask_and_samples(
+    batch,
+    preds_var,
+    nlat=32,
+    nlon=64,
+    max_samples=6,
+):
+    """
+    Plot observed values, masked observations, and several generated samples.
+    Layout: 2x4 grid
+      [0,0] = Ground Truth
+      [1,0] = Masked Observations
+      [0,1..3], [1,1..3] = Generated Samples (up to 6)
+    """
+    b, t, c = 0, 0, 0
+
+    obs_values = batch["obs_values"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
+    obs_mask = batch["obs_mask"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
+    target_vals = batch["co2massmix"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
+    masked_obs = np.where(obs_mask, obs_values, np.nan)
+
+    # Generated samples [sample, lat, lon, level]
+    samples = preds_var
+    if "level" in samples.dims:
+        samples = samples.isel(level=0)
+    samples_np = samples.values  # shape: [sample, lat, lon]
+    n_samples = min(samples_np.shape[0], max_samples)
+
+    # Global color limits
+    vmin = np.nanmin([np.nanmin(target_vals), np.nanmin(samples_np[:n_samples, ...])])
+    vmax = np.nanmax([np.nanmax(target_vals), np.nanmax(samples_np[:n_samples, ...])])
+    obs_min, obs_max = np.nanmin(masked_obs), np.nanmax(masked_obs)
+
+    # Figure setup
+    aspect_ratio = nlon / nlat
+    base_size = 3.0
+    fig_width = 4 * base_size * (aspect_ratio / 2)
+    fig_height = 2 * base_size
+    fig, axs = plt.subplots(2, 4, figsize=(fig_width, fig_height))
+    axs = axs.reshape(2, 4)
+
+    # Panels ([0,0]: Ground truth, [1,0]: Masked obs, [0,1..3] and [1,1..3]: samples)
+    im = plot_panel(axs[0, 0], target_vals, "Ground Truth", vmin=vmin, vmax=vmax, aspect_ratio=aspect_ratio, bold=True)
+    plot_panel(axs[1, 0], np.ma.masked_invalid(masked_obs), "Masked Observations",
+               vmin=obs_min, vmax=obs_max, aspect_ratio=aspect_ratio, bold=True)
+
+    for i in range(n_samples):
+        row = 0 if i < 3 else 1
+        col = (i % 3) + 1
+        plot_panel(axs[row, col], samples_np[i, :, :], f"Sample {i}",
+                   vmin=vmin, vmax=vmax, aspect_ratio=aspect_ratio)
+
+    fig.text(0.56, 0.9, "Generated Samples", fontsize=14, fontweight="bold", ha="center", va="top")
+
+    for row in range(2):
+        for col in range(4):
+            if not axs[row, col].images:
+                axs[row, col].axis("off")
+
+    # Shared colorbar
+    cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
+    fig.colorbar(im, cax=cbar_ax, orientation="vertical", label="CO₂ [ppm]")
+
+    fig.suptitle("Observations vs Generated Samples", fontsize=16)
+    plt.tight_layout(rect=[0, 0, 0.9, 1])
+
+    return fig
+
+
+def plot_masking_diagnostics(
+        batch,
+        preds,
+        out_dir,
+        varnames=["co2massmix"],
+        nlat=32,
+        nlon=64,
+        imgformats=["svg", "png", "pdf"]):
+    """
+    Save diagnostics for masking or flow matching analysis.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(exist_ok=True, parents=True)
+
+    for varname in varnames:
+        if varname not in preds:
+            raise KeyError(f"{varname} not found in preds")
+
+        preds_var = preds[varname]
+
+        fig = plot_obs_mask_and_samples(
+            batch,
+            preds_var,
+            nlat=nlat,
+            nlon=nlon,
+            max_samples=6,
+            )
+
+        for fmt in imgformats:
+            fig.savefig(out_dir / f"masking_{varname}.{fmt}", dpi=300)
+        plt.close(fig)
+
+    return
+
+
 def plot_samples(
         preds,
         out_dir,
         tests=None,
         varnames=["co2massmix"],
-        avg_over_levels=True,
         normalize=False,
         imgformats=["svg", "png", "pdf"],
-        generate_kwargs=None):
+        **generate_kwargs):
     """
     Wrapper for sample diagnostics plots
     """
+    noise = generate_kwargs.get("noise", None)
+    avg_over_levels = generate_kwargs.get("avg_over_levels", True)
+
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -885,7 +1036,7 @@ def plot_samples(
         if varname not in preds:
             raise KeyError(f"{varname} not found in preds")
 
-        preds_var = preds[varname]
+        preds_var = preds[varname]  # shape: [sample=100, lat=32, lon=64, level=10]
 
         plot_sample_cdf(preds_var, out_dir,
                         tests=tests,
@@ -903,7 +1054,7 @@ def plot_samples(
                         center_to_test_mean=True,
                         imgformats=imgformats,)
 
-        if generate_kwargs is not None and generate_kwargs.get("noise") is not None:
+        if noise:
             plot_pairwise_sample_distances(preds_var, out_dir,
                                         varname=varname,
                                         avg_over_levels=avg_over_levels,
@@ -912,17 +1063,57 @@ def plot_samples(
         if tests is not None and varname not in tests:
             raise KeyError(f"{varname} not found in tests")
 
-        tests_var = tests[varname]
+        tests_var = tests[varname]  # shape: [time=9, level=10, lat=32, lon=64]
+        tests_var_mean = tests_var.mean(dim="time")  # shape: [level, lat, lon]
 
-        if avg_over_levels:
-            preds_var_mean = preds_var.mean(dim="level")  # shape: (sample, lat, lon)
-        else:
-            preds_var_mean = preds_var
+        if not avg_over_levels:
+            for i, lvl in enumerate(tests_var_mean.level.values):
+                plot_crps(preds_var.isel(level=i), tests_var_mean.isel(level=i),
+                          out_dir,
+                          varname=varname,
+                          level=lvl,
+                          imgformats=imgformats)
 
-        plot_crps(preds_var_mean, tests_var,
+                plot_scatter_preds_vs_tests(preds_var.isel(level=i), tests_var_mean.isel(level=i),
+                                            out_dir,
+                                            varname=varname,
+                                            level=lvl,
+                                            imgformats=imgformats)
+
+                plot_spread_skill(preds_var.isel(level=i), tests_var_mean.isel(level=i),
+                                  out_dir,
+                                  varname=varname,
+                                  level=lvl,
+                                  imgformats=imgformats)
+
+                plot_error_locations(preds_var.isel(level=i), tests_var_mean.isel(level=i),
+                                     out_dir,
+                                     varname=varname,
+                                     level=lvl,
+                                     imgformats=imgformats)
+        
+        preds_var_mean = preds_var.mean(dim="level")  # shape: [sample, lat, lon]
+        tests_var_mean = tests_var_mean.mean(dim="level")  # shape: [lat, lon]
+
+        plot_crps(preds_var_mean, tests_var_mean,
                   out_dir,
                   varname=varname,
                   imgformats=imgformats)
+
+        plot_scatter_preds_vs_tests(preds_var_mean, tests_var_mean,
+                                    out_dir,
+                                    varname=varname,
+                                    imgformats=imgformats)
+
+        plot_spread_skill(preds_var_mean, tests_var_mean,
+                          out_dir,
+                          varname=varname,
+                          imgformats=imgformats)
+
+        plot_error_locations(preds_var_mean, tests_var_mean,
+                             out_dir,
+                             varname=varname,
+                             imgformats=imgformats)
 
 
 def plot_pairwise_sample_distances(preds_var, out_dir,
@@ -1050,7 +1241,9 @@ def plot_sample_cdf(preds_var, out_dir, tests=None,
     plt.close(fig)
 
 
-def plot_crps(preds_var, tests_var, out_dir, varname="co2massmix", imgformats=["svg", "png", "pdf"]):
+def plot_crps(preds_var, tests_var, out_dir,
+              varname="co2massmix", level=None,
+              imgformats=["svg", "png", "pdf"]):
     """
     Compute and plot CRPS maps.
     """
@@ -1058,40 +1251,171 @@ def plot_crps(preds_var, tests_var, out_dir, varname="co2massmix", imgformats=["
     out_dir.mkdir(parents=True, exist_ok=True)
 
     crps_map, crps_mean = crps(preds_var, tests_var)
-
-    lat = preds_var.lat.values
-    lon = preds_var.lon.values
-
-    if crps_map.ndim == 3:
-        # shape: (lat, lon, level)
-        level = preds_var.level.values
-        crps_map = xr.DataArray(crps_map, dims=("lat", "lon", "level"),
-                                coords={"lat": lat, "lon": lon, "level": level})
+    if preds_var.ndim == 4:
+        # same lat/lon/level coords as preds_var
+        crps_map = xr.DataArray(
+            crps_map,
+            dims=("lat", "lon", "level"),
+            coords={k: preds_var.coords[k] for k in ["lat", "lon", "level"]}
+        )
     else:
-        # shape: (lat, lon)
-        crps_map = xr.DataArray(crps_map, dims=("lat", "lon"),
-                                coords={"lat": lat, "lon": lon})
-
-    if crps_map.ndim == 3:
-        for i, lvl in enumerate(crps_map.level.values):
-            da_lvl = crps_map.isel(level=i)
-            fig, ax = plt.subplots(figsize=(8, 4), subplot_kw=dict(projection=ccrs.PlateCarree()))
-            im = da_lvl.plot(ax=ax, transform=ccrs.PlateCarree(), cmap="cividis", add_colorbar=True, rasterized=True)
-            ax.coastlines(linewidth=0.5)
-            ax.set_title(f"CRPS ({varname}) - level {lvl:.0f}")
-            for fmt in imgformats:
-                fig.savefig(out_dir / f"crps_{varname}_level{lvl}.{fmt}", dpi=300, bbox_inches="tight")
-            plt.close(fig)
-
-        crps_map_mean = crps_map.mean(dim="level")
-    else:
-        crps_map_mean = crps_map 
+        crps_map = xr.DataArray(
+            crps_map,
+            dims=("lat", "lon"),
+            coords={k: preds_var.coords[k] for k in ["lat", "lon"]}
+        )
 
     fig, ax = plt.subplots(figsize=(8, 4), subplot_kw=dict(projection=ccrs.PlateCarree()))
-    im = crps_map_mean.plot(ax=ax, transform=ccrs.PlateCarree(), cmap="cividis", add_colorbar=True)
+    im = crps_map.plot(ax=ax, transform=ccrs.PlateCarree(), cmap="cividis", add_colorbar=True, rasterized=True)
     ax.coastlines(linewidth=0.5)
-    ax.set_title(f"CRPS ({varname}) - mean over levels")
+    if level is not None:
+        title = f"CRPS ({varname}) - level {level:.0f}"
+        level_str = f"_level{level:.0f}"
+    else:
+        title = f"CRPS ({varname}) - mean over levels"
+        level_str = ""
+    ax.set_title(title)
     fig.text(0.5, 0.01, f"Global mean CRPS = {crps_mean:.4f}", ha="center", fontsize=10)
     for fmt in imgformats:
-        fig.savefig(out_dir / f"crps_{varname}.{fmt}", dpi=300, bbox_inches="tight")
+        fig.savefig(out_dir / f"crps_{varname}{level_str}.{fmt}", dpi=300, bbox_inches="tight")
     plt.close(fig)
+
+
+def plot_scatter_preds_vs_tests(preds_var, tests_var, out_dir,
+                                varname="co2massmix", level=None,
+                                imgformats=["svg", "png", "pdf"]):
+    """
+    Scatter plot: ensemble mean predictions vs ground truth.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    n_samples = preds_var.sizes.get("sample", 1)
+    n_points = np.prod(preds_var.sizes.get("lat", 1) * preds_var.sizes.get("lon", 1))
+
+    # --- Convert to numpy ---
+    ens_mean = preds_var.mean(dim="sample").values
+    y_true   = tests_var.values
+    y_pred   = ens_mean
+
+    # --- Mask invalids ---
+    mask = np.isfinite(y_true) & np.isfinite(y_pred)
+    y_true, y_pred = y_true[mask], y_pred[mask]
+
+    # --- Regression & stats ---
+    slope, intercept, r_value, p_value, std_err = linregress(y_true, y_pred)
+    rmse = np.sqrt(np.mean((y_true - y_pred)**2))
+    bias = np.mean(y_pred - y_true)
+    lims = [min(y_true.min(), y_pred.min()), max(y_true.max(), y_pred.max())]
+
+    # --- Plot ---
+    fig, ax = plt.subplots(figsize=(6,6))
+    hb = ax.hexbin(y_true, y_pred, gridsize=100, cmap="cividis", bins="log")
+    plt.colorbar(hb, ax=ax, label="log(count)")
+
+    ax.plot(lims, lims, "k--", label="1:1 line")
+    ax.plot(lims, [slope*lim + intercept for lim in lims], "r-", label=f"Trend (slope={slope:.2f})")
+    ax.set_xlabel("Ground Truth (ppm)")
+    ax.set_ylabel("Ensemble Mean Prediction (ppm)")
+    if level is not None:
+        title=f"Predicted vs Ground Truth ({varname}) - level {level:.0f}"
+        level_str = f"_level{level:.0f}"
+    else:
+        title=f"Predicted vs Ground Truth ({varname}) - mean over levels"
+        level_str = ""
+    ax.set_title(title)
+    ax.legend()
+
+    textstr = (
+        f"samples = {n_samples}\n"
+        f"points = {n_points}\n"
+        f"R² = {r_value**2:.3f}\n"
+        f"RMSE = {rmse:.2f} ppm\n"
+        f"Bias = {bias:.2f} ppm"
+    )
+    ax.text(0.05, 0.95, textstr, transform=ax.transAxes,
+            va="top", ha="left", bbox=dict(facecolor="white", alpha=0.7))
+
+    for fmt in imgformats:
+        fig.savefig(out_dir / f"scatter_{varname}{level_str}.{fmt}", dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+        
+def plot_spread_skill(preds_var, tests_var, out_dir,
+                      varname="co2massmix", level=None,
+                      imgformats=["svg", "png", "pdf"]):
+    """
+    Plot ensemble spread (std of predictions) vs absolute error (ensemble mean vs ground truth).
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- Compute ensemble mean & spread ---
+    ens_mean = preds_var.mean(dim="sample").values
+    ens_std  = preds_var.std(dim="sample").values
+    truth    = tests_var.values
+
+    abs_error = np.abs(ens_mean - truth)
+    mask = np.isfinite(abs_error) & np.isfinite(ens_std)
+    abs_error, ens_std = abs_error[mask], ens_std[mask]
+
+    # --- Plot ---
+    fig, ax = plt.subplots(figsize=(6,6))
+    hb = ax.hexbin(ens_std, abs_error, gridsize=80, cmap="magma", bins="log")
+    plt.colorbar(hb, ax=ax, label="log(count)")
+
+    lims = [0, max(ens_std.max(), abs_error.max())]
+    ax.plot(lims, lims, "k--", label="1:1 line (perfect calibration)")
+    ax.set_xlabel("Spread (std of ensemble predictions, ppm)")
+    ax.set_ylabel("Absolute Error (mean vs ground truth, ppm)")
+    if level is not None:
+        title=f"Spread-Skill Relationship ({varname}) - level {level:.0f}"
+        level_str = f"_level{level:.0f}"
+    else:
+        title=f"Spread-Skill Relationship ({varname}) - mean over levels"
+        level_str = ""
+    ax.set_title(title)
+    ax.legend()
+
+    for fmt in imgformats:
+        fig.savefig(out_dir / f"spread_skill_{varname}{level_str}.{fmt}", dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_error_locations(preds_var, tests_var, out_dir,
+                         varname="co2massmix", level=None,
+                         vmax_bias=5.0, vmax_rmse=10.0,
+                         imgformats=["svg", "png", "pdf"]):
+        """
+        Plot spatial bias, RMSE and ensemble spread maps.
+        """
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        bias, rmse, spread = compute_error_maps(preds_var, tests_var)
+
+        fig, axs = plt.subplots(1, 3, figsize=(15, 4), constrained_layout=True)
+        titles = ["Bias [ppm]", "RMSE [ppm]", "Ensemble spread ($\\sigma$) [ppm]"]
+        cmaps = ["coolwarm", "inferno", "cividis"]
+        data = [bias, rmse, spread]
+        vmins = [-vmax_bias, 0, 0]
+        vmaxs = [vmax_bias, vmax_rmse, vmax_rmse]
+
+        for ax, arr, title, cmap, vmin, vmax in zip(axs, data, titles, cmaps, vmins, vmaxs):
+            im = ax.imshow(arr[::-1, :], cmap=cmap, vmin=vmin, vmax=vmax)
+            ax.set_xlabel("Longitude")
+            ax.set_ylabel("Latitude")
+            ax.set_title(title, fontsize=14)
+            plt.colorbar(im, ax=ax, shrink=0.7)
+
+        if level is not None:
+            title=f"Spatial Diagnostics: Bias, RMSE, and Ensemble Spread ({varname}) - level {level:.0f}"
+            level_str = f"_level{level:.0f}"
+        else:
+            title=f"Spatial Diagnostics: Bias, RMSE, and Ensemble Spread ({varname}) - mean over levels"
+            level_str = ""
+        plt.suptitle(title, fontsize=16, fontweight="bold")
+
+        for fmt in imgformats:
+            fig.savefig(out_dir / f"error_maps_{varname}{level_str}.{fmt}", dpi=300, bbox_inches="tight")
+        plt.close(fig)
