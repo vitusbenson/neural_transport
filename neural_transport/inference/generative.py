@@ -258,6 +258,14 @@ def iterative_generate(
         base_batch["obs_values"] = obs_values_normed
 
     for i in range(n_samples):
+        # base_batch = {k: v.unsqueeze(0).to(device) for k, v in dataset[i].items()} # condition on different timesteps
+
+        # if masking:
+        #     target_var = target_vars_3d[0]
+        #     obs_mask, obs_values = create_mask(base_batch, target_var=target_var, obs_fraction=obs_fraction, pattern=pattern, nlat=nlat, nlon=nlon)
+        #     base_batch["obs_mask"] = obs_mask
+        #     obs_values_normed = model.model.normalize_observations(obs_values, base_batch, target_var=target_var)
+        #     base_batch["obs_values"] = obs_values_normed
         batch = {k: v.clone() for k, v in base_batch.items()}
         batch["noise"] = noise_list[i].to(device)
 
