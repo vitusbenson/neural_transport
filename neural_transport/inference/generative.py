@@ -122,6 +122,31 @@ def generate_noise(batch, n_samples=10, noise=None):
         alphas = torch.linspace(0, 1, n_samples)
         return [(1 - alpha) * x0 + alpha * v for alpha in alphas]
 
+    elif noise == "antipodal_orthogonal_noise":
+        x0 = torch.randn_like(all_levels)
+        n_dirs = n_samples // 2  # each direction will yield a +v and -v pair
+        # Start with random Gaussian directions
+        dirs = [torch.randn_like(x0).flatten() for _ in range(n_dirs)]
+        # Orthogonalize via Gram–Schmidt
+        orth_dirs = []
+        for v in dirs:
+            for u in orth_dirs:
+                v -= (v @ u) / (u @ u) * u
+            orth_dirs.append(v)
+
+        # Convert back to tensor shape and include antipodal pairs
+        orth_dirs = [v.reshape_as(x0) for v in orth_dirs]
+        all_noises = []
+        for v in orth_dirs:
+            all_noises.append(v)
+            all_noises.append(-v)
+
+        # If we have fewer than n_samples due to rounding
+        if len(all_noises) < n_samples:
+            all_noises.append(torch.randn_like(x0))
+
+        return all_noises[:n_samples]
+
     else:
         raise ValueError(f"Unknown noise type: {noise}")
 
@@ -245,6 +270,17 @@ def iterative_generate(
         elif noise in ["geodesic_noise", "linear_noise"]:
             angles = torch.linspace(0, 1, n_samples)  # alphas
             param_name = "$\\alpha$"
+        elif noise == "antipodal_orthogonal_noise":
+            labels = []
+            for i in range(n_samples // 2):
+                labels += [f"{i+1}a", f"{i+1}b"]
+            if n_samples % 2 == 1:
+                labels.append(f"{(n_samples // 2) + 1}a")
+            angles = labels
+            param_name = "Index pair"
+        else:
+            angles = torch.arange(n_samples)  # index
+            param_name = "Index"
         plot_noise_diagnostics(noise_list, angles, str(outpath).replace("preds", "plots"),
                                label=param_name, imgformats=["png"])
 

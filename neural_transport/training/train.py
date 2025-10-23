@@ -194,7 +194,7 @@ def predict(
 
     dataset = load_dataset(data_path_forecast, data_kwargs)
 
-    if type(lit_module_kwargs['model']).__name__ == "FlowMatching":
+    if type(lit_module_kwargs['model']).__name__ == "FlowMatching" or lit_module_kwargs['model'] == "flowmatching":
         print(f"Generating {ckptpath} {ckpt} CKPT")
         model = NeuralTransport.load_from_checkpoint(ckptpath, **lit_module_kwargs)
         outpath.mkdir(parents=True, exist_ok=True)
@@ -430,7 +430,7 @@ def train_and_eval_singlestep(
         / f"ckpt={ckpt}_massfixer={massfixer}"
         / f"obs_co2_pred_rollout_{freq}.zarr"
     )
-    if type(lit_module_kwargs['model']).__name__ == "FlowMatching":
+    if type(lit_module_kwargs['model']).__name__ == "FlowMatching" or lit_module_kwargs['model'] == "flowmatching":
         FM = True
         obs_pred_path = None
         plot_types += ["samples"]

@@ -12,10 +12,10 @@
 09. Create mask for observations
 10. Run conditional generation
 11. Implement evaluation for conditional generation **(c)**
+12. Test different models: swintransformer, sfno
 
 ## 🔄 In Progress
-12. Test different models: swintransformer, sfno
-13. Test different hyperparameters **(d)**
+13. Tune hyperparameters **(d)**
 14. Load OCO-2 dataset into `neural_transport`
 15. Integrate OCO-2 data into `carbonbench`
 16. Add possibility of covariats and $(CO_2)_{t-1}$

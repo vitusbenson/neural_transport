@@ -842,23 +842,39 @@ def plot_analyze_noise_path(noises, angles, label="$\\theta$"):
         for x in noises_flat
     ]
 
+    if isinstance(angles, torch.Tensor):
+        xvals = angles.cpu().numpy()
+        is_numeric = True
+    elif all(isinstance(a, (int, float)) for a in angles):
+        xvals = np.array(angles)
+        is_numeric = True
+    else:
+        xvals = np.arange(len(angles))
+        is_numeric = False
+
     figs = []
 
     # Norm vs θ
     fig1, ax1 = plt.subplots(figsize=(6, 3))
-    ax1.plot(angles.cpu(), norms, marker="o")
+    ax1.plot(xvals, norms, marker="o")
     ax1.set_ylabel("Norm of noise vector")
     ax1.set_xlabel(label)
     ax1.set_title(f"Norm of x({label}) along path")
+    if not is_numeric:
+        ax1.set_xticks(xvals)
+        ax1.set_xticklabels(angles, rotation=45)
     ax1.grid(True)
     figs.append(fig1)
 
     # Cosine similarity vs θ
     fig2, ax2 = plt.subplots(figsize=(6, 3))
-    ax2.plot(angles.cpu(), cosine_sims, marker="o")
+    ax2.plot(xvals, cosine_sims, marker="o")
     ax2.set_ylabel("Cosine similarity with start")
     ax2.set_xlabel(label)
     ax2.set_title(f"Cosine similarity with starting noise")
+    if not is_numeric:
+        ax2.set_xticks(xvals)
+        ax2.set_xticklabels(angles, rotation=45)
     ax2.grid(True)
     figs.append(fig2)
 
@@ -870,13 +886,43 @@ def plot_analyze_noise_path(noises, angles, label="$\\theta$"):
     fig3, ax3 = plt.subplots(figsize=(5, 5))
     ax3.plot(X_pca[:, 0], X_pca[:, 1], marker="o")
     for i, a in enumerate(angles):
-        ax3.text(X_pca[i, 0], X_pca[i, 1], f"{a:.2f}")
+        if i % 10 == 0 or i == len(angles) - 1 or len(angles) <= 10:
+            if is_numeric:
+                ax3.text(X_pca[i, 0], X_pca[i, 1], f"{a:.2f}")
+            else:
+                ax3.text(X_pca[i, 0], X_pca[i, 1], str(a))
     ax3.set_xlabel("PC1")
     ax3.set_ylabel("PC2")
     ax3.set_title("Noise path projected via PCA")
     figs.append(fig3)
 
     return figs
+
+
+def plot_pairwise_cosine_similarity(noises, labels=None):
+    """
+    Compute and plot the pairwise cosine similarity matrix between noise samples.
+    """
+    
+    X = torch.stack([x.flatten() for x in noises])
+    X_norm = X / (X.norm(dim=1, keepdim=True) + 1e-8)
+    cos_sim = (X_norm @ X_norm.T).cpu().numpy()
+
+    # Default labels if none provided
+    if labels is None:
+        labels = [str(i) for i in range(len(noises))]
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    im = ax.imshow(cos_sim, cmap="coolwarm", vmin=-1, vmax=1)
+    plt.colorbar(im, ax=ax, label="cosine similarity")
+
+    ax.set_xticks(np.arange(len(labels)))
+    ax.set_yticks(np.arange(len(labels)))
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    ax.set_yticklabels(labels)
+    ax.set_title("Pairwise cosine similarity of noise vectors")
+
+    return fig
 
 
 def plot_noise_diagnostics(noises, angles, out_dir, label="$\\theta$", imgformats=["svg", "png", "pdf"]):
@@ -888,6 +934,11 @@ def plot_noise_diagnostics(noises, angles, out_dir, label="$\\theta$", imgformat
 
     figs = plot_analyze_noise_path(noises, angles, label=label)
     names = ["norm_vs_angle", "cosine_vs_angle", "pca_projection"]
+
+    if label == "Index pair":
+        fig_4 = plot_pairwise_cosine_similarity(noises, labels=angles)
+        figs.append(fig_4)
+        names.append("pairwise_cosine_similarity")
 
     for name, fig in zip(names, figs):
         for fmt in imgformats:

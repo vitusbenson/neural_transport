@@ -172,6 +172,7 @@ neural_transport/flowmatching_dev/plots/*.svg
 neural_transport/flowmatching_dev/plots/*.png
 neural_transport/flowmatching_dev/plots/*.pdf
 neural_transport/flowmatching_dev/test_preds/*
+neural_transport/flowmatching_dev/test_plots/*
 
 # Old/Test versions (Jonathan)
 neural_transport/flowmatching_dev/examples/*

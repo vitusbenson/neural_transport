@@ -5,6 +5,7 @@ import pytorch_lightning as pl
 import torch
 
 from neural_transport.models import MODELS
+from neural_transport.models.wrappers_registry import MODELWRAPPERS
 from neural_transport.tools.loss import LOSSES
 from neural_transport.tools.metrics import ManyMetrics
 from neural_transport.tools.plot import plots_val_step
@@ -38,8 +39,10 @@ class NeuralTransport(pl.LightningModule):
     ):
         super().__init__()
         self.save_hyperparameters()
-        if isinstance(model, str):
+        if model in MODELS:
             self.model = MODELS[model](**model_kwargs)
+        elif model in MODELWRAPPERS:
+            self.model = MODELWRAPPERS[model](**model_kwargs)
         else:
             self.model = model
         if pretrained_ckptpath is not None:
