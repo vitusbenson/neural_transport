@@ -13,10 +13,14 @@ from xmovie import Movie
 from xmovie.core import convert_gif
 
 from neural_transport.inference.analyse import freq_mean
-from neural_transport.tools.conversion import *
+from neural_transport.tools.conversion import (
+    density_to_massmix,
+    massmix_to_molemix,
+    zonal_wavenumber_to_wavelength,
+    km_per_gridcell,
+)
 from neural_transport.tools.metrics import compute_error_maps, crps
 
-from scipy.interpolate import interp1d
 from scipy.stats import linregress
 from sklearn.decomposition import PCA
 
@@ -340,23 +344,6 @@ def plot_zonal_spectrum_line(pred, targ, figsize=(8, 5), **kwargs):
     Specpred_mean = Specpred.mean(mean_dims_pred) if mean_dims_pred else Specpred
     Spectarg_mean = Spectarg.mean(mean_dims_targ) if mean_dims_targ else Spectarg
 
-    # This is not so nicely implemented, but works for now (can be removed without breaking the code)
-    freq_coord = Specpred_mean["freq_lon"].values
-    lat_mean = float(pred["lat"].mean().values) if "lat" in pred.coords else 0.0
-    N = len(freq_coord)
-    k_indices = np.arange(1, N)
-    km_for_k = zonal_wavenumber_to_wavelength(k_indices, lat_mean)
-    freq_nonzero = freq_coord[1:]
-    freq_to_km_interp = interp1d(
-        freq_nonzero, km_for_k, kind="linear", bounds_error=False,
-        fill_value=(km_for_k.max(), km_for_k.min())
-    )
-    km_to_freq_interp = interp1d(
-        km_for_k[::-1], freq_nonzero[::-1], kind="linear", bounds_error=False,
-        fill_value=(freq_nonzero[0], freq_nonzero[-1])
-    )
-    # End
-
     with mpl.rc_context(mpl_rc_params):
         fig = plt.figure(figsize=figsize)
         ax = plt.subplot()
@@ -367,17 +354,84 @@ def plot_zonal_spectrum_line(pred, targ, figsize=(8, 5), **kwargs):
         ax.set_title("Zonal Power Spectrum")
         ax.set_xlabel("Frequency")
         ax.set_ylabel("Power")
- 
-        # This is not so nicely implemented, but works for now (can be removed without breaking the code)
-        secax = ax.secondary_xaxis('top', functions=(freq_to_km_interp, km_to_freq_interp))
+
+        plt.tight_layout()
+
+    return fig
+
+
+def get_zonal_spectrum_physical(pred, targ):
+    pred = pred.compute()
+    targ = targ.compute()
+
+    # Mean latitude and spacing
+    dx, circ_at_lat = km_per_gridcell(pred)
+
+    # Assign lon coordinate in kilometers for xrft
+    pred = pred.assign_coords(lon=pred["lon"] * dx)
+    targ = targ.assign_coords(lon=targ["lon"] * dx)
+
+    # Properly scaled FFT
+    Fpred = xrft.fft(pred, dim="lon", true_phase=True, true_amplitude=True)
+    Ftarg = xrft.fft(targ, dim="lon", true_phase=True, true_amplitude=True)
+    Fpred = Fpred.isel(freq_lon=(Fpred["freq_lon"] > 0))
+    Ftarg = Ftarg.isel(freq_lon=(Ftarg["freq_lon"] > 0))
+
+    Specpred = abs(Fpred).mean(["lat", "level"])
+    Spectarg = abs(Ftarg).mean(["lat", "level"])
+
+    freq_km = Specpred["freq_lon"].values
+    k_circ = freq_km * circ_at_lat
+    Specpred = Specpred.assign_coords(k_circ=("freq_lon", k_circ))
+    Spectarg = Spectarg.assign_coords(k_circ=("freq_lon", k_circ))
+
+    return Specpred, Spectarg
+
+
+def plot_zonal_spectrum_line_physical(pred, targ, figsize=(8, 5), **kwargs):
+    """
+    Plot the zonal power spectrum of prediction and target.
+    The bottom x-axis shows frequency, the top x-axis shows wavelength in km.
+
+    Parameters
+    ----------
+    pred, targ : xarray.DataArray
+        Prediction and target fields with 'lon' dimension.
+    figsize : tuple
+        Figure size.
+    """
+    Specpred, Spectarg = get_zonal_spectrum_physical(pred, targ)
+
+    mean_dims_pred = [d for d in ["time", "sample"] if d in Specpred.dims]
+    mean_dims_targ = [d for d in ["time", "sample"] if d in Spectarg.dims]
+    Specpred_mean = Specpred.mean(mean_dims_pred) if mean_dims_pred else Specpred
+    Spectarg_mean = Spectarg.mean(mean_dims_targ) if mean_dims_targ else Spectarg
+
+    with mpl.rc_context(mpl_rc_params):
+        fig, ax = plt.subplots(figsize=figsize)
+
+        # Plot
+        xr.concat([Specpred_mean, Spectarg_mean], dim=["Prediction", "Target"]) \
+          .rename({"concat_dim": "Variable"}) \
+          .plot(x="k_circ", yscale="log", hue="Variable", ax=ax)
+
+        ax.set_title("Zonal Power Spectrum")
+        ax.set_xlabel("Zonal Wavenumber [cycles per Earth circumference]")
+        ax.set_ylabel("Power")
+
+        secax = ax.secondary_xaxis('top')
         secax.set_xlabel("Wavelength [km]")
+
+        # Compute wavelength for frequencies (skip zero)
+        lat_mean = float(pred["lat"].mean().values) if "lat" in pred.coords else 0.0
         bottom_ticks = ax.get_xticks()
-        top_tick_km = freq_to_km_interp(np.array(bottom_ticks))
-        km_min, km_max = float(km_for_k.min()), float(km_for_k.max())
-        top_tick_km = np.where(np.isnan(top_tick_km), km_max, top_tick_km)
-        top_tick_km = np.clip(top_tick_km, km_min, km_max)
-        secax.set_xticks(top_tick_km)
-        # End
+        freq_nonzero = bottom_ticks[bottom_ticks > 0]
+        wavelength_nonzero = zonal_wavenumber_to_wavelength(freq_nonzero, lat_mean)
+       
+        # Set nicely spaced ticks
+        secax.set_xticks(freq_nonzero)
+        # secax.set_xticklabels([f"{km:.2e}" for km in wavelength_nonzero]) # scientific notation
+        secax.set_xticklabels([f"{km:.0f}" for km in wavelength_nonzero]) # non-scientific notation
 
         plt.tight_layout()
 
@@ -509,6 +563,14 @@ def plot_metrics(
             for imgformat in imgformats:
                 plt.savefig(
                     out_dir / f"{varname}_zonal_spectrum_line.{imgformat}", dpi=300
+                )
+            plt.close()
+
+            fig = plot_zonal_spectrum_line_physical(pred, targ)
+
+            for imgformat in imgformats:
+                plt.savefig(
+                    out_dir / f"{varname}_zonal_spectrum_line_physical.{imgformat}", dpi=300
                 )
             plt.close()
 
@@ -871,7 +933,7 @@ def plot_analyze_noise_path(noises, angles, label="$\\theta$"):
     ax2.plot(xvals, cosine_sims, marker="o")
     ax2.set_ylabel("Cosine similarity with start")
     ax2.set_xlabel(label)
-    ax2.set_title(f"Cosine similarity with starting noise")
+    ax2.set_title("Cosine similarity with starting noise")
     if not is_numeric:
         ax2.set_xticks(xvals)
         ax2.set_xticklabels(angles, rotation=45)

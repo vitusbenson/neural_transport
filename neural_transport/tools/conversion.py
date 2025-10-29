@@ -87,3 +87,11 @@ def wavelength_to_zonal_wavenumber(wavelength_km, lat=0.0):
     wavelength_km = np.maximum(np.array(wavelength_km, dtype=float), 1e-6)
     return circumference / wavelength_km
 
+def km_per_gridcell(batch):
+    lat = batch["lat"].values
+    lon = batch["lon"].values
+
+    lat_mean = float(np.mean(lat))
+    circ_at_lat = 2 * np.pi * R_EARTH * np.cos(np.deg2rad(lat_mean))
+    dx = circ_at_lat / len(lon)
+    return dx, circ_at_lat

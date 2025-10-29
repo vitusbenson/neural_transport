@@ -1,14 +1,10 @@
-import shutil
 import tempfile
-import time as pytime
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 import torch
 import xarray as xr
 from cdo import Cdo
-from tqdm import tqdm
 
 from neural_transport.inference.plot_results import plot_noise_diagnostics, plot_masking_diagnostics
 

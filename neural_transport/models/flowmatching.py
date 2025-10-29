@@ -12,7 +12,7 @@ from flow_matching.solver import ODESolver
 # neural_transport
 from neural_transport.models import MODELS
 from neural_transport.models.regulargrid import RegularGridModel
-# from neural_transport.models.unet import UNet
+
 
 class VelocityWrapper(nn.Module):
     def __init__(
@@ -47,22 +47,54 @@ class MaskedVelocityWrapper(VelocityWrapper):
         obs_mask=None,
         obs_values=None,
         dt=None,
+        **generate_kwargs,
     ):
         super().__init__(submodel=submodel, nlev=nlev, static_inputs=static_inputs)
         self.obs_mask = obs_mask
         self.obs_values = obs_values
         self.dt = dt
 
+        self.masking_time = generate_kwargs.get("masking_time", None)
+        self.t_threshold = generate_kwargs.get("t_threshold", 0.9)
+        self.masking_method = generate_kwargs.get("masking_method", "interpolate")
+
     def forward(self, x, t):
-        x_masked = self.masking_simple(x)
-        dtx = (x_masked - x) / self.dt + super().forward(x_masked, t)
-        return dtx
-        # version mimicking dxt = f(x,t)
+        masking_time = self.masking_time
+        t_threshold = self.t_threshold
+        if masking_time == "smooth_late_masking":
+            mask_weight = torch.sigmoid((t - t_threshold) * 20.0).view(-1, 1, 1, 1)
+        elif masking_time == "step_late_masking":
+            mask_weight = (t >= t_threshold).float().view(-1, 1, 1, 1)
+        elif masking_time == "smooth_early_masking":
+            mask_weight = torch.sigmoid((t_threshold - t) * 20.0).view(-1, 1, 1, 1)
+        elif masking_time == "step_early_masking":
+            mask_weight = (t < t_threshold).float().view(-1, 1, 1, 1)
+        else:
+            mask_weight = 1.0
+
+        if self.masking_method == "simple":
+            x_masked = self.masking_simple(x)
+        elif self.masking_method == "interpolate":
+            x_masked = self.masking_interpolate(x, t)
+        elif self.masking_method == "preserve_global_mean":
+            x_masked = self.masking_preserve_global_mean(x)
+        elif self.masking_method == "preserve_global_mean_and_var":
+            x_masked = self.masking_preserve_global_mean_and_var(x)
+        
+        x_effective = mask_weight * x_masked + (1.0 - mask_weight) * x
+        # dxt = (x_effective - x)/dt + f(x_effective, t)
+        dtx = (x_effective - x) / self.dt + super().forward(x_effective, t)
+        # dxt = f(x,t)
         # dxt = torch.where(self.obs_mask, self.obs_values - x, super().forward(x, t))
-        # return dxt
+        return dtx
 
     def masking_simple(self, x):
         x_masked = torch.where(self.obs_mask, self.obs_values.detach(), x)
+        return x_masked
+    
+    def masking_interpolate(self, x, t):
+        obs_values = t * self.obs_values.detach() + (1.0 - t) * x
+        x_masked = torch.where(self.obs_mask, obs_values, x)
         return x_masked
     
     def masking_preserve_global_mean(self, x):
@@ -172,6 +204,7 @@ class FlowMatching(RegularGridModel):
             method='midpoint',
             nlev=1,
             step_size=0.01,
+            generate_kwargs=None,
             ):
         
         self.submodel = MODELS[submodel](**model_kwargs)
@@ -179,10 +212,13 @@ class FlowMatching(RegularGridModel):
         self.method = method
         self.nlev = nlev
         self.step_size = step_size
+        self.generate_kwargs = generate_kwargs if generate_kwargs is not None else {}
         self.path = AffineProbPath(scheduler=CondOTScheduler())
         self.target_vars = self.submodel.target_vars # Here target_vars[0] is supposed to be "co2massmix"
 
     def forward(self, batch):
+        if not hasattr(self, "generate_kwargs"):
+            self.generate_kwargs = {}
         if self.training:
             x_out, dx_t = self.training_forward(batch)
             preds = self.postprocess_outputs(x_out, batch, denormalize=False)
@@ -204,7 +240,7 @@ class FlowMatching(RegularGridModel):
             else:
                 obs_mask = None
                 obs_values = None
-            trajectory = self.inference_forward(x_in, x_init, obs_mask, obs_values)
+            trajectory = self.inference_forward(x_in, x_init, obs_mask, obs_values, generate_kwargs=self.generate_kwargs)
             x_out = trajectory[-1,...]
             sol = self.postprocess_outputs(x_out, batch)
             T, B, C, Nlat, Nlon = trajectory.shape
@@ -261,10 +297,16 @@ class FlowMatching(RegularGridModel):
 
         return x_out, dx_t #, x_1_normalized # return {self.target_vars[0]: x_out}
 
-    def return_velocity_wrapper(self, submodel,
-                                obs_mask=None, obs_values=None,
-                                static_inputs=None,
-                                dt=None,):
+    def return_velocity_wrapper(
+            self, submodel,
+            obs_mask=None, obs_values=None,
+            static_inputs=None,
+            dt=None,
+            generate_kwargs=None,
+            ):
+        if generate_kwargs is None:
+            generate_kwargs = {}
+
         if obs_mask is not None and obs_values is not None:
             return MaskedVelocityWrapper(
                 submodel=submodel,
@@ -273,6 +315,7 @@ class FlowMatching(RegularGridModel):
                 obs_mask=obs_mask,
                 obs_values=obs_values,
                 dt=dt,
+                **generate_kwargs,
             )
         else:
             return VelocityWrapper(
@@ -282,10 +325,24 @@ class FlowMatching(RegularGridModel):
             )
 
     # inference_forward
-    def inference_forward(self, x_in, x_init, obs_mask, obs_values):
+    def inference_forward(
+            self,
+            x_in, x_init,
+            obs_mask, obs_values,
+            generate_kwargs=None
+            ):
+        if generate_kwargs is None:
+            generate_kwargs = {}
+
+        refine_start = generate_kwargs.get("refine_start", 1.0)
 
         # get timesteps for integration [T]
-        time_grid = torch.linspace(0, 1, steps=10, device=x_init.device)
+        if refine_start < 1.0:
+            coarse = torch.linspace(0, refine_start, steps=11, device=x_init.device)[:-1]
+            fine = torch.linspace(refine_start, 1.0, steps=11, device=x_init.device)
+            time_grid = torch.cat([coarse, fine[1:]])
+        else:
+            time_grid = torch.linspace(0, 1, steps=10, device=x_init.device) 
         dt = (time_grid[-1] - time_grid[0]) / (len(time_grid) - 1)
 
         # UNet expects normalization parameters
@@ -295,6 +352,7 @@ class FlowMatching(RegularGridModel):
             obs_mask=obs_mask,
             obs_values=obs_values,
             dt=dt,
+            generate_kwargs=generate_kwargs,
             # static_inputs=x_in[:,:self.nlev*len(self.target_vars),:,:],  # [B C Nlat Nlon] (static inputs for conditioning later)
         )
 

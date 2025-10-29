@@ -7,7 +7,11 @@ import xarray as xr
 import xskillscore
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
-from neural_transport.tools.conversion import *
+from neural_transport.tools.conversion import (
+    density_to_massmix,
+    massmix_to_molemix,
+)
+from neural_transport.tools.metrics import crps
 
 
 def freq_mean(data, freq="QS", average_time=False):
@@ -40,8 +44,9 @@ def freq_mean(data, freq="QS", average_time=False):
         dataf["time"] = dataf.time / (
             pd.Timedelta(days=1) / data.time.diff("time").values[0]
         ).astype("timedelta64[D]")
-    except:
+    except Exception as e:
         dataf["time"] = dataf.time / 4
+        print(f"Could not convert time bins to days properly, defaulting to 4 steps per day: {e}")
 
     if average_time:
         dataf = dataf.mean("time")
@@ -344,13 +349,13 @@ def compute_score_df_generate(targs, preds):
         pred_mass_sum = pred_mass.sum(["lat", "lon", "level"]).compute() / 3.664
 
         metrics["Mass_RMSE"] = ((targ_mass_sum - pred_mass_sum) ** 2).mean().item() ** 0.5
-        print(f"Mass RMSE {pytime.time() - start}")
+        # print(f"Mass RMSE {pytime.time() - start}")
         start = pytime.time()
 
         metrics["RelMass_RMSE"] = (
             ((targ_mass_sum - pred_mass_sum) / (targ_mass_sum + 1e-12)) ** 2
         ).mean().item() ** 0.5
-        print(f"RelMass_RMSE {pytime.time() - start}")
+        # print(f"RelMass_RMSE {pytime.time() - start}")
         start = pytime.time()
 
         ### RMSE / R² across lat, lon, level
@@ -362,7 +367,7 @@ def compute_score_df_generate(targs, preds):
         ).compute()
 
         metrics["RMSE_3D_co2molemix"] = mse.item() ** 0.5
-        print(f"RMSE_3D_co2molemix {pytime.time() - start}")
+        # print(f"RMSE_3D_co2molemix {pytime.time() - start}")
         start = pytime.time()
 
         r = xskillscore.pearson_r(
@@ -371,18 +376,18 @@ def compute_score_df_generate(targs, preds):
             dim=["lat", "lon", "level"],
             weights=weights,
         ).compute()
-        print(f"Pearson_R {pytime.time() - start}")
+        # print(f"Pearson_R {pytime.time() - start}")
         start = pytime.time()
 
         metrics["PearsonCorrCoef_3D_co2molemix"] = r.item()
         metrics["R2_3D_co2molemix"] = (r**2).item()
-        print(f"R2_3D_co2molemix {pytime.time() - start}")
+        # print(f"R2_3D_co2molemix {pytime.time() - start}")
         start = pytime.time()
 
         # Relative RMSE
         targ_mean = molemix_targ.weighted(weights).mean().compute().item()
         metrics["RelRMSE_3D_co2molemix"] = (mse.item() ** 0.5) / (targ_mean + 1e-12)
-        print(f"RelRMSE_3D_co2molemix {pytime.time() - start}")
+        # print(f"RelRMSE_3D_co2molemix {pytime.time() - start}")
         start = pytime.time()
 
         # Per-dimension metrics (lat, lon, level)
@@ -395,7 +400,7 @@ def compute_score_df_generate(targs, preds):
             )
             metrics[f"RMSE_{dim}_co2molemix"] = float(mse_dim.mean()**0.5)
 
-            print(f"RMSE_{dim}_co2molemix {pytime.time() - start}")
+            # print(f"RMSE_{dim}_co2molemix {pytime.time() - start}")
             start = pytime.time()
         
         results.append(metrics)
@@ -404,7 +409,7 @@ def compute_score_df_generate(targs, preds):
     df.loc["mean"] = df.mean()
     df.loc["std"] = df.std()
 
-    print(f"Metrics {results} {pytime.time() - start}")
+    # print(f"Metrics {results} {pytime.time() - start}")
     return df
 
 
