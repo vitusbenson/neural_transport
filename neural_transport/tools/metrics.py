@@ -3,9 +3,11 @@ import torch.nn as nn
 from torchmetrics.functional import pearson_corrcoef, r2_score
 import numpy as np
 import xarray as xr
-from typing import Tuple, Optional
+from typing import Tuple
 
-from neural_transport.tools.conversion import *
+from neural_transport.tools.conversion import (
+    density_to_mass,
+)
 
 
 class PixelwiseMetric(nn.Module):
@@ -118,7 +120,7 @@ class Mass_RMSE(nn.Module):
 
         if weights is not None:
             self.register_buffer(
-                f"weights", torch.from_numpy(weights.astype("float32"))
+                "weights", torch.from_numpy(weights.astype("float32"))
             )
         else:
             self.weights = None

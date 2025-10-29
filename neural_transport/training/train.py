@@ -256,7 +256,7 @@ def score(target_path, pred_path, obs_pred_path=None, freq="QS", FM=False):
 
     metrics = {}
     if FM:
-        df_full = compute_score_df_generate(co2targ, co2pred)
+        df_full, df_global_scalars, maps = compute_score_df_generate(co2targ, co2pred)
         df_full.index = pd.MultiIndex.from_product(
             [[f"{model_name}_{singlestep_or_rollout}_{ckpt_name}"], df_full.index],
             names=["model", "sample"],
@@ -267,6 +267,8 @@ def score(target_path, pred_path, obs_pred_path=None, freq="QS", FM=False):
         idx = pd.IndexSlice
         df_summary = df_full.loc[idx[f"{model_name}_{singlestep_or_rollout}_{ckpt_name}", ["mean", "std"]], :]
         df_summary.to_csv(score_path / ("metrics.csv" if freq == "QS" else f"metrics_{freq}.csv"))
+        df_global_scalars.to_csv(score_path / ("metrics_global_scalars.csv" if freq == "QS" else f"metrics_global_scalars_{freq}.csv"))
+        maps.to_netcdf(score_path / ("metrics_maps.nc" if freq == "QS" else f"metrics_maps_{freq}.nc"))
     else:
         metrics[f"{model_name}_{singlestep_or_rollout}_{ckpt_name}"] = compute_score_df(
             co2targ,
@@ -309,6 +311,7 @@ def plot(
 
     ckpt_name = pred_path.parent.name
     plot_path = pred_path.parent.parent.parent / "plots" / ckpt_name
+    score_path = pred_path.parent.parent.parent / "scores" / ckpt_name
 
     co2pred = co2pred.isel(time=slice(1, None))
     co2targ = co2targ.isel(time=slice(1, None))
@@ -320,8 +323,9 @@ def plot(
 
     if "samples" in plot_types:
         plot_samples(
-            co2pred,
-            plot_path,
+            preds=co2pred,
+            out_dir=plot_path,
+            score_path=score_path,
             tests=co2targ,
             varnames=["co2massmix"],
             normalize=False,

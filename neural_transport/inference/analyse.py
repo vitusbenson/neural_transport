@@ -315,7 +315,7 @@ def compute_score_df_generate(targs, preds):
     if "time" in preds.dims:
         preds = preds.isel(time=-1)
 
-    start = pytime.time()
+    # start = pytime.time()
 
     # Convert to mole fraction
     molemix_targ = massmix_to_molemix(targs.co2massmix).transpose("level", "lat", "lon")
@@ -325,7 +325,7 @@ def compute_score_df_generate(targs, preds):
     weights = np.cos(np.deg2rad(targs.lat))
     _, weights = xr.broadcast(targs.co2massmix, weights)
 
-    print(f"Data Loading {pytime.time() - start}")
+    # print(f"Data Loading {pytime.time() - start}")
 
     results = []
 
@@ -409,8 +409,28 @@ def compute_score_df_generate(targs, preds):
     df.loc["mean"] = df.mean()
     df.loc["std"] = df.std()
 
+    molemix_pred = molemix_pred.transpose("sample", "lat", "lon", "level")
+    crps_map, crps_mean = crps(molemix_pred, molemix_targ)
+
+    df_global_scalars = pd.DataFrame(
+        {
+            "CRPS_ensemble_mean": [float(crps_mean)],
+        }
+    )
+
+    maps = xr.Dataset(
+        {
+            "CRPS_map_co2molemix": (("lat", "lon", "level"), crps_map.data)
+        },
+        coords={
+            "lat": molemix_targ.lat,
+            "lon": molemix_targ.lon,
+            "level": molemix_targ.level,
+        },
+    )
+
     # print(f"Metrics {results} {pytime.time() - start}")
-    return df
+    return df, df_global_scalars, maps
 
 
 def compute_local_scores(obs_preds, freq="QS"):

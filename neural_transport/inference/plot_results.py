@@ -1131,6 +1131,7 @@ def plot_masking_diagnostics(
 def plot_samples(
         preds,
         out_dir,
+        score_path,
         tests=None,
         varnames=["co2massmix"],
         normalize=False,
@@ -1281,8 +1282,7 @@ def plot_sample_cdf(preds_var, out_dir, tests=None,
                     center_to_test_mean=False,
                     imgformats=["svg", "png", "pdf"]):
     """
-    Plot cumulative distribution functions (CDFs) of normalized mean values per sample
-    for one or multiple variables. Optionally compare to test data.
+    Plot cumulative distribution functions (CDFs) of normalized mean values per sample for one or multiple variables. Optionally compare to test data.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
