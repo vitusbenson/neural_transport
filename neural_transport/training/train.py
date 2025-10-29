@@ -244,7 +244,9 @@ def load_pred_targ(target_path, pred_path):
     return co2targ, co2pred
 
 
-def score(target_path, pred_path, obs_pred_path=None, freq="QS", FM=False):
+def score(target_path, pred_path,
+          obs_pred_path=None, freq="QS",
+          generate_kwargs=None):
     co2targ, co2pred = load_pred_targ(target_path, pred_path)
     co2pred = co2pred.isel(time=slice(1, None))
     co2targ = co2targ.isel(time=slice(1, None)).isel(time=slice(len(co2pred.time)))
@@ -255,8 +257,8 @@ def score(target_path, pred_path, obs_pred_path=None, freq="QS", FM=False):
     score_path = pred_path.parent.parent.parent / "scores" / ckpt_name
 
     metrics = {}
-    if FM:
-        df_full, df_global_scalars, maps = compute_score_df_generate(co2targ, co2pred)
+    if generate_kwargs:
+        df_full, df_global_scalars, maps = compute_score_df_generate(co2targ, co2pred, **generate_kwargs)
         df_full.index = pd.MultiIndex.from_product(
             [[f"{model_name}_{singlestep_or_rollout}_{ckpt_name}"], df_full.index],
             names=["model", "sample"],
@@ -297,6 +299,7 @@ def plot(
     pred_path,
     obs_pred_path=None,
     obs_compare_path=None,
+    freq="QS",
     data_path_forecast=None,
     data_kwargs=None,
     movie_interval=["2018-01-01", "2018-03-31"],
@@ -327,6 +330,7 @@ def plot(
             out_dir=plot_path,
             score_path=score_path,
             tests=co2targ,
+            freq=freq,
             varnames=["co2massmix"],
             normalize=False,
             imgformats=["png"],
@@ -435,21 +439,20 @@ def train_and_eval_singlestep(
         / f"obs_co2_pred_rollout_{freq}.zarr"
     )
     if type(lit_module_kwargs['model']).__name__ == "FlowMatching" or lit_module_kwargs['model'] == "flowmatching":
-        FM = True
         obs_pred_path = None
         plot_types += ["samples"]
-    else:
-        FM = False
-    score(target_path, pred_path, obs_pred_path, FM=FM)
+    score(target_path, pred_path,
+          obs_pred_path=obs_pred_path, freq=freq, generate_kwargs=generate_kwargs)
     plot(
         target_path,
         pred_path,
-        obs_pred_path,
-        obs_compare_path,
-        data_path_forecast,
-        data_kwargs,
-        movie_interval,
-        num_workers,
+        obs_pred_path=obs_pred_path,
+        obs_compare_path=obs_compare_path,
+        freq=freq,
+        data_path_forecast=data_path_forecast,
+        data_kwargs=data_kwargs,
+        movie_interval=movie_interval,
+        num_workers=num_workers,
         plot_types=plot_types,
         generate_kwargs=generate_kwargs,
     )
@@ -539,17 +542,20 @@ def train_and_eval_rollout(
 
         if run_scoring:
             print("Starting Scoring")
-            score(target_path, pred_path, obs_pred_path, freq=freq)
+            score(target_path, pred_path,
+                  obs_pred_path=obs_pred_path, freq=freq, generate_kwargs=generate_kwargs)
         if run_plotting:
             print("Starting Plotting")
             plot(
                 target_path,
                 pred_path,
-                obs_pred_path,
-                obs_compare_path,
-                data_path_forecast,
-                data_kwargs,
+                obs_pred_path=obs_pred_path,
+                obs_compare_path=obs_compare_path,
+                freq=freq,
+                data_path_forecast=data_path_forecast,
+                data_kwargs=data_kwargs,
                 movie_interval=movie_interval,
                 num_workers=num_workers,
                 plot_types=plot_types,
+                generate_kwargs=generate_kwargs,
             )

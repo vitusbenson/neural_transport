@@ -300,7 +300,7 @@ def compute_score_df(targs, preds, freq="QS"):
 
     return df
 
-def compute_score_df_generate(targs, preds):
+def compute_score_df_generate(targs, preds, **generate_kwargs):
     """
     Compute metrics for generated samples where:
       - targs has dims: [time, level, lat, lon]
@@ -335,7 +335,7 @@ def compute_score_df_generate(targs, preds):
         metrics = {}
 
         ### Metrics
-        start = pytime.time()
+        # start = pytime.time()
 
         # Mass balance metrics
         if "airmass" in targs and "airmass" in preds:
@@ -350,13 +350,13 @@ def compute_score_df_generate(targs, preds):
 
         metrics["Mass_RMSE"] = ((targ_mass_sum - pred_mass_sum) ** 2).mean().item() ** 0.5
         # print(f"Mass RMSE {pytime.time() - start}")
-        start = pytime.time()
+        # start = pytime.time()
 
         metrics["RelMass_RMSE"] = (
             ((targ_mass_sum - pred_mass_sum) / (targ_mass_sum + 1e-12)) ** 2
         ).mean().item() ** 0.5
         # print(f"RelMass_RMSE {pytime.time() - start}")
-        start = pytime.time()
+        # start = pytime.time()
 
         ### RMSE / R² across lat, lon, level
         mse = xskillscore.mse(
@@ -368,7 +368,7 @@ def compute_score_df_generate(targs, preds):
 
         metrics["RMSE_3D_co2molemix"] = mse.item() ** 0.5
         # print(f"RMSE_3D_co2molemix {pytime.time() - start}")
-        start = pytime.time()
+        # start = pytime.time()
 
         r = xskillscore.pearson_r(
             molemix_targ.chunk({"lat": -1, "lon": -1, "level": -1}),
@@ -377,18 +377,18 @@ def compute_score_df_generate(targs, preds):
             weights=weights,
         ).compute()
         # print(f"Pearson_R {pytime.time() - start}")
-        start = pytime.time()
+        # start = pytime.time()
 
         metrics["PearsonCorrCoef_3D_co2molemix"] = r.item()
         metrics["R2_3D_co2molemix"] = (r**2).item()
         # print(f"R2_3D_co2molemix {pytime.time() - start}")
-        start = pytime.time()
+        # start = pytime.time()
 
         # Relative RMSE
         targ_mean = molemix_targ.weighted(weights).mean().compute().item()
         metrics["RelRMSE_3D_co2molemix"] = (mse.item() ** 0.5) / (targ_mean + 1e-12)
         # print(f"RelRMSE_3D_co2molemix {pytime.time() - start}")
-        start = pytime.time()
+        # start = pytime.time()
 
         # Per-dimension metrics (lat, lon, level)
         for dim in ["lat", "lon", "level"]:
@@ -401,7 +401,7 @@ def compute_score_df_generate(targs, preds):
             metrics[f"RMSE_{dim}_co2molemix"] = float(mse_dim.mean()**0.5)
 
             # print(f"RMSE_{dim}_co2molemix {pytime.time() - start}")
-            start = pytime.time()
+            # start = pytime.time()
         
         results.append(metrics)
     
@@ -410,18 +410,35 @@ def compute_score_df_generate(targs, preds):
     df.loc["std"] = df.std()
 
     molemix_pred = molemix_pred.transpose("sample", "lat", "lon", "level")
-    crps_map, crps_mean = crps(molemix_pred, molemix_targ)
+    avg_over_levels = generate_kwargs.get("avg_over_levels", True)
+
+    global_scalars = {}
+    maps = {}
+    if not avg_over_levels:
+        for i, lvl in enumerate(molemix_targ.level.values):
+            molemix_pred_lvl = molemix_pred.isel(level=i)
+            molemix_targ_lvl = molemix_targ.isel(level=i)
+            
+            crps_map_level, crps_mean_level = crps(molemix_pred_lvl, molemix_targ_lvl)
+
+            global_scalars[f"CRPS_ensemble_mean_level{lvl:.0f}"] = float(crps_mean_level)
+
+            maps[f"CRPS_map_co2molemix_level{lvl:.0f}"] = (("lat", "lon"), crps_map_level.data)
+
+    molemix_pred_mean = molemix_pred.mean(dim="level")  # shape: [sample, lat, lon]
+    molemix_targ_mean = molemix_targ.mean(dim="level")  # shape: [lat, lon]
+
+    crps_map, crps_mean = crps(molemix_pred_mean, molemix_targ_mean)
+    global_scalars["CRPS_ensemble_mean"] = float(crps_mean)
+    maps["CRPS_map_co2molemix"] = (("lat", "lon"), crps_map.data)
+
 
     df_global_scalars = pd.DataFrame(
-        {
-            "CRPS_ensemble_mean": [float(crps_mean)],
-        }
+        {k: [v] for k, v in global_scalars.items()}
     )
 
     maps = xr.Dataset(
-        {
-            "CRPS_map_co2molemix": (("lat", "lon", "level"), crps_map.data)
-        },
+        data_vars={k: (dims, data) for k, (dims, data) in maps.items()},
         coords={
             "lat": molemix_targ.lat,
             "lon": molemix_targ.lon,

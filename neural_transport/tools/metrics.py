@@ -207,7 +207,7 @@ def crps(preds, tests) -> Tuple[xr.DataArray | np.ndarray, float]:
     crps_map : xarray.DataArray or np.ndarray
         CRPS per gridpoint (lat x lon) or (lat x lon x level) if levels present.
     crps_mean : float
-        Mean CRPS averaged over all gridpoints and levels.
+        Mean CRPS averaged over all gridpoints.
     """
     if isinstance(preds, xr.DataArray):
         preds = preds.values
@@ -246,7 +246,7 @@ def crps(preds, tests) -> Tuple[xr.DataArray | np.ndarray, float]:
 
     crps_flat = term1 - term2  # [N, (C)]
     crps_map = crps_flat.reshape(lat, lon, C_t) if preds.ndim == 4 else crps_flat.reshape(lat, lon)  # [lat, lon, (level)]
-    crps_mean = float(np.mean(crps_map))
+    crps_mean = float(np.mean(crps_map, axis=(0, 1)))  # average over lat, lon
     return crps_map, crps_mean
 
 

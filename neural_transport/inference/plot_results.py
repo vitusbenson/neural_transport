@@ -1133,6 +1133,7 @@ def plot_samples(
         out_dir,
         score_path,
         tests=None,
+        freq="QS",
         varnames=["co2massmix"],
         normalize=False,
         imgformats=["svg", "png", "pdf"],
@@ -1145,6 +1146,7 @@ def plot_samples(
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    score_path = Path(score_path)
 
     for varname in varnames:
         if varname not in preds:
@@ -1182,8 +1184,9 @@ def plot_samples(
 
         if not avg_over_levels:
             for i, lvl in enumerate(tests_var_mean.level.values):
-                plot_crps(preds_var.isel(level=i), tests_var_mean.isel(level=i),
+                plot_crps(score_path,
                           out_dir,
+                          freq=freq,
                           varname=varname,
                           level=lvl,
                           imgformats=imgformats)
@@ -1209,8 +1212,9 @@ def plot_samples(
         preds_var_mean = preds_var.mean(dim="level")  # shape: [sample, lat, lon]
         tests_var_mean = tests_var_mean.mean(dim="level")  # shape: [lat, lon]
 
-        plot_crps(preds_var_mean, tests_var_mean,
+        plot_crps(score_path,
                   out_dir,
+                  freq=freq,
                   varname=varname,
                   imgformats=imgformats)
 
@@ -1354,39 +1358,33 @@ def plot_sample_cdf(preds_var, out_dir, tests=None,
     plt.close(fig)
 
 
-def plot_crps(preds_var, tests_var, out_dir,
+def plot_crps(score_path, out_dir, freq="QS",
               varname="co2massmix", level=None,
               imgformats=["svg", "png", "pdf"]):
     """
-    Compute and plot CRPS maps.
+    Plot CRPS maps and global mean value.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    score_path = Path(score_path)
 
-    crps_map, crps_mean = crps(preds_var, tests_var)
-    if preds_var.ndim == 4:
-        # same lat/lon/level coords as preds_var
-        crps_map = xr.DataArray(
-            crps_map,
-            dims=("lat", "lon", "level"),
-            coords={k: preds_var.coords[k] for k in ["lat", "lon", "level"]}
-        )
+    maps = xr.open_dataset(score_path / ("metrics_maps.nc" if freq == "QS" else f"metrics_maps_{freq}.nc"))
+    df_global_scalars = pd.read_csv(score_path / ("metrics_global_scalars.csv" if freq == "QS" else f"metrics_global_scalars_{freq}.csv"))
+
+    if level is not None:
+        title = f"CRPS ({varname}) - level {level:.0f}"
+        level_str = f"_level{level:.0f}"
+        crps_map = maps[f"CRPS_map_co2molemix_level{level:.0f}"]
+        crps_mean = df_global_scalars[f"CRPS_ensemble_mean_level{level:.0f}"].values[0]
     else:
-        crps_map = xr.DataArray(
-            crps_map,
-            dims=("lat", "lon"),
-            coords={k: preds_var.coords[k] for k in ["lat", "lon"]}
-        )
+        title = f"CRPS ({varname}) - mean over levels"
+        level_str = ""
+        crps_map = maps["CRPS_map_co2molemix"]
+        crps_mean = df_global_scalars["CRPS_ensemble_mean"].values[0]
 
     fig, ax = plt.subplots(figsize=(8, 4), subplot_kw=dict(projection=ccrs.PlateCarree()))
     im = crps_map.plot(ax=ax, transform=ccrs.PlateCarree(), cmap="cividis", add_colorbar=True, rasterized=True)
     ax.coastlines(linewidth=0.5)
-    if level is not None:
-        title = f"CRPS ({varname}) - level {level:.0f}"
-        level_str = f"_level{level:.0f}"
-    else:
-        title = f"CRPS ({varname}) - mean over levels"
-        level_str = ""
     ax.set_title(title)
     fig.text(0.5, 0.01, f"Global mean CRPS = {crps_mean:.4f}", ha="center", fontsize=10)
     for fmt in imgformats:
