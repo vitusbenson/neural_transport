@@ -256,24 +256,58 @@ def compute_error_maps(gen_samples, gt):
 
     Parameters
     ----------
-    gen_samples : np.ndarray or xr.DataArray, shape [n_samples, lat, lon]
+    gen_samples : xr.DataArray, shape [n_samples, lat, lon]
         Generated ensemble samples.
-    gt : np.ndarray or xr.DataArray, shape [B, lat, lon]
+    gt : xr.DataArray, shape [lat, lon]
         Ground truth field.
 
     Returns
     -------
-    bias, rmse, spread : np.ndarray, shape [lat, lon]
+    bias_map, rmse_map, mean_map, spread_map : np.ndarray, shape [lat, lon]
     """
-    # Convert xarray to numpy if needed
-    if isinstance(gen_samples, xr.DataArray):
-        gen_samples = gen_samples.values
-    if isinstance(gt, xr.DataArray):
-        gt = gt.values
+    # Convert xarray to numpy
+    gen_samples = gen_samples.values
+    gt = gt.values
 
-    gt = gt[0, ...]
-    mean_pred = np.mean(gen_samples, axis=0)
-    bias = mean_pred - gt
-    rmse = np.sqrt(np.mean((gen_samples - gt)**2, axis=0))
-    spread = np.std(gen_samples, axis=0)
-    return bias, rmse, spread
+    mean_map = np.mean(gen_samples, axis=0)
+
+    mask = np.isfinite(gt) & np.isfinite(mean_map)
+    gt_masked = np.where(mask, gt, np.nan)
+    gen_samples_masked = np.where(mask, gen_samples, np.nan)
+
+    bias_map = np.nanmean(gen_samples_masked, axis=0) - gt_masked
+    rmse_map = np.sqrt(np.nanmean((gen_samples_masked - gt_masked)**2, axis=0))
+    spread_map = np.nanstd(gen_samples_masked, axis=0)
+    mean_map = np.where(mask, mean_map, np.nan)
+
+    return bias_map, rmse_map, mean_map, spread_map
+
+
+def compute_error_scalars(bias_map, rmse_map, mean_map, spread_map, weights=None):
+    """
+    Compute scalar error metrics from spatial maps.
+
+    Parameters
+    ----------
+    bias_map, rmse_map, mean_map, spread_map : np.ndarray, shape [lat, lon]
+        Spatial error maps.
+    weights : np.ndarray, shape [lat, lon], optional
+
+    Returns
+    -------
+    bias_scalar, rmse_scalar, mean_scalar, spread_scalar : float
+        Mean values of the error metrics.
+    """
+    if weights is not None:
+        weights = weights / np.sum(weights)
+        bias_scalar = np.sum(bias_map * weights)
+        rmse_scalar = np.sum(rmse_map * weights)
+        mean_scalar = np.sum(mean_map * weights)
+        spread_scalar = np.sum(spread_map * weights)
+    else:
+        bias_scalar = np.mean(bias_map)
+        rmse_scalar = np.mean(rmse_map)
+        mean_scalar = np.mean(mean_map)
+        spread_scalar = np.mean(spread_map)
+
+    return bias_scalar, rmse_scalar, mean_scalar, spread_scalar

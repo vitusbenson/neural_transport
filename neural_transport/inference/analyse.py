@@ -3,6 +3,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from scipy.stats import linregress
 import xarray as xr
 import xskillscore
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
@@ -11,7 +12,11 @@ from neural_transport.tools.conversion import (
     density_to_massmix,
     massmix_to_molemix,
 )
-from neural_transport.tools.metrics import crps
+from neural_transport.tools.metrics import (
+    crps,
+    compute_error_maps,
+    compute_error_scalars,
+)
 
 
 def freq_mean(data, freq="QS", average_time=False):
@@ -303,8 +308,8 @@ def compute_score_df(targs, preds, freq="QS"):
 def compute_score_df_generate(targs, preds, **generate_kwargs):
     """
     Compute metrics for generated samples where:
-      - targs has dims: [time, level, lat, lon]
-      - preds has dims: [sample, level, lat, lon] (or [sample, (flow)time, level, lat, lon] if trajectory)
+      - targs : xr.Dataset, [time, level, lat, lon]
+      - preds : xr.Dataset, [sample, level, lat, lon] (or [sample, (flow)time, level, lat, lon] if trajectory)
     """
 
     preds["lat"] = targs["lat"]
@@ -420,18 +425,53 @@ def compute_score_df_generate(targs, preds, **generate_kwargs):
             molemix_targ_lvl = molemix_targ.isel(level=i)
             
             crps_map_level, crps_mean_level = crps(molemix_pred_lvl, molemix_targ_lvl)
-
+            maps[f"CRPS_map_co2molemix_level{lvl:.0f}"] = (("lat", "lon"), crps_map_level.data)
             global_scalars[f"CRPS_ensemble_mean_level{lvl:.0f}"] = float(crps_mean_level)
 
-            maps[f"CRPS_map_co2molemix_level{lvl:.0f}"] = (("lat", "lon"), crps_map_level.data)
+            bias_map, rmse_map, mean_map, spread_map = compute_error_maps(molemix_pred_lvl, molemix_targ_lvl)
+            maps[f"Bias_map_co2molemix_level{lvl:.0f}"] = (("lat", "lon"), bias_map)
+            maps[f"RMSE_map_co2molemix_level{lvl:.0f}"] = (("lat", "lon"), rmse_map)
+            maps[f"Mean_map_co2molemix_level{lvl:.0f}"] = (("lat", "lon"), mean_map)
+            maps[f"Spread_map_co2molemix_level{lvl:.0f}"] = (("lat", "lon"), spread_map)
+
+            slope, intercept, r_value, p_value, std_err = linregress(molemix_targ_lvl.values.flatten(), mean_map.flatten())
+            global_scalars[f"LinReg_Slope_level{lvl:.0f}"] = float(slope)
+            global_scalars[f"LinReg_Intercept_level{lvl:.0f}"] = float(intercept)
+            global_scalars[f"LinReg_R_value_level{lvl:.0f}"] = float(r_value)
+            global_scalars[f"LinReg_PValue_level{lvl:.0f}"] = float(p_value)
+            global_scalars[f"LinReg_StdErr_level{lvl:.0f}"] = float(std_err)
+
+            bias_scalar, rmse_scalar, mean_scalar, spread_scalar = compute_error_scalars(bias_map, rmse_map, mean_map, spread_map, weights=weights.isel(level=i).values)
+            global_scalars[f"Bias_scalar_level{lvl:.0f}"] = float(bias_scalar)
+            global_scalars[f"RMSE_scalar_level{lvl:.0f}"] = float(rmse_scalar)
+            global_scalars[f"Mean_scalar_level{lvl:.0f}"] = float(mean_scalar)
+            global_scalars[f"Spread_scalar_level{lvl:.0f}"] = float(spread_scalar)
 
     molemix_pred_mean = molemix_pred.mean(dim="level")  # shape: [sample, lat, lon]
     molemix_targ_mean = molemix_targ.mean(dim="level")  # shape: [lat, lon]
 
     crps_map, crps_mean = crps(molemix_pred_mean, molemix_targ_mean)
-    global_scalars["CRPS_ensemble_mean"] = float(crps_mean)
     maps["CRPS_map_co2molemix"] = (("lat", "lon"), crps_map.data)
+    global_scalars["CRPS_ensemble_mean"] = float(crps_mean)
 
+    bias_map, rmse_map, mean_map, spread_map = compute_error_maps(molemix_pred_mean, molemix_targ_mean)
+    maps["Bias_map_co2molemix"] = (("lat", "lon"), bias_map)
+    maps["RMSE_map_co2molemix"] = (("lat", "lon"), rmse_map)
+    maps["Mean_map_co2molemix"] = (("lat", "lon"), mean_map)
+    maps["Spread_map_co2molemix"] = (("lat", "lon"), spread_map)
+
+    slope, intercept, r_value, p_value, std_err = linregress(molemix_targ_mean.values.flatten(), mean_map.flatten())
+    global_scalars["LinReg_Slope"] = float(slope)
+    global_scalars["LinReg_Intercept"] = float(intercept)
+    global_scalars["LinReg_R_value"] = float(r_value)
+    global_scalars["LinReg_PValue"] = float(p_value)
+    global_scalars["LinReg_StdErr"] = float(std_err)
+
+    bias_scalar, rmse_scalar, mean_scalar, spread_scalar = compute_error_scalars(bias_map, rmse_map, mean_map, spread_map, weights=weights.isel(level=0).values)
+    global_scalars["Bias_scalar"] = float(bias_scalar)
+    global_scalars["RMSE_scalar"] = float(rmse_scalar)
+    global_scalars["Mean_scalar"] = float(mean_scalar)
+    global_scalars["Spread_scalar"] = float(spread_scalar)
 
     df_global_scalars = pd.DataFrame(
         {k: [v] for k, v in global_scalars.items()}

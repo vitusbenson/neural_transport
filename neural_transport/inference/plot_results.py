@@ -19,9 +19,7 @@ from neural_transport.tools.conversion import (
     zonal_wavenumber_to_wavelength,
     km_per_gridcell,
 )
-from neural_transport.tools.metrics import compute_error_maps, crps
 
-from scipy.stats import linregress
 from sklearn.decomposition import PCA
 
 import torch
@@ -548,7 +546,7 @@ def plot_metrics(
 
         for metric in metrics:
             for plottype, plt_fct in plt_fcts:
-                fig = plt_fct(pred, targ, metric)
+                plt_fct(pred, targ, metric)
 
                 for imgformat in imgformats:
                     plt.savefig(
@@ -558,7 +556,7 @@ def plot_metrics(
                 plt.close()
 
         if zonal_spectrum:
-            fig = plot_zonal_spectrum_line(pred, targ)
+            plot_zonal_spectrum_line(pred, targ)
 
             for imgformat in imgformats:
                 plt.savefig(
@@ -566,7 +564,7 @@ def plot_metrics(
                 )
             plt.close()
 
-            fig = plot_zonal_spectrum_line_physical(pred, targ)
+            plot_zonal_spectrum_line_physical(pred, targ)
 
             for imgformat in imgformats:
                 plt.savefig(
@@ -574,7 +572,7 @@ def plot_metrics(
                 )
             plt.close()
 
-            fig = plot_zonal_spectrum_heatmap(pred, targ)
+            plot_zonal_spectrum_heatmap(pred, targ)
 
             for imgformat in imgformats:
                 plt.savefig(
@@ -640,14 +638,14 @@ def plot_3d_variable(da, fig, tt, *args, **kwargs):
 
                 if j == len(kwargs.get("levels", [1, 8, 15])) - 1:
                     if i == 1:
-                        cbar = plt.colorbar(
+                        plt.colorbar(
                             cnf,
                             ax=axs[:2, :],
                             shrink=0.7,
                             label=kwargs.get("clabel", ""),
                         )
                     elif i == 2:
-                        delta_cbar = plt.colorbar(
+                        plt.colorbar(
                             cnf,
                             ax=axs[2, :],
                             shrink=0.9,
@@ -853,14 +851,21 @@ def plot_obspack_stations(
 
     filenames = pd.Series(obs.obs_filename.max("time"))
 
+    matching_indices = {}
+    for idx, filename in enumerate(filenames):
+        matching_indices[filename] = idx
+
     for _, row in subset.iterrows():
-        try:
-            i = np.where(filenames == row["id"])[0][0]
-        except:
+        station_id = row["id"]
+
+        if station_id not in matching_indices:
+            print(f"Warning: Station {station_id} not found in observations")
             continue
 
+        i = matching_indices[station_id]
+
         with mpl.rc_context(mpl_rc_params):
-            fig = plt.figure(figsize=(8, 5))
+            plt.figure(figsize=(8, 5))
             ax = plt.subplot()
 
             if compare_obs is not None:
@@ -1134,7 +1139,7 @@ def plot_samples(
         score_path,
         tests=None,
         freq="QS",
-        varnames=["co2massmix"],
+        varnames=["co2molemix"],
         normalize=False,
         imgformats=["svg", "png", "pdf"],
         **generate_kwargs):
@@ -1147,6 +1152,8 @@ def plot_samples(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     score_path = Path(score_path)
+    maps = xr.open_dataset(score_path / ("metrics_maps.nc" if freq == "QS" else f"metrics_maps_{freq}.nc"))
+    df_global_scalars = pd.read_csv(score_path / ("metrics_global_scalars.csv" if freq == "QS" else f"metrics_global_scalars_{freq}.csv"))
 
     for varname in varnames:
         if varname not in preds:
@@ -1184,58 +1191,62 @@ def plot_samples(
 
         if not avg_over_levels:
             for i, lvl in enumerate(tests_var_mean.level.values):
-                plot_crps(score_path,
+                plot_crps(maps,
+                          df_global_scalars,
                           out_dir,
-                          freq=freq,
                           varname=varname,
                           level=lvl,
                           imgformats=imgformats)
 
-                plot_scatter_preds_vs_tests(preds_var.isel(level=i), tests_var_mean.isel(level=i),
+                plot_scatter_preds_vs_tests(maps, df_global_scalars,
+                                            preds_var.isel(level=i),
+                                            tests_var_mean.isel(level=i),
                                             out_dir,
                                             varname=varname,
                                             level=lvl,
                                             imgformats=imgformats)
 
-                plot_spread_skill(preds_var.isel(level=i), tests_var_mean.isel(level=i),
+                plot_spread_skill(maps,
                                   out_dir,
                                   varname=varname,
                                   level=lvl,
                                   imgformats=imgformats)
 
-                plot_error_locations(preds_var.isel(level=i), tests_var_mean.isel(level=i),
+                plot_error_locations(maps,
                                      out_dir,
                                      varname=varname,
                                      level=lvl,
                                      imgformats=imgformats)
-        
+
         preds_var_mean = preds_var.mean(dim="level")  # shape: [sample, lat, lon]
         tests_var_mean = tests_var_mean.mean(dim="level")  # shape: [lat, lon]
 
-        plot_crps(score_path,
+        plot_crps(maps,
+                  df_global_scalars,
                   out_dir,
-                  freq=freq,
                   varname=varname,
                   imgformats=imgformats)
 
-        plot_scatter_preds_vs_tests(preds_var_mean, tests_var_mean,
+        plot_scatter_preds_vs_tests(maps, df_global_scalars,
+                                    preds_var_mean,
+                                    tests_var_mean,
                                     out_dir,
                                     varname=varname,
                                     imgformats=imgformats)
 
-        plot_spread_skill(preds_var_mean, tests_var_mean,
+        plot_spread_skill(maps,
                           out_dir,
                           varname=varname,
                           imgformats=imgformats)
 
-        plot_error_locations(preds_var_mean, tests_var_mean,
+        plot_error_locations(maps,
                              out_dir,
                              varname=varname,
                              imgformats=imgformats)
 
 
 def plot_pairwise_sample_distances(preds_var, out_dir,
-                                   varname="co2massmix",
+                                   varname="co2molemix",
                                    avg_over_levels=True,
                                    imgformats=["svg", "png", "pdf"]):
     """
@@ -1280,8 +1291,12 @@ def plot_pairwise_sample_distances(preds_var, out_dir,
         plt.close(fig)
 
 
+def normalize_array(arr, normalize):
+    return (arr - arr.mean()) / arr.std() if normalize else arr
+
+
 def plot_sample_cdf(preds_var, out_dir, tests=None,
-                    varname="co2massmix", avg_over_levels=True,
+                    varname="co2molemix", avg_over_levels=True,
                     normalize=False,
                     center_to_test_mean=False,
                     imgformats=["svg", "png", "pdf"]):
@@ -1290,100 +1305,101 @@ def plot_sample_cdf(preds_var, out_dir, tests=None,
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-  
-    if "level" in preds_var.dims and avg_over_levels:
-        preds_var = preds_var.mean(dim="level")  # shape: (sample, lat, lon)
 
-    pred_mean = preds_var.mean(dim=["lat", "lon"]).values  # shape: (sample)
+    if avg_over_levels:
+        preds_var = preds_var.mean(dim="level")  # shape: [sample, lat, lon]
 
+    pred_mean = preds_var.mean(dim=["lat", "lon"])  # shape: [sample, (level)]
+
+    test_mean = None
     if tests is not None:
-        tests_var = tests[varname]
-        if isinstance(tests_var, torch.Tensor):
-            tests_var = tests_var.cpu().numpy()
+        tests_var = tests[varname]  # shape: [time, level, lat, lon]
         # !!!Caution!!! this is a dirty fix especially for long time series.
-        if isinstance(tests_var, xr.DataArray) and "time" in tests_var.dims:
-            tests_var = tests_var.rename({"time": "sample"})
-        if tests_var.ndim == 3:  # [B, lat, lon]
-            dims = ("sample", "lat", "lon")
-        elif tests_var.ndim == 4:  # [B, level, lat, lon]
-            dims = ("sample", "level", "lat", "lon")
-        else:
-            raise ValueError(f"tests must be 3D or 4D, got shape {tests_var.shape}")
+        tests_var = tests_var.rename({"time": "sample"})
+        if avg_over_levels:
+            tests_var = tests_var.mean(dim="level")  # shape: [sample, lat, lon]
+        test_mean = tests_var.mean(dim=["lat", "lon"])  # shape: [sample, (level)]
 
-        test_da = xr.DataArray(tests_var, dims=dims)
-        avg_dims = [d for d in ["level", "lat", "lon"] if d in test_da.dims]
-        test_mean = test_da.mean(dim=avg_dims).values
-
-        if normalize:
-            test_mean = (test_mean - test_mean.mean()) / test_mean.std()
-    else:
-        test_mean = None
-
-    if center_to_test_mean and test_mean is not None:
-        pred_mean = pred_mean - test_mean.mean()
-        test_mean = None
-
-    if normalize:
-        pred_mean = (pred_mean - pred_mean.mean()) / pred_mean.std()
-
-    # CDF values
-    x_pred = np.sort(pred_mean)
-    y_pred = np.arange(1, len(pred_mean)+1) / len(pred_mean)
 
     fig, ax = plt.subplots(figsize=(8, 5))
 
-    if test_mean is not None:
-        x_test = np.sort(test_mean)
-        y_test = np.arange(1, len(test_mean)+1) / len(test_mean)
-        ax.plot(x_test, y_test, label="Tests", marker="o")
-    if center_to_test_mean:
-        ax.plot(x_pred, y_pred, color="red")
+    if not avg_over_levels:
+        cmap = plt.get_cmap("tab20")
+        for i, lvl in enumerate(preds_var.level.values):
+            color = cmap(i % 20)
+            # Prediction CDF
+            level_pred = pred_mean.sel(level=lvl).values
+            level_pred = normalize_array(level_pred, normalize)
+            if center_to_test_mean and test_mean is not None:
+                level_pred -= test_mean.sel(level=lvl).mean().values
+            x_pred = np.sort(level_pred)
+            y_pred = np.arange(1, len(level_pred)+1) / len(level_pred)
+            ax.plot(x_pred, y_pred, label=f"Predictions (level={lvl:.0f})", marker="x", alpha=0.7, color=color)
+
+            # Test CDF
+            if not center_to_test_mean and test_mean is not None:
+                level_test = test_mean.sel(level=lvl).values
+                level_test = normalize_array(level_test, normalize)
+                x_test = np.sort(level_test)
+                y_test = np.arange(1, len(level_test)+1) / len(level_test)
+                ax.plot(x_test, y_test, label=f"Tests (level={lvl:.0f})", marker="o", alpha=0.7, color=color)
     else:
+        pred_mean_vals = pred_mean.values
+        pred_mean_vals = normalize_array(pred_mean_vals, normalize)
+        if center_to_test_mean and test_mean is not None:
+            pred_mean_vals -= test_mean.mean().values
+        x_pred = np.sort(pred_mean_vals)
+        y_pred = np.arange(1, len(pred_mean_vals)+1) / len(pred_mean_vals)
         ax.plot(x_pred, y_pred, label="Predictions", marker="x")
+
+        if not center_to_test_mean and test_mean is not None:
+            test_mean_vals = test_mean.values
+            test_mean_vals = normalize_array(test_mean_vals, normalize)
+            x_test = np.sort(test_mean_vals)
+            y_test = np.arange(1, len(test_mean_vals)+1) / len(test_mean_vals)
+            ax.plot(x_test, y_test, label="Tests", marker="o")
 
     xlabel = f"{'Normalized ' if normalize else ''}Mean {varname} {'[ppm]' if not normalize else ''}"
     title = f"CDF of {'Normalized ' if normalize else ''}Mean {varname} per Sample"
     if center_to_test_mean:
         xlabel = f"Deviation from Test Mean {varname} {'[ppm]' if not normalize else ''}"
         title = f"CDF of Predictions Relative to Test Mean ({varname})"
+
     ax.set_xlabel(xlabel)
     ax.set_ylabel("CDF")
     ax.set_title(title)
-    ax.legend()
+    ax.legend(loc='center left', bbox_to_anchor=(1, 0.5), fontsize=8)
     ax.grid(True)
+    fig.tight_layout()
 
     for fmt in imgformats:
-        fig.savefig(out_dir / f"cdf{"_centered" if center_to_test_mean else ""}_{varname}.{fmt}", dpi=300)
+        fig.savefig(out_dir / f"cdf{'_centered' if center_to_test_mean else ''}_{varname}.{fmt}", dpi=300)
 
     plt.close(fig)
 
 
-def plot_crps(score_path, out_dir, freq="QS",
-              varname="co2massmix", level=None,
+def plot_crps(maps, df_global_scalars, out_dir,
+              varname="co2molemix", level=None,
               imgformats=["svg", "png", "pdf"]):
     """
     Plot CRPS maps and global mean value.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    score_path = Path(score_path)
-
-    maps = xr.open_dataset(score_path / ("metrics_maps.nc" if freq == "QS" else f"metrics_maps_{freq}.nc"))
-    df_global_scalars = pd.read_csv(score_path / ("metrics_global_scalars.csv" if freq == "QS" else f"metrics_global_scalars_{freq}.csv"))
 
     if level is not None:
         title = f"CRPS ({varname}) - level {level:.0f}"
         level_str = f"_level{level:.0f}"
         crps_map = maps[f"CRPS_map_co2molemix_level{level:.0f}"]
-        crps_mean = df_global_scalars[f"CRPS_ensemble_mean_level{level:.0f}"].values[0]
+        crps_mean = df_global_scalars[f"CRPS_ensemble_mean_level{level:.0f}"].iloc[0]
     else:
         title = f"CRPS ({varname}) - mean over levels"
         level_str = ""
         crps_map = maps["CRPS_map_co2molemix"]
-        crps_mean = df_global_scalars["CRPS_ensemble_mean"].values[0]
+        crps_mean = df_global_scalars["CRPS_ensemble_mean"].iloc[0]
 
     fig, ax = plt.subplots(figsize=(8, 4), subplot_kw=dict(projection=ccrs.PlateCarree()))
-    im = crps_map.plot(ax=ax, transform=ccrs.PlateCarree(), cmap="cividis", add_colorbar=True, rasterized=True)
+    crps_map.plot(ax=ax, transform=ccrs.PlateCarree(), cmap="cividis", add_colorbar=True, rasterized=True)
     ax.coastlines(linewidth=0.5)
     ax.set_title(title)
     fig.text(0.5, 0.01, f"Global mean CRPS = {crps_mean:.4f}", ha="center", fontsize=10)
@@ -1392,8 +1408,9 @@ def plot_crps(score_path, out_dir, freq="QS",
     plt.close(fig)
 
 
-def plot_scatter_preds_vs_tests(preds_var, tests_var, out_dir,
-                                varname="co2massmix", level=None,
+def plot_scatter_preds_vs_tests(maps, df_global_scalars,
+                                preds_var, tests_var, out_dir,
+                                varname="co2molemix", level=None,
                                 imgformats=["svg", "png", "pdf"]):
     """
     Scatter plot: ensemble mean predictions vs ground truth.
@@ -1404,36 +1421,41 @@ def plot_scatter_preds_vs_tests(preds_var, tests_var, out_dir,
     n_samples = preds_var.sizes.get("sample", 1)
     n_points = np.prod(preds_var.sizes.get("lat", 1) * preds_var.sizes.get("lon", 1))
 
-    # --- Convert to numpy ---
-    ens_mean = preds_var.mean(dim="sample").values
+    if level is not None:
+        title=f"Predicted vs Ground Truth ({varname}) - level {level:.0f}"
+        level_str = f"_level{level:.0f}"
+        ens_mean = maps[f"Mean_map_co2molemix_level{level:.0f}"].values
+        slope = df_global_scalars[f"LinReg_Slope_level{level:.0f}"].iloc[0]
+        intercept = df_global_scalars[f"LinReg_Intercept_level{level:.0f}"].iloc[0]
+        r_value = df_global_scalars[f"LinReg_R_value_level{level:.0f}"].iloc[0]
+        rmse = df_global_scalars[f"RMSE_scalar_level{level:.0f}"].iloc[0]
+        bias = df_global_scalars[f"Bias_scalar_level{level:.0f}"].iloc[0]
+        crps = df_global_scalars[f"CRPS_ensemble_mean_level{level:.0f}"].iloc[0]
+    else:
+        title=f"Predicted vs Ground Truth ({varname}) - mean over levels"
+        level_str = ""
+        ens_mean = maps["Mean_map_co2molemix"].values
+        slope = df_global_scalars["LinReg_Slope"].iloc[0]
+        intercept = df_global_scalars["LinReg_Intercept"].iloc[0]
+        r_value = df_global_scalars["LinReg_R_value"].iloc[0]
+        rmse = df_global_scalars["RMSE_scalar"].iloc[0]
+        bias = df_global_scalars["Bias_scalar"].iloc[0]
+        crps = df_global_scalars["CRPS_ensemble_mean"].iloc[0]
+
     y_true   = tests_var.values
-    y_pred   = ens_mean
+    mask = np.isfinite(y_true) & np.isfinite(ens_mean)
+    y_true, ens_mean = y_true[mask], ens_mean[mask]
 
-    # --- Mask invalids ---
-    mask = np.isfinite(y_true) & np.isfinite(y_pred)
-    y_true, y_pred = y_true[mask], y_pred[mask]
-
-    # --- Regression & stats ---
-    slope, intercept, r_value, p_value, std_err = linregress(y_true, y_pred)
-    rmse = np.sqrt(np.mean((y_true - y_pred)**2))
-    bias = np.mean(y_pred - y_true)
-    lims = [min(y_true.min(), y_pred.min()), max(y_true.max(), y_pred.max())]
-
+    lims = [min(y_true.min(), ens_mean.min()), max(y_true.max(), ens_mean.max())]
     # --- Plot ---
     fig, ax = plt.subplots(figsize=(6,6))
-    hb = ax.hexbin(y_true, y_pred, gridsize=100, cmap="cividis", bins="log")
+    hb = ax.hexbin(y_true, ens_mean, gridsize=100, cmap="cividis", bins="log")
     plt.colorbar(hb, ax=ax, label="log(count)")
 
     ax.plot(lims, lims, "k--", label="1:1 line")
     ax.plot(lims, [slope*lim + intercept for lim in lims], "r-", label=f"Trend (slope={slope:.2f})")
     ax.set_xlabel("Ground Truth (ppm)")
     ax.set_ylabel("Ensemble Mean Prediction (ppm)")
-    if level is not None:
-        title=f"Predicted vs Ground Truth ({varname}) - level {level:.0f}"
-        level_str = f"_level{level:.0f}"
-    else:
-        title=f"Predicted vs Ground Truth ({varname}) - mean over levels"
-        level_str = ""
     ax.set_title(title)
     ax.legend()
 
@@ -1442,7 +1464,8 @@ def plot_scatter_preds_vs_tests(preds_var, tests_var, out_dir,
         f"points = {n_points}\n"
         f"R² = {r_value**2:.3f}\n"
         f"RMSE = {rmse:.2f} ppm\n"
-        f"Bias = {bias:.2f} ppm"
+        f"Bias = {bias:.2f} ppm\n"
+        f"CRPS = {crps:.2f} ppm"
     )
     ax.text(0.05, 0.95, textstr, transform=ax.transAxes,
             va="top", ha="left", bbox=dict(facecolor="white", alpha=0.7))
@@ -1452,8 +1475,8 @@ def plot_scatter_preds_vs_tests(preds_var, tests_var, out_dir,
     plt.close(fig)
 
         
-def plot_spread_skill(preds_var, tests_var, out_dir,
-                      varname="co2massmix", level=None,
+def plot_spread_skill(maps, out_dir,
+                      varname="co2molemix", level=None,
                       imgformats=["svg", "png", "pdf"]):
     """
     Plot ensemble spread (std of predictions) vs absolute error (ensemble mean vs ground truth).
@@ -1461,14 +1484,16 @@ def plot_spread_skill(preds_var, tests_var, out_dir,
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- Compute ensemble mean & spread ---
-    ens_mean = preds_var.mean(dim="sample").values
-    ens_std  = preds_var.std(dim="sample").values
-    truth    = tests_var.values
-
-    abs_error = np.abs(ens_mean - truth)
-    mask = np.isfinite(abs_error) & np.isfinite(ens_std)
-    abs_error, ens_std = abs_error[mask], ens_std[mask]
+    if level is not None:
+        title=f"Spread-Skill ({varname}) - level {level:.0f}"
+        level_str = f"_level{level:.0f}"
+        ens_std  = maps[f"Spread_map_co2molemix_level{level:.0f}"].values
+        abs_error = np.abs(maps[f"Bias_map_co2molemix_level{level:.0f}"].values)
+    else:
+        title=f"Spread-Skill ({varname}) - mean over levels"
+        level_str = ""
+        ens_std  = maps["Spread_map_co2molemix"].values
+        abs_error = np.abs(maps["Bias_map_co2molemix"].values)
 
     # --- Plot ---
     fig, ax = plt.subplots(figsize=(6,6))
@@ -1479,12 +1504,6 @@ def plot_spread_skill(preds_var, tests_var, out_dir,
     ax.plot(lims, lims, "k--", label="1:1 line (perfect calibration)")
     ax.set_xlabel("Spread (std of ensemble predictions, ppm)")
     ax.set_ylabel("Absolute Error (mean vs ground truth, ppm)")
-    if level is not None:
-        title=f"Spread-Skill Relationship ({varname}) - level {level:.0f}"
-        level_str = f"_level{level:.0f}"
-    else:
-        title=f"Spread-Skill Relationship ({varname}) - mean over levels"
-        level_str = ""
     ax.set_title(title)
     ax.legend()
 
@@ -1493,8 +1512,8 @@ def plot_spread_skill(preds_var, tests_var, out_dir,
     plt.close(fig)
 
 
-def plot_error_locations(preds_var, tests_var, out_dir,
-                         varname="co2massmix", level=None,
+def plot_error_locations(maps, out_dir,
+                         varname="co2molemix", level=None,
                          vmax_bias=5.0, vmax_rmse=10.0,
                          imgformats=["svg", "png", "pdf"]):
         """
@@ -1503,7 +1522,18 @@ def plot_error_locations(preds_var, tests_var, out_dir,
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        bias, rmse, spread = compute_error_maps(preds_var, tests_var)
+        if level is not None:
+            title=f"Spatial Diagnostics: Bias, RMSE, and Ensemble Spread ({varname}) - level {level:.0f}"
+            level_str = f"_level{level:.0f}"
+            bias = maps[f"Bias_map_co2molemix_level{level:.0f}"].values
+            rmse = maps[f"RMSE_map_co2molemix_level{level:.0f}"].values
+            spread = maps[f"Spread_map_co2molemix_level{level:.0f}"].values
+        else:
+            title=f"Spatial Diagnostics: Bias, RMSE, and Ensemble Spread ({varname}) - mean over levels"
+            level_str = ""
+            bias = maps["Bias_map_co2molemix"].values
+            rmse = maps["RMSE_map_co2molemix"].values
+            spread = maps["Spread_map_co2molemix"].values
 
         fig, axs = plt.subplots(1, 3, figsize=(15, 4), constrained_layout=True)
         titles = ["Bias [ppm]", "RMSE [ppm]", "Ensemble spread ($\\sigma$) [ppm]"]
@@ -1519,12 +1549,6 @@ def plot_error_locations(preds_var, tests_var, out_dir,
             ax.set_title(title, fontsize=14)
             plt.colorbar(im, ax=ax, shrink=0.7)
 
-        if level is not None:
-            title=f"Spatial Diagnostics: Bias, RMSE, and Ensemble Spread ({varname}) - level {level:.0f}"
-            level_str = f"_level{level:.0f}"
-        else:
-            title=f"Spatial Diagnostics: Bias, RMSE, and Ensemble Spread ({varname}) - mean over levels"
-            level_str = ""
         plt.suptitle(title, fontsize=16, fontweight="bold")
 
         for fmt in imgformats:

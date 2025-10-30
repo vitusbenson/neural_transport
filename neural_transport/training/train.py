@@ -17,6 +17,7 @@ from neural_transport.inference.plot_results import (
     plot_samples,
 )
 from neural_transport.litmodule import NeuralTransport
+from neural_transport.tools.conversion import massmix_to_molemix
 
 
 def train_singlestep(
@@ -319,6 +320,8 @@ def plot(
     co2pred = co2pred.isel(time=slice(1, None))
     co2targ = co2targ.isel(time=slice(1, None))
     co2targ = co2targ.isel(time=slice(None, len(co2pred.time)))
+    co2pred["co2molemix"] = massmix_to_molemix(co2pred.co2massmix)
+    co2targ["co2molemix"] = massmix_to_molemix(co2targ.co2massmix)
 
     plot_path.mkdir(parents=True, exist_ok=True)
     if "metrics" in plot_types:
@@ -331,7 +334,7 @@ def plot(
             score_path=score_path,
             tests=co2targ,
             freq=freq,
-            varnames=["co2massmix"],
+            varnames=["co2molemix"],
             normalize=False,
             imgformats=["png"],
             **generate_kwargs,
