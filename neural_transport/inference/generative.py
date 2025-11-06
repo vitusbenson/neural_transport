@@ -6,7 +6,7 @@ import torch
 import xarray as xr
 from cdo import Cdo
 
-from neural_transport.inference.plot_results import plot_noise_diagnostics, plot_masking_diagnostics
+from neural_transport.neural_transport.plots.plot_results import plot_noise_diagnostics, plot_masking_diagnostics
 
 
 def get_zarrpath_obspath(out_path, rollout, freq, zarr_filename=None, zero_surfflux=False):
