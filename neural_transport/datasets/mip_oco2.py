@@ -9,7 +9,6 @@ import xarray as xr
 from xarray.groupers import BinGrouper
 
 from neural_transport.datasets.grids import LATLON_PROTOTYPE_COORDS
-from toy_examples.climatereconstructionAI.climatereconstructionai.utils import weights
 
 
 def download_data(save_dir: str):
@@ -243,7 +242,7 @@ def regrid_temporal(
     Returns
     -------
     xr.Dataset
-        Temporally regridded dataset with dimensions ['time', ('levels')].
+        Temporally regridded dataset with dimensions ['time', ('level')].
     """
     # Determine which variables to regrid
     if variables is None:
@@ -254,8 +253,7 @@ def regrid_temporal(
 
     # Compute time bin edges and labels
     delta_t = _parse_freq(freq)
-    t_min = np.datetime64(ds["time"].min().values, "ns")
-    t_max = np.datetime64(ds["time"].max().values, "ns")
+    t_min, t_max = [np.datetime64(v, "ns") for v in (np.nanmin(ds["time"].values), np.nanmax(ds["time"].values))]
     time_bins, time_labels = _aligned_time_bins(t_min, t_max, delta_t)
 
     out_vars = {}
@@ -263,10 +261,10 @@ def regrid_temporal(
     for var in variables:
         print(f"Temporally regridding variable: {var}")
         da = ds[var]
-        if "levels" in da.dims:
+        if "level" in da.dims:
             regridded_levels = []
-            for lev in da.levels:
-                da_lev = da.sel(levels=lev)
+            for lev in da.level:
+                da_lev = da.sel(level=lev)
                 tmp = xr.Dataset({"time": ds["time"], var: da_lev})
                 if weights is None:
                     out = tmp.groupby_bins("time", bins=time_bins).mean()[var]
@@ -276,10 +274,10 @@ def regrid_temporal(
                     out = weighted_sum / sum_weights
                 out = out.rename({"time_bins": "time"})
                 out = out.assign_coords(time=time_labels)
-                out = out.expand_dims("levels")
-                out = out.assign_coords(levels=[lev])
+                out = out.expand_dims("level")
+                out = out.assign_coords(level=[lev])
                 regridded_levels.append(out)
-            out_vars[var] = xr.concat(regridded_levels, dim="levels")
+            out_vars[var] = xr.concat(regridded_levels, dim="level")
         else:
             tmp = xr.Dataset({"time": ds["time"], var: da})
             if weights is None:
@@ -295,9 +293,11 @@ def regrid_temporal(
     ds_temporal = xr.merge(out_vars.values()).sortby("time")
 
     ds_temporal.attrs.update({
+        "title": f"OCO-2 regridded to {freq}",
         "temporal_frequency": freq,
         "time_method": "mean" if weights is None else "weighted mean",
-        "time_range": f"{str(t_min)} to {str(t_max)}"
+        "time_range": f"{str(t_min)} to {str(t_max)}",
+        "source": "NOAA GML / Caltech MIP OCO-2 products",
     })
 
     return ds_temporal
@@ -324,7 +324,7 @@ def regrid_spatial(ds: xr.Dataset,
     Returns
     -------
     xr.Dataset
-        Regridded dataset with dimensions ['time', 'lat', 'lon', ('levels')].
+        Regridded dataset with dimensions ['time', 'lat', 'lon', ('level')].
     """
     if variables is None:
         variables = [
@@ -333,7 +333,7 @@ def regrid_spatial(ds: xr.Dataset,
         ]
 
     coords = LATLON_PROTOTYPE_COORDS[gridname]
-    ds = ds.assign_coords(lon=((ds["lon"] + 360) % 360))  # Convert OCO-2 lon to [0, 360]
+    ds = ds.assign_coords(lon=((ds["lon"] + 360) % 360))  # Convert OCO-2 lon to [0, 360)
     lat_bins = np.linspace(coords["lat"].min(), coords["lat"].max(), len(coords["lat"]) + 1)
     lon_bins = np.linspace(coords["lon"].min(), coords["lon"].max(), len(coords["lon"]) + 1)
 
@@ -347,10 +347,10 @@ def regrid_spatial(ds: xr.Dataset,
         da = ds[var]
 
         # If variable has a "level" dimension, regrid per level
-        if "levels" in da.dims:
+        if "level" in da.dims:
             regridded_levels = []
-            for lev in da.levels:
-                values = da.sel(levels=lev)
+            for lev in da.level:
+                values = da.sel(level=lev)
                 tmp_ds = xr.Dataset({
                     "lat": (("obs",), ds["lat"].values),
                     "lon": (("obs",), ds["lon"].values),
@@ -370,16 +370,16 @@ def regrid_spatial(ds: xr.Dataset,
                     ).sum()
                     out = weighted_sum / sum_weights
 
-                out = out.expand_dims("levels")
+                out = out.expand_dims("level")
                 out = out.rename({"lat_bins": "lat", "lon_bins": "lon"})
                 out = out.assign_coords(
-                    levels=[lev],
+                    level=[lev],
                     lat=[(i.left + i.right)/2 for i in out["lat"].values],
                     lon=[(i.left + i.right)/2 for i in out["lon"].values],
                 )
                 regridded_levels.append(out)
 
-            out_vars[var] = xr.concat(regridded_levels, dim="levels")
+            out_vars[var] = xr.concat(regridded_levels, dim="level")
         else:
             tmp_ds = xr.Dataset({
                 "lat": (("obs",), ds["lat"].values),
@@ -412,11 +412,156 @@ def regrid_spatial(ds: xr.Dataset,
     # ds_spatial = ds_spatial.sortby("lon")
 
     ds_spatial.attrs.update({
+        "title": f"OCO-2 regridded to {gridname}",
         "grid": gridname,
         "grid_method": "mean" if weights is None else "weighted mean",
+        "source": "NOAA GML / Caltech MIP OCO-2 products",
     })
 
     return ds_spatial
+
+
+def _agg_1d(
+        ds: xr.Dataset,
+        var: str,
+        values_arr: np.ndarray,
+        time_labels: np.ndarray,
+        time_grouper: BinGrouper,
+        lat_grouper: BinGrouper,
+        lon_grouper: BinGrouper,
+        weights: np.ndarray | None = None
+) -> xr.DataArray:
+    """ Aggregate 1D array into spatio-temporal bins. """
+    tmp = xr.Dataset({
+        "time": (("obs",), ds["time"].values),
+        "lat":  (("obs",), ds["lat"].values),
+        "lon":  (("obs",), ds["lon"].values),
+        var:        (("obs",), values_arr),
+    })
+    if weights is not None:
+        tmp["weights"] = (("obs",), weights)
+
+    if weights is None:
+        grouped = tmp.groupby(time=time_grouper, lat=lat_grouper, lon=lon_grouper).mean()
+        out = grouped[var]
+    else:
+        num = (tmp[var] * tmp["weights"]).groupby(time=time_grouper, lat=lat_grouper, lon=lon_grouper).sum()
+        den = tmp["weights"].groupby(time=time_grouper, lat=lat_grouper, lon=lon_grouper).sum()
+        out = num / den
+
+    # rename bin dims and set bin-center coords
+    out = out.rename({"time_bins": "time", "lat_bins": "lat", "lon_bins": "lon"})
+    lat_centers = [(i.left + i.right) / 2 for i in out["lat"].values]
+    lon_centers = [(i.left + i.right) / 2 for i in out["lon"].values]
+    out = out.assign_coords(time=time_labels, lat=lat_centers, lon=lon_centers)
+    return out
+
+
+def regrid_spatiotemporal(
+    ds: xr.Dataset,
+    variables: list[str] | None = None,
+    gridname: str = "latlon2x3",
+    vertical_levels: str | None = "l34",
+    freq: str = "3h",
+    weights_var: str | None = None,
+) -> xr.Dataset:
+    """
+    Joint spatio-temporal regridding: aggregate OCO-2 soundings into bins
+    (time, lat, lon). Keeps level variables by aggregating each level.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Input dataset with coords 'time', 'lat', 'lon' on dimension 'sounding_id'.
+    variables : list[str] | None
+        Variables to aggregate. If None, choose numeric vars on sounding_id.
+    gridname : str
+        Grid name in LATLON_PROTOTYPE_COORDS.
+    freq : str
+        Temporal frequency like '3h' or '6h'.
+    weights_var : str | None
+        Name of per-sounding weights variable (e.g. 1/uncertainty^2). If None,
+        plain mean is used.
+
+    Returns
+    -------
+    xr.Dataset
+        Aggregated dataset with dims:
+          - for 2D vars: (time, lat, lon)
+          - for level vars: (time, level, lat, lon)
+    """
+    if variables is None:
+        variables = [
+            var for var in ds.data_vars
+            if "sounding_id" in ds[var].dims and var not in ["time", "date", "assimilate_flag", "data_type", "xco2_quality_flag", "operation_mode", "land_water_indicator", "surface_type"]
+        ]
+
+    # prepare bins
+    delta_t = _parse_freq(freq)
+    t_min, t_max = [np.datetime64(v, "ns") for v in (np.nanmin(ds["time"].values), np.nanmax(ds["time"].values))]
+    time_bins, time_labels = _aligned_time_bins(t_min, t_max, delta_t)
+
+    coords = LATLON_PROTOTYPE_COORDS[gridname]
+    ds = ds.assign_coords(lon=((ds["lon"] + 360) % 360))  # Convert OCO-2 lon to [0, 360)
+    lat_bins = np.linspace(coords["lat"].min(), coords["lat"].max(), len(coords["lat"]) + 1)
+    lon_bins = np.linspace(coords["lon"].min(), coords["lon"].max(), len(coords["lon"]) + 1)
+
+    # groupers
+    time_grouper = BinGrouper(bins=time_bins)
+    lat_grouper = BinGrouper(bins=lat_bins)
+    lon_grouper = BinGrouper(bins=lon_bins)
+
+    out_vars = {}    
+
+    weights = None
+    if weights_var is not None:
+        weights = ds[weights_var].values
+
+    for var in variables:
+        da = ds[var]
+        if "level" in da.dims:
+            agg_levels = []
+            for lev in da["level"].values:
+                values_arr = da.sel(level=lev).values
+                agg = _agg_1d(ds, var, values_arr, time_labels,
+                              time_grouper, lat_grouper, lon_grouper,
+                              weights=weights)  # [time, lat, lon]
+                agg = agg.expand_dims("level")  # [time, lat, lon, level=1]
+                agg = agg.assign_coords(level=[lev])
+                agg_levels.append(agg)
+            stacked = xr.concat(agg_levels, dim="level")  # [level, time, lat, lon]
+            stacked = stacked.transpose("time", "level", "lat", "lon")  # [time, level, lat, lon]
+            stacked.name = var
+            out_vars[var] = stacked
+        else:
+            values_arr = da.values
+            agg = _agg_1d(ds, var, values_arr, time_labels,
+                          time_grouper, lat_grouper, lon_grouper,
+                          weights=weights)  # [time, lat, lon]
+            agg.name = var
+            out_vars[var] = agg
+
+    ds_regrid = xr.merge(list(out_vars.values()))
+    ds_regrid = ds_regrid.assign_coords(time=ds_regrid["time"].astype("datetime64[ns]"))
+
+    # sort lon back to [-180,180) if desired (optional)
+    # ds_regrid = ds_regrid.assign_coords(lon=((ds_regrid["lon"] + 180) % 360) - 180)
+    # ds_regrid = ds_regrid.sortby("lon")
+
+    ds_regrid.attrs.update(
+        {
+            "title": f"OCO-2 regridded to {gridname}_{vertical_levels}_{freq}",
+            "grid": gridname,
+            "grid_method": "mean" if weights is None else "weighted mean",
+            "vertical_levels": vertical_levels,
+            "temporal_frequency": freq,
+            "time_method": "mean" if weights is None else "weighted mean",
+            "time_range": f"{str(t_min)} to {str(t_max)}",
+            "source": "NOAA GML / Caltech MIP OCO-2 products",
+        }
+    )
+
+    return ds_regrid
 
 
 def regrid_mip_oco2(
@@ -457,48 +602,40 @@ def regrid_mip_oco2(
     ds_oco2 = xr.open_zarr(oco2_file)
 
     ds = reconstruct_pressure_levels(ds_oco2)
-    ds = reconstruct_co2_profile_from_xco2(ds)
-    ds = ds.rename({"latitude": "lat", "longitude": "lon"})
-
-    # --- Filter only good-quality soundings ---
-    if "xco2_quality_flag" in ds:
-        ds = ds.where(ds["xco2_quality_flag"] == 0, drop=True)
+    # ds = reconstruct_co2_profile_from_xco2(ds)
+    ds = ds.rename({"latitude": "lat", "longitude": "lon", "levels": "level"})
 
     # --- Define regridding operation ---
-    print(f"Regridding temporally OCO-2 to {freq} frequency")
-    ds_temporal = regrid_temporal(
+    # print(f"Regridding temporally OCO-2 to {freq} frequency")
+    # ds_temporal = regrid_temporal(
+    #     ds,
+    #     variables=["xco2_raw", "xco2_apriori", "xco2_2019_scale", "co2_profile_retrieved", "pressure_levels"],
+    #     freq=freq,
+    #     weights=None
+    # )
+
+    # print(f"Regridding Spatially OCO-2 to {gridname}")
+    # ds_spatiotemporal = regrid_spatial(
+    #     ds_temporal,
+    #     variables=["xco2_raw", "xco2_apriori", "xco2_2019_scale", "co2_profile_retrieved", "pressure_levels"],
+    #     gridname=gridname,
+    #     weights=None
+    # )
+
+    print(f"Regridding spatiotemporally OCO-2 to {gridname}_{vertical_levels}_{freq}")
+    ds_spatiotemporal = regrid_spatiotemporal(
         ds,
         variables=["xco2_raw", "xco2_apriori", "xco2_2019_scale", "co2_profile_retrieved", "pressure_levels"],
-        freq=freq,
-        weights=None
-    )
-
-    print(f"Regridding Spatially OCO-2 to {gridname}")
-    ds_regrid = regrid_spatial(
-        ds_temporal,
-        variables=["xco2_raw", "xco2_apriori", "xco2_2019_scale", "co2_profile_retrieved", "pressure_levels"],
         gridname=gridname,
-        weights=None
-    )
-
-    # --- Add metadata ---
-    ds_regrid.attrs.update(
-        {
-            "title": f"OCO-2 regridded to {gridname}_{vertical_levels}_{freq}",
-            "grid": gridname,
-            "grid_method": "mean" if weights is None else "weighted mean",
-            "vertical_levels": vertical_levels,
-            "temporal_frequency": freq,
-            "time_method": "mean" if weights is None else "weighted mean",
-            # "time_range": f"{str(t_min)} to {str(t_max)}",
-            "source": "NOAA GML / Caltech MIP OCO-2 products",
-        }
+        vertical_levels=vertical_levels,
+        freq=freq,
+        weights_var=None,
     )
 
     # --- Write to disk ---
     out_path = out_dir / f"OCO2_regrid_{gridname}_{vertical_levels}_{freq}.zarr"
     print(f"Writing regridded dataset to {out_path}")
-    ds_regrid.to_zarr(out_path)
+    ds_spatiotemporal.to_zarr(out_path)
 
     print("Regridding complete!")
 
