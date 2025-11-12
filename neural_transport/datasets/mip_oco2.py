@@ -188,7 +188,7 @@ def _parse_freq(freq: str) -> np.timedelta64:
     return np.timedelta64(num, unit)
 
 
-def _aligned_time_bins(t_min, t_max, delta_t):
+def _aligned_time_bins(t_min: np.datetime64, t_max: np.datetime64, delta_t: np.timedelta64) -> tuple[np.ndarray, np.ndarray]:
     """
     Align center datetimes to regular multiples of delta_t (e.g. 3h, 6h)
     and return bin edges + labels.
@@ -216,6 +216,13 @@ def _aligned_time_bins(t_min, t_max, delta_t):
     time_bins = time_bins.astype("datetime64[ns]")
     time_labels = time_labels.astype("datetime64[ns]")
     return time_bins, time_labels
+
+
+def _align_spatial_bins(centers: np.ndarray) -> np.ndarray:
+    step = centers[1] - centers[0]
+    edges = np.concatenate(([centers[0] - step/2],
+                            centers + step/2))
+    return edges
 
 
 def regrid_temporal(
@@ -422,38 +429,41 @@ def regrid_spatial(ds: xr.Dataset,
 
 
 def _agg_1d(
-        ds: xr.Dataset,
-        var: str,
-        values_arr: np.ndarray,
-        time_labels: np.ndarray,
-        time_grouper: BinGrouper,
-        lat_grouper: BinGrouper,
-        lon_grouper: BinGrouper,
-        weights: np.ndarray | None = None
+    ds: xr.Dataset,
+    var: str,
+    da: xr.DataArray,
+    time_labels: np.ndarray,
+    time_grouper: BinGrouper,
+    lat_grouper: BinGrouper,
+    lon_grouper: BinGrouper,
+    weights: xr.DataArray | None = None,
 ) -> xr.DataArray:
-    """ Aggregate 1D array into spatio-temporal bins. """
-    tmp = xr.Dataset({
-        "time": (("obs",), ds["time"].values),
-        "lat":  (("obs",), ds["lat"].values),
-        "lon":  (("obs",), ds["lon"].values),
-        var:        (("obs",), values_arr),
-    })
+    """Aggregate a single 1D (or level-slice) variable into spatio-temporal bins."""
+    tmp = xr.Dataset(
+        {
+            "time": ds["time"],
+            "lat": ds["lat"],
+            "lon": ds["lon"],
+            var: da,
+        }
+    )
     if weights is not None:
-        tmp["weights"] = (("obs",), weights)
+        tmp["weights"] = weights
 
     if weights is None:
         grouped = tmp.groupby(time=time_grouper, lat=lat_grouper, lon=lon_grouper).mean()
         out = grouped[var]
     else:
-        num = (tmp[var] * tmp["weights"]).groupby(time=time_grouper, lat=lat_grouper, lon=lon_grouper).sum()
-        den = tmp["weights"].groupby(time=time_grouper, lat=lat_grouper, lon=lon_grouper).sum()
+        num = (tmp[var] * tmp["weights"]).groupby(
+            time=time_grouper, lat=lat_grouper, lon=lon_grouper
+        ).sum()
+        den = tmp["weights"].groupby(
+            time=time_grouper, lat=lat_grouper, lon=lon_grouper
+        ).sum()
         out = num / den
 
-    # rename bin dims and set bin-center coords
     out = out.rename({"time_bins": "time", "lat_bins": "lat", "lon_bins": "lon"})
-    lat_centers = [(i.left + i.right) / 2 for i in out["lat"].values]
-    lon_centers = [(i.left + i.right) / 2 for i in out["lon"].values]
-    out = out.assign_coords(time=time_labels, lat=lat_centers, lon=lon_centers)
+    out = out.assign_coords(time=time_labels)
     return out
 
 
@@ -496,6 +506,8 @@ def regrid_spatiotemporal(
             if "sounding_id" in ds[var].dims and var not in ["time", "date", "assimilate_flag", "data_type", "xco2_quality_flag", "operation_mode", "land_water_indicator", "surface_type"]
         ]
 
+    ds = ds.chunk({"sounding_id": min(ds.sounding_id.size, 500_000)})
+
     # prepare bins
     delta_t = _parse_freq(freq)
     t_min, t_max = [np.datetime64(v, "ns") for v in (np.nanmin(ds["time"].values), np.nanmax(ds["time"].values))]
@@ -503,27 +515,25 @@ def regrid_spatiotemporal(
 
     coords = LATLON_PROTOTYPE_COORDS[gridname]
     ds = ds.assign_coords(lon=((ds["lon"] + 360) % 360))  # Convert OCO-2 lon to [0, 360)
-    lat_bins = np.linspace(coords["lat"].min(), coords["lat"].max(), len(coords["lat"]) + 1)
-    lon_bins = np.linspace(coords["lon"].min(), coords["lon"].max(), len(coords["lon"]) + 1)
+    lat_centers = coords["lat"]
+    lon_centers = coords["lon"]
+    lat_bins = _align_spatial_bins(coords["lat"])
+    lon_bins = _align_spatial_bins(coords["lon"])
 
     # groupers
     time_grouper = BinGrouper(bins=time_bins)
     lat_grouper = BinGrouper(bins=lat_bins)
     lon_grouper = BinGrouper(bins=lon_bins)
 
-    out_vars = {}    
+    weights = ds[weights_var] if weights_var is not None else None
 
-    weights = None
-    if weights_var is not None:
-        weights = ds[weights_var].values
-
+    out_vars = {}
     for var in variables:
         da = ds[var]
         if "level" in da.dims:
             agg_levels = []
             for lev in da["level"].values:
-                values_arr = da.sel(level=lev).values
-                agg = _agg_1d(ds, var, values_arr, time_labels,
+                agg = _agg_1d(ds, var, da.sel(level=lev), time_labels,
                               time_grouper, lat_grouper, lon_grouper,
                               weights=weights)  # [time, lat, lon]
                 agg = agg.expand_dims("level")  # [time, lat, lon, level=1]
@@ -534,15 +544,16 @@ def regrid_spatiotemporal(
             stacked.name = var
             out_vars[var] = stacked
         else:
-            values_arr = da.values
-            agg = _agg_1d(ds, var, values_arr, time_labels,
+            agg = _agg_1d(ds, var, da, time_labels,
                           time_grouper, lat_grouper, lon_grouper,
                           weights=weights)  # [time, lat, lon]
             agg.name = var
             out_vars[var] = agg
 
     ds_regrid = xr.merge(list(out_vars.values()))
-    ds_regrid = ds_regrid.assign_coords(time=ds_regrid["time"].astype("datetime64[ns]"))
+    ds_regrid = ds_regrid.assign_coords(time=time_labels, lat=lat_centers, lon=lon_centers)
+
+    ds_regrid = ds_regrid.compute()
 
     # sort lon back to [-180,180) if desired (optional)
     # ds_regrid = ds_regrid.assign_coords(lon=((ds_regrid["lon"] + 180) % 360) - 180)
