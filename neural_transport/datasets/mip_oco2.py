@@ -1,4 +1,4 @@
-"""Prepare MIP OCO-2 dataset: download, regrid, resample, write, stats, obspack comparison."""
+"""Prepare MIP OCO-2 dataset: download, filter, regrid, write, stats."""
 
 from pathlib import Path
 import urllib.request
@@ -6,8 +6,13 @@ import tarfile
 
 import numpy as np
 import xarray as xr
+from dask.diagnostics import ProgressBar
 from xarray.groupers import BinGrouper
 
+from neural_transport.datasets.common import (
+    compute_stats,
+    optimize_zarr,
+)
 from neural_transport.datasets.grids import LATLON_PROTOTYPE_COORDS
 
 
@@ -70,7 +75,7 @@ def download_data(save_dir: str):
     print("MIP OCO-2 downloads complete!")
 
 
-def filter_trainset_mip_oco2(save_dir: str) -> xr.Dataset:
+def filter_mip_oco2(save_dir: str) -> xr.Dataset:
     """
     Filter MIP OCO-2 dataset to include only observations to assimilate and drop categorical/non-numeric variables.
     Converts NetCDF to Zarr format for faster access.
@@ -103,8 +108,8 @@ def filter_trainset_mip_oco2(save_dir: str) -> xr.Dataset:
     ]
     ds_train = ds_train.drop_vars([v for v in drop_vars if v in ds_train.variables])
 
-    ds_train.to_zarr(f"{oco2_dir}/oco2_train.zarr", mode="w")
-    print(f"Filtered dataset written to {oco2_dir}/oco2_train.zarr")
+    ds_train.to_zarr(f"{oco2_dir}/oco2_assimilate.zarr", mode="w")
+    print(f"Filtered dataset written to {oco2_dir}/oco2_assimilate.zarr")
 
     return ds_train
 
@@ -607,7 +612,7 @@ def regrid_mip_oco2(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Input files
-    oco2_file = oco2_dir / "oco2_train.zarr"
+    oco2_file = oco2_dir / "oco2_assimilate.zarr"
 
     # --- Load datasets ---
     ds_oco2 = xr.open_zarr(oco2_file)
@@ -636,7 +641,7 @@ def regrid_mip_oco2(
     print(f"Regridding spatiotemporally OCO-2 to {gridname}_{vertical_levels}_{freq}")
     ds_spatiotemporal = regrid_spatiotemporal(
         ds,
-        variables=["xco2_raw", "xco2_apriori", "xco2_2019_scale", "co2_profile_retrieved", "pressure_levels"],
+        variables=None,
         gridname=gridname,
         vertical_levels=vertical_levels,
         freq=freq,
@@ -651,16 +656,66 @@ def regrid_mip_oco2(
     print("Regridding complete!")
 
 
-def stats_mip_oco2(save_dir: str, gridname: str, vertical_levels: str, freq: str):
-    """Compute statistics for MIP OCO-2 data."""
-    # Implementation for computing statistics goes here
-    pass
+def write_mip_oco2(
+        save_dir: str,
+        gridname: str | None = "latlon2x3",
+        vertical_levels: str | None = "l34",
+        freq: str | None = "3h"
+) -> None:
+    """Separate OCO-2 regridded data into train/val/test splits and write to disk."""
+    save_dir = Path(save_dir)
+    oco2_dir = save_dir / "OCO2MIP" / "OCO2"
+    ds = xr.open_zarr(
+        oco2_dir / "OCO2_regrid" / f"OCO2_regrid_{gridname}_{vertical_levels}_{freq}.zarr"
+    )
+
+    for split, timeslice in zip(
+        ["val", "test", "train"],
+        [
+            slice("2021-01-01", "2021-12-31"),
+            slice("2022-01-01", "2024-07-31"),
+            slice(None, "2020-12-31"),
+        ],
+    ):
+        print(f"Writing {split} to zarr")
+        out_dir = oco2_dir / split
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        ds_opt = optimize_zarr(ds.sel(time=timeslice))
+        with ProgressBar():
+            ds_opt.to_zarr(
+                out_dir / f"mip_oco2_{gridname}_{vertical_levels}_{freq}.zarr",
+                mode="w",
+            )
 
 
-def obspack_mip_oco2(save_dir: str, gridname: str, vertical_levels: str, freq: str):
-    """Compare MIP OCO-2 data with Obspack observations."""
-    # Implementation for comparison with Obspack goes here
-    pass
+def stats_mip_oco2(
+        save_dir: str, 
+        gridname: str | None = "latlon2x3", 
+        vertical_levels: str | None = "l34", 
+        freq: str | None = "3h"
+) -> None:
+    """
+    Compute and save statistics for MIP OCO-2 data (train/val/test).
+    """
+    save_dir = Path(save_dir)
+    oco2_dir = save_dir / "OCO2MIP" / "OCO2"
+
+    train_dir = oco2_dir / "train"
+    val_dir = oco2_dir / "val"
+    test_dir = oco2_dir / "test"
+
+    ds = xr.open_zarr(
+        train_dir / f"mip_oco2_{gridname}_{vertical_levels}_{freq}.zarr"
+    )
+
+    ds_stats = compute_stats(ds)
+
+    for out_dir in [train_dir, val_dir, test_dir]:
+        ds_stats.to_zarr(
+            out_dir / f"mip_oco2_{gridname}_{vertical_levels}_{freq}_stats.zarr",
+            mode="w",
+        )
 
 
 if __name__ == "__main__":
@@ -676,7 +731,7 @@ if __name__ == "__main__":
     download_data(args.save_dir)
 
 
-    filter_trainset_mip_oco2(args.save_dir)
+    filter_mip_oco2(args.save_dir)
 
 
     regrid_mip_oco2(
@@ -687,14 +742,15 @@ if __name__ == "__main__":
     )
 
 
-    stats_mip_oco2(
+    write_mip_oco2(
         args.save_dir,
         gridname=args.gridname,
         vertical_levels=args.vertical_levels,
         freq=args.freq
     )
 
-    obspack_mip_oco2(
+
+    stats_mip_oco2(
         args.save_dir,
         gridname=args.gridname,
         vertical_levels=args.vertical_levels,
