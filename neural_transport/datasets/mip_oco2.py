@@ -93,25 +93,36 @@ def filter_mip_oco2(save_dir: str) -> xr.Dataset:
     save_dir = Path(save_dir)
     oco2_dir = save_dir / "OCO2MIP" / "OCO2"
     oco2_file = oco2_dir / "OCO2_b11.2_10sec_GOOD_r2.nc4"
+    zarr_file = oco2_dir / "OCO2_b11.2_10sec_GOOD_r2.zarr"
+    filtered_file = oco2_dir / "oco2_assimilate.zarr"
 
-    print(f"Converting OCO-2 to Zarr from {oco2_file}")
-    ds_oco2 = xr.open_dataset(oco2_file)
-    ds_oco2.to_zarr(f"{oco2_dir}/OCO2_b11.2_10sec_GOOD_r2.zarr", mode="w")
+    if filtered_file.exists():
+        print(f"Skipping filtering — {filtered_file} already exists.")
+        return xr.open_zarr(filtered_file)
 
-    flag = ds_oco2["assimilate_flag"].compute()
-    ds_train = ds_oco2.where(flag == 1, drop=True)
+    print(f"Opening {oco2_file}")
+    ds = xr.open_dataset(oco2_file, chunks="auto")
+
+    if not zarr_file.exists():
+        print(f"Writing raw dataset to Zarr (once): {zarr_file}")
+        with ProgressBar():
+            ds.to_zarr(zarr_file, mode="w")
+
+    flag = ds["assimilate_flag"].compute()
+    ds_filtered = ds.where(flag == 1, drop=True)
 
     drop_vars = [
         "date", "assimilate_flag", "data_type",
         "xco2_quality_flag", "operation_mode",
         "land_water_indicator", "surface_type"
     ]
-    ds_train = ds_train.drop_vars([v for v in drop_vars if v in ds_train.variables])
+    ds_filtered = ds_filtered.drop_vars([v for v in drop_vars if v in ds_filtered])
 
-    ds_train.to_zarr(f"{oco2_dir}/oco2_assimilate.zarr", mode="w")
-    print(f"Filtered dataset written to {oco2_dir}/oco2_assimilate.zarr")
+    print(f"Saving filtered dataset to {filtered_file}")
+    with ProgressBar():
+        ds_filtered.to_zarr(filtered_file, mode="w")
 
-    return ds_train
+    return ds_filtered
 
 
 def reconstruct_pressure_levels(ds: xr.Dataset) -> xr.Dataset:
@@ -578,6 +589,45 @@ def regrid_spatiotemporal(
     )
 
     return ds_regrid
+
+
+MIP_OCO2_HEIGHT = [
+    0.0984, 52.6136, 105.2272, 156.4836, 210.4544, 256.2101, 312.9672, 370.0722, 420.9087, 472.6453, 512.4202, 578.6387, 625.9344, 663.7776, 740.1443, 770.1723, 841.8174, 884.8869, 945.2906, 997.8886
+]  # mean of pressure levels in hPa obtained from "sigmal_levels" * "psurf" where assimilate_flag==1, rounded to 4 significant digits
+
+
+MIP_OCO2_HEIGHT_STD = [
+    0.0061, 3.2340, 6.4680, 9.6270, 12.9360, 16.5816, 19.2540, 22.9676, 25.8719, 29.0186, 33.1632, 35.5519, 38.5080, 43.7764, 45.9353, 49.3767, 51.7438, 54.5112, 58.0373, 61.2261
+]  # std dev of pressure levels in hPa obtained from "sigmal_levels" * "psurf" where assimilate_flag==1, rounded to 4 significant digits
+
+
+MIP_OCO2_LEVEL_AGG = dict(
+    # native resolution
+    l20=[[i] for i in range(20)],
+    l10=[
+        [19, 18],        # ~950–998 hPa (surface)
+        [17, 16],        # ~840–885
+        [15, 14, 13],    # ~660–770
+        [12, 11, 10],    # ~510–625
+        [9, 8, 7],       # ~370–472
+        [6, 5],          # ~256–313
+        [4, 3],          # ~156–210
+        [2, 1],          # ~52–105
+        [0],             # ~0.1
+    ][::-1],  # flip to top→bottom order if desired
+    l5=[
+        [0, 1, 2, 3, 4],      # upper stratosphere
+        [5, 6, 7, 8],         # upper/mid-troposphere
+        [9, 10, 11, 12],      # mid-troposphere
+        [13, 14, 15],         # lower-mid troposphere
+        [16, 17, 18, 19],     # near-surface
+    ][::-1],
+    l3=[
+        [15, 16, 17, 18, 19],      # boundary layer / lower troposphere
+        [7, 8, 9, 10, 11, 12, 13, 14],  # mid troposphere
+        [0, 1, 2, 3, 4, 5, 6],     # upper troposphere / stratosphere
+    ][::-1],
+)
 
 
 def regrid_mip_oco2(
