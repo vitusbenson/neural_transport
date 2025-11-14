@@ -105,8 +105,7 @@ def filter_mip_oco2(save_dir: str) -> xr.Dataset:
 
     if not zarr_file.exists():
         print(f"Writing raw dataset to Zarr (once): {zarr_file}")
-        with ProgressBar():
-            ds.to_zarr(zarr_file, mode="w")
+        ds.to_zarr(zarr_file, mode="w")
 
     flag = ds["assimilate_flag"].compute()
     ds_filtered = ds.where(flag == 1, drop=True)
@@ -119,8 +118,7 @@ def filter_mip_oco2(save_dir: str) -> xr.Dataset:
     ds_filtered = ds_filtered.drop_vars([v for v in drop_vars if v in ds_filtered])
 
     print(f"Saving filtered dataset to {filtered_file}")
-    with ProgressBar():
-        ds_filtered.to_zarr(filtered_file, mode="w")
+    ds_filtered.to_zarr(filtered_file, mode="w")
 
     return ds_filtered
 
@@ -145,51 +143,6 @@ def reconstruct_pressure_levels(ds: xr.Dataset) -> xr.Dataset:
         "units": "hPa",
         "long_name": "Pressure levels reconstructed from sigma_levels * psurf"
     }
-    return ds
-
-
-def reconstruct_co2_profile_from_xco2(ds: xr.Dataset) -> xr.Dataset:
-    """
-    Reconstruct per-sounding vertical CO2 profiles from OCO-2 XCO2 using
-    the averaging kernel and the prior profile.
-
-    Parameters
-    ----------
-    ds : xr.Dataset
-        OCO-2 dataset containing variables:
-          - xco2_var (sounding_id,)
-          - prior_profile_var (sounding_id, levels)
-          - ak_var (sounding_id, levels)
-          - pressure_weight_var (sounding_id, levels)
-
-    Returns
-    -------
-    ds : xr.Dataset
-        Input dataset with a new variable 'co2_profile_retrieved' with dims ('sounding_id','levels') and units ppm.
-    """
-    xa = ds['co2_profile_apriori']       # ('sounding_id','levels')
-    A  = ds['xco2_averaging_kernel']     # ('sounding_id','levels')
-    w  = ds['pressure_weight']           # ('sounding_id','levels')
-    X  = ds['xco2_raw']                  # ('sounding_id',)
-
-    # compute prior column mean
-    # note: pressure_weight is already a fraction (sums ~1 across levels)
-    xa_col = (xa * w).sum(dim='levels')  # ('sounding_id',)
-    xa_col.name = "co2_profile_apriori_colmean"
-
-    delta = X - xa_col                   # ('sounding_id',)
-    delta_exp = delta.expand_dims({'levels': xa.coords['levels']}) # ('sounding_id','levels')
-
-    co2_retrieved = xa + A * delta_exp
-    co2_retrieved.name = "co2_profile_retrieved"
-    co2_retrieved.attrs = {
-        "units": "ppm",
-        "long_name": "Reconstructed retrieved CO2 profile from XCO2, prior and averaging kernel",
-        "formula": "xa + A * (X - sum(w * xa))"
-    }
-
-    ds[co2_retrieved.name] = co2_retrieved
-
     return ds
 
 
@@ -516,10 +469,16 @@ def regrid_spatiotemporal(
           - for 2D vars: (time, lat, lon)
           - for level vars: (time, level, lat, lon)
     """
+    exclude_vars = [
+        "lat", "lon", "time", "date",
+        "assimilate_flag", "xco2_quality_flag",
+        "data_type", "operation_mode",
+        "land_water_indicator", "surface_type"
+    ]  # First row are aggregation coords. Rest are categorical.
     if variables is None:
         variables = [
             var for var in ds.data_vars
-            if "sounding_id" in ds[var].dims and var not in ["time", "date", "assimilate_flag", "data_type", "xco2_quality_flag", "operation_mode", "land_water_indicator", "surface_type"]
+            if "sounding_id" in ds[var].dims and var not in exclude_vars
         ]
 
     ds = ds.chunk({"sounding_id": min(ds.sounding_id.size, 500_000)})
@@ -569,7 +528,8 @@ def regrid_spatiotemporal(
     ds_regrid = xr.merge(list(out_vars.values()))
     ds_regrid = ds_regrid.assign_coords(time=time_labels, lat=lat_centers, lon=lon_centers)
 
-    ds_regrid = ds_regrid.compute()
+    with ProgressBar():
+        ds_regrid = ds_regrid.compute()
 
     # sort lon back to [-180,180) if desired (optional)
     # ds_regrid = ds_regrid.assign_coords(lon=((ds_regrid["lon"] + 180) % 360) - 180)
@@ -602,19 +562,19 @@ MIP_OCO2_HEIGHT_STD = [
 
 
 MIP_OCO2_LEVEL_AGG = dict(
-    # native resolution
-    l20=[[i] for i in range(20)],
+    l20=[[i] for i in range(20)],  # native resolution
     l10=[
-        [19, 18],        # ~950–998 hPa (surface)
-        [17, 16],        # ~840–885
-        [15, 14, 13],    # ~660–770
-        [12, 11, 10],    # ~510–625
-        [9, 8, 7],       # ~370–472
-        [6, 5],          # ~256–313
-        [4, 3],          # ~156–210
-        [2, 1],          # ~52–105
-        [0],             # ~0.1
-    ][::-1],  # flip to top→bottom order if desired
+        [19],                   # 998 hPa (near surface)
+        [18],                   # 945 (near surface)
+        [17],                   # 885 (upper troposphere)
+        [16],                   # 841 (upper troposphere)
+        [15],                   # 770 (lower troposphere)
+        [14],                   # 740 (lower troposphere)
+        [13, 12, 11, 10, 9, 8], # 663-421 hPa (mid troposphere)
+        [7, 6],                 # 370–312 hPa (mid troposphere)
+        [5, 4, 3],              # 256–156 hPa (mid-upper troposphere)
+        [2, 1, 0],              # 105-0.1 hPa (upper stratosphere)
+    ][::-1],  # ordered such that averaging_kernel behaves linearly and somewaht resembles the Carbontracker l10 levels
     l5=[
         [0, 1, 2, 3, 4],      # upper stratosphere
         [5, 6, 7, 8],         # upper/mid-troposphere
@@ -622,12 +582,59 @@ MIP_OCO2_LEVEL_AGG = dict(
         [13, 14, 15],         # lower-mid troposphere
         [16, 17, 18, 19],     # near-surface
     ][::-1],
-    l3=[
-        [15, 16, 17, 18, 19],      # boundary layer / lower troposphere
-        [7, 8, 9, 10, 11, 12, 13, 14],  # mid troposphere
-        [0, 1, 2, 3, 4, 5, 6],     # upper troposphere / stratosphere
-    ][::-1],
+    l3=[[19], list(range(10, 19)), list(range(9))][::-1],  # ordered such that averaging_kernel behaves linearly
 )
+
+
+VERTICAL_LAYERS_OCO2MIP_COORDS = {
+    "l20": dict(level=MIP_OCO2_HEIGHT),
+    "l10": dict(level=[
+        997.8886, 945.2906, 884.8869, 841.8174, 770.1723,
+    ] + [
+        np.mean([MIP_OCO2_HEIGHT[i] for i in group]) for group in MIP_OCO2_LEVEL_AGG["l10"][6:]
+    ]),
+    "l5": dict(level=[
+        np.mean([MIP_OCO2_HEIGHT[i] for i in group]) for group in MIP_OCO2_LEVEL_AGG["l5"]
+    ]),
+    "l3": dict(level=[
+        997.8886,
+        np.mean([MIP_OCO2_HEIGHT[i] for i in range(10, 19)]),
+        np.mean([MIP_OCO2_HEIGHT[i] for i in range(9)]),
+    ]),
+}
+
+
+def vertical_aggregation_oco2(ds: xr.Dataset, levels: list[list[int]]) -> xr.Dataset:
+    """
+    Vertically aggregate OCO-2 profile variables according to specified level groupings.
+    Uses pressure_weight as vertical weighting.
+    """
+    if "level" not in ds.dims:
+        raise ValueError("Dataset must contain 'level' dimension (20 levels)")
+
+    vertical_vars = [v for v in ds if "level" in ds[v].dims]
+    vertical_ds = ds[vertical_vars]
+
+    ds_all_aggregated = []
+    for i, lvl in enumerate(levels):
+        if len(lvl) > 1:
+            pressure_weights = ds["pressure_weight"].isel(level=lvl)
+            pressure_weights = pressure_weights / pressure_weights.sum("level")
+
+            ds_aggregated = (vertical_ds.isel(level=lvl) * pressure_weights).sum("level")
+            ds_aggregated = ds_aggregated.assign_coords(dict(level=[i]))
+        else:
+            ds_aggregated = vertical_ds.isel(level=lvl).assign_coords(dict(level=[i]))
+        ds_all_aggregated.append(ds_aggregated)
+
+    ds_agg = xr.concat(ds_all_aggregated, "level")
+
+    # Attach non-vertical variables
+    for v in ds:
+        if "level" not in ds[v].dims:
+            ds_agg[v] = ds[v]
+
+    return ds_agg
 
 
 def regrid_mip_oco2(
@@ -659,19 +666,23 @@ def regrid_mip_oco2(
     base_dir = save_dir / "OCO2MIP"
     oco2_dir = base_dir / "OCO2"
     out_dir = oco2_dir / "OCO2_regrid"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    regridded_file = out_dir / f"OCO2_regrid_{gridname}_{vertical_levels}_{freq}.zarr"
 
-    # Input files
-    oco2_file = oco2_dir / "oco2_assimilate.zarr"
+    if regridded_file.exists():
+        print(f"Skipping regridding — {regridded_file} already exists.")
+        return xr.open_zarr(regridded_file)
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    oco2_file = oco2_dir / "oco2_assimilate.zarr"  # Input file
 
     # --- Load datasets ---
     ds_oco2 = xr.open_zarr(oco2_file)
 
     ds = reconstruct_pressure_levels(ds_oco2)
-    # ds = reconstruct_co2_profile_from_xco2(ds)
     ds = ds.rename({"latitude": "lat", "longitude": "lon", "levels": "level"})
 
     # --- Define regridding operation ---
+
     # print(f"Regridding temporally OCO-2 to {freq} frequency")
     # ds_temporal = regrid_temporal(
     #     ds,
@@ -698,11 +709,17 @@ def regrid_mip_oco2(
         weights_var=None,
     )
 
-    # --- Write to disk ---
-    out_path = out_dir / f"OCO2_regrid_{gridname}_{vertical_levels}_{freq}.zarr"
-    print(f"Writing regridded dataset to {out_path}")
-    ds_spatiotemporal.to_zarr(out_path)
+    ds_full_regrid = vertical_aggregation_oco2(
+        ds_spatiotemporal,
+        levels=MIP_OCO2_LEVEL_AGG[vertical_levels]
+    )
+    ds_full_regrid["level"] = VERTICAL_LAYERS_OCO2MIP_COORDS[vertical_levels]["level"]
 
+    # --- Write to disk ---
+    ds_full_regrid = ds_full_regrid.chunk(dict(time=-1, lat=-1, lon=-1, level=-1))
+    print(f"Writing regridded dataset to {regridded_file}")
+    with ProgressBar():
+        ds_full_regrid.to_zarr(regridded_file, mode="a", append_dim="time")
     print("Regridding complete!")
 
 
@@ -732,11 +749,10 @@ def write_mip_oco2(
         out_dir.mkdir(parents=True, exist_ok=True)
 
         ds_opt = optimize_zarr(ds.sel(time=timeslice))
-        with ProgressBar():
-            ds_opt.to_zarr(
-                out_dir / f"mip_oco2_{gridname}_{vertical_levels}_{freq}.zarr",
-                mode="w",
-            )
+        ds_opt.to_zarr(
+            out_dir / f"mip_oco2_{gridname}_{vertical_levels}_{freq}.zarr",
+            mode="w",
+        )
 
 
 def stats_mip_oco2(
