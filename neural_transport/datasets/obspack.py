@@ -63,8 +63,8 @@ def open_one_obspack(obspack_path):
         obspack_obs["time"] = obspack_obs.get_index("time") + offset
 
         return {obspack_path.stem: obspack_obs.to_array("vari")}
-    except:
-        print(f"Error with {obspack_path}")
+    except Exception as e:
+        print(f"Error with {obspack_path}: {e}")
         return None
 
 

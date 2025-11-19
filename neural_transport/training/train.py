@@ -10,7 +10,7 @@ from neural_transport.datamodule import CarbonDataModule, CarbonDataset
 from neural_transport.inference.analyse import compute_local_scores, compute_score_df, compute_score_df_generate
 from neural_transport.inference.forecast import iterative_forecast
 from neural_transport.inference.generative import iterative_generate
-from neural_transport.neural_transport.plots.plot_results import (
+from neural_transport.plots.plot_results import (
     animate_predictions,
     plot_metrics,
     plot_obspack_stations,

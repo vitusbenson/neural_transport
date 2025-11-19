@@ -8,7 +8,8 @@ from ecmwfapi import ECMWFService
 from tqdm import tqdm
 from tqdm.contrib.concurrent import process_map
 
-from neural_transport.tools.conversion import *
+from neural_transport.tools.conversion import massmix_to_density, massmix_to_molemix, M_CH4, M_CO
+
 
 CAMS_MODEL_RUNS = [
     {
@@ -405,7 +406,7 @@ def latlon_to_zarr(save_dir, expver="hueu"):
         out_dir.mkdir(parents=True, exist_ok=True)
         with ProgressBar():
             ds.to_zarr(
-                out_dir / f"camsfc_latlon1.zarr",
+                out_dir / "camsfc_latlon1.zarr",
                 mode="w",
             )
 

@@ -4,6 +4,7 @@ from pathlib import Path
 import urllib.request
 import tarfile
 
+import dask
 import numpy as np
 import xarray as xr
 from dask.diagnostics import ProgressBar
@@ -14,6 +15,8 @@ from neural_transport.datasets.common import (
     optimize_zarr,
 )
 from neural_transport.datasets.grids import LATLON_PROTOTYPE_COORDS
+
+dask.config.set(scheduler="threads")
 
 
 def download_data(save_dir: str):
@@ -27,17 +30,16 @@ def download_data(save_dir: str):
         Directory where all datasets will be saved.
     """
     save_dir = Path(save_dir)
-    base_dir = save_dir / "OCO2MIP"
-    base_dir.mkdir(parents=True, exist_ok=True)
+    save_dir.mkdir(parents=True, exist_ok=True)
 
     datasets = {
-        "OCO2": [
+        "OCO2MIP_OCO2": [
             "https://gml.noaa.gov/aftp/user/andy/OCO-2/OCO2_b11.2_10sec_GOOD_r2.nc4"
         ],
-        "OCO3": [
+        "OCO2MIP_OCO3": [
             "https://gml.noaa.gov/aftp/user/andy/OCO-2/OCO3_b11_10sec_GOOD_r2.nc4"
         ],
-        "TCCON": [
+        "OCO2MIP_TCCON": [
             "https://data.caltech.edu/records/zr28z-s4y31/files/tccon_timeaverages_R20250609.tgz"
         ],
         # Uncomment and fill when access is granted
@@ -47,7 +49,7 @@ def download_data(save_dir: str):
     }
 
     for key, urls in datasets.items():
-        target_dir = base_dir / key
+        target_dir = save_dir / key
         target_dir.mkdir(parents=True, exist_ok=True)
 
         for url in urls:
@@ -64,13 +66,17 @@ def download_data(save_dir: str):
                 print(f"{filename} already exists — skipping")
 
             # Extract TCCON archive if needed
-            if key == "TCCON" and outpath.suffix == ".tgz":
-                try:
-                    print(f"Extracting {filename}...")
-                    with tarfile.open(outpath, "r:gz") as tar:
-                        tar.extractall(path=target_dir)
-                except Exception as e:
-                    print(f"Failed to extract {filename}: {e}")
+            if key == "OCO2MIP_TCCON" and outpath.suffix == ".tgz":
+                nc_files = list(target_dir.glob("*.nc4"))
+                if not nc_files:
+                    try:
+                        print(f"Extracting {filename}...")
+                        with tarfile.open(outpath, "r:gz") as tar:
+                            tar.extractall(path=target_dir)
+                    except Exception as e:
+                        print(f"Failed to extract {filename}: {e}")
+                else:
+                    print("TCCON NetCDF files already extracted — skipping")
 
     print("MIP OCO-2 downloads complete!")
 
@@ -91,7 +97,7 @@ def filter_mip_oco2(save_dir: str) -> xr.Dataset:
         Filtered dataset containing only assimilated observations.
     """
     save_dir = Path(save_dir)
-    oco2_dir = save_dir / "OCO2MIP" / "OCO2"
+    oco2_dir = save_dir / "OCO2MIP_OCO2"
     oco2_file = oco2_dir / "OCO2_b11.2_10sec_GOOD_r2.nc4"
     zarr_file = oco2_dir / "OCO2_b11.2_10sec_GOOD_r2.zarr"
     filtered_file = oco2_dir / "oco2_assimilate.zarr"
@@ -117,9 +123,9 @@ def filter_mip_oco2(save_dir: str) -> xr.Dataset:
     ]
     ds_filtered = ds_filtered.drop_vars([v for v in drop_vars if v in ds_filtered])
 
-    print(f"Saving filtered dataset to {filtered_file}")
+    print(f"Writing filtered dataset to {filtered_file}")
     ds_filtered.to_zarr(filtered_file, mode="w")
-
+    print("MIP OCO-2 filtering complete!")
     return ds_filtered
 
 
@@ -408,21 +414,15 @@ def _agg_1d(
     weights: xr.DataArray | None = None,
 ) -> xr.DataArray:
     """Aggregate a single 1D (or level-slice) variable into spatio-temporal bins."""
-    tmp = xr.Dataset(
-        {
-            "time": ds["time"],
-            "lat": ds["lat"],
-            "lon": ds["lon"],
-            var: da,
-        }
-    )
-    if weights is not None:
-        tmp["weights"] = weights
+    tmp = da.to_dataset(name=var)
+    tmp = tmp.assign_coords(time=ds["time"], lat=ds["lat"], lon=ds["lon"])
+    tmp = tmp.compute()
 
     if weights is None:
         grouped = tmp.groupby(time=time_grouper, lat=lat_grouper, lon=lon_grouper).mean()
         out = grouped[var]
     else:
+        tmp["weights"] = weights
         num = (tmp[var] * tmp["weights"]).groupby(
             time=time_grouper, lat=lat_grouper, lon=lon_grouper
         ).sum()
@@ -431,6 +431,7 @@ def _agg_1d(
         ).sum()
         out = num / den
 
+    out = out.chunk({"time_bins": 1500, "lat_bins": -1, "lon_bins": -1})
     out = out.rename({"time_bins": "time", "lat_bins": "lat", "lon_bins": "lon"})
     out = out.assign_coords(time=time_labels)
     return out
@@ -481,7 +482,7 @@ def regrid_spatiotemporal(
             if "sounding_id" in ds[var].dims and var not in exclude_vars
         ]
 
-    ds = ds.chunk({"sounding_id": min(ds.sounding_id.size, 500_000)})
+    ds = ds.chunk({"sounding_id": min(ds.sounding_id.size, 64121)})
 
     # prepare bins
     delta_t = _parse_freq(freq)
@@ -527,9 +528,6 @@ def regrid_spatiotemporal(
 
     ds_regrid = xr.merge(list(out_vars.values()))
     ds_regrid = ds_regrid.assign_coords(time=time_labels, lat=lat_centers, lon=lon_centers)
-
-    with ProgressBar():
-        ds_regrid = ds_regrid.compute()
 
     # sort lon back to [-180,180) if desired (optional)
     # ds_regrid = ds_regrid.assign_coords(lon=((ds_regrid["lon"] + 180) % 360) - 180)
@@ -589,7 +587,7 @@ MIP_OCO2_LEVEL_AGG = dict(
 VERTICAL_LAYERS_OCO2MIP_COORDS = {
     "l20": dict(level=MIP_OCO2_HEIGHT),
     "l10": dict(level=[
-        997.8886, 945.2906, 884.8869, 841.8174, 770.1723,
+        997.8886, 945.2906, 884.8869, 841.8174, 770.1723, 740.1443,
     ] + [
         np.mean([MIP_OCO2_HEIGHT[i] for i in group]) for group in MIP_OCO2_LEVEL_AGG["l10"][6:]
     ]),
@@ -615,7 +613,7 @@ def vertical_aggregation_oco2(ds: xr.Dataset, levels: list[list[int]]) -> xr.Dat
     vertical_vars = [v for v in ds if "level" in ds[v].dims]
     vertical_ds = ds[vertical_vars]
 
-    ds_all_aggregated = []
+    aggregated_list = []
     for i, lvl in enumerate(levels):
         if len(lvl) > 1:
             pressure_weights = ds["pressure_weight"].isel(level=lvl)
@@ -625,9 +623,10 @@ def vertical_aggregation_oco2(ds: xr.Dataset, levels: list[list[int]]) -> xr.Dat
             ds_aggregated = ds_aggregated.assign_coords(dict(level=[i]))
         else:
             ds_aggregated = vertical_ds.isel(level=lvl).assign_coords(dict(level=[i]))
-        ds_all_aggregated.append(ds_aggregated)
+        ds_aggregated = ds_aggregated.drop_vars("pressure_weight", errors="ignore")
+        aggregated_list.append(ds_aggregated)
 
-    ds_agg = xr.concat(ds_all_aggregated, "level")
+    ds_agg = xr.concat(aggregated_list, dim="level")
 
     # Attach non-vertical variables
     for v in ds:
@@ -642,7 +641,7 @@ def regrid_mip_oco2(
         gridname: str | None = "latlon2x3",
         vertical_levels: str | None = "l34",
         freq: str | None = "3h"
-) -> None:
+) -> xr.Dataset:
     """
     Regrid MIP OCO-2 data to the specified grid and vertical levels.
 
@@ -663,8 +662,7 @@ def regrid_mip_oco2(
         Writes regridded datasets to disk in Zarr format.
     """
     save_dir = Path(save_dir)
-    base_dir = save_dir / "OCO2MIP"
-    oco2_dir = base_dir / "OCO2"
+    oco2_dir = save_dir / "OCO2MIP_OCO2"
     out_dir = oco2_dir / "OCO2_regrid"
     regridded_file = out_dir / f"OCO2_regrid_{gridname}_{vertical_levels}_{freq}.zarr"
 
@@ -709,6 +707,7 @@ def regrid_mip_oco2(
         weights_var=None,
     )
 
+    print(f"Aggregating vertically OCO-2 to {vertical_levels}")
     ds_full_regrid = vertical_aggregation_oco2(
         ds_spatiotemporal,
         levels=MIP_OCO2_LEVEL_AGG[vertical_levels]
@@ -716,11 +715,18 @@ def regrid_mip_oco2(
     ds_full_regrid["level"] = VERTICAL_LAYERS_OCO2MIP_COORDS[vertical_levels]["level"]
 
     # --- Write to disk ---
+    ds_full_regrid = ds_full_regrid.assign_coords(
+        time=ds_full_regrid["time"],
+        lat=ds_full_regrid["lat"],
+        lon=ds_full_regrid["lon"],
+        level=ds_full_regrid["level"],
+    )
     ds_full_regrid = ds_full_regrid.chunk(dict(time=-1, lat=-1, lon=-1, level=-1))
     print(f"Writing regridded dataset to {regridded_file}")
     with ProgressBar():
-        ds_full_regrid.to_zarr(regridded_file, mode="a", append_dim="time")
-    print("Regridding complete!")
+        ds_full_regrid.to_zarr(regridded_file, mode="w")
+    print("MIP OCO-2 regridding complete!")
+    return ds_full_regrid
 
 
 def write_mip_oco2(
@@ -731,7 +737,7 @@ def write_mip_oco2(
 ) -> None:
     """Separate OCO-2 regridded data into train/val/test splits and write to disk."""
     save_dir = Path(save_dir)
-    oco2_dir = save_dir / "OCO2MIP" / "OCO2"
+    oco2_dir = save_dir / "OCO2MIP_OCO2"
     ds = xr.open_zarr(
         oco2_dir / "OCO2_regrid" / f"OCO2_regrid_{gridname}_{vertical_levels}_{freq}.zarr"
     )
@@ -753,6 +759,7 @@ def write_mip_oco2(
             out_dir / f"mip_oco2_{gridname}_{vertical_levels}_{freq}.zarr",
             mode="w",
         )
+        print(f"MIP OCO-2 writing {split} complete!")
 
 
 def stats_mip_oco2(
@@ -765,7 +772,7 @@ def stats_mip_oco2(
     Compute and save statistics for MIP OCO-2 data (train/val/test).
     """
     save_dir = Path(save_dir)
-    oco2_dir = save_dir / "OCO2MIP" / "OCO2"
+    oco2_dir = save_dir / "OCO2MIP_OCO2"
 
     train_dir = oco2_dir / "train"
     val_dir = oco2_dir / "val"
@@ -782,6 +789,7 @@ def stats_mip_oco2(
             out_dir / f"mip_oco2_{gridname}_{vertical_levels}_{freq}_stats.zarr",
             mode="w",
         )
+    print("MIP OCO-2 statistics computation complete!")
 
 
 if __name__ == "__main__":

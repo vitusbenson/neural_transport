@@ -1,14 +1,10 @@
-from numpy import nanstd
 import torch
 import torch.nn as nn
 
 from neural_transport.models.layers import (
-    ACTIVATIONS,
     MultiScaleDecoder,
     MultiScaleEncoder,
 )
-from neural_transport.tools.conversion import *
-
 
 class RegularGridModel(nn.Module):
 

@@ -12,10 +12,12 @@ import zarr
 # from numcodecs import blosc
 from torch.utils.data import Dataset
 
-from neural_transport.datasets.grids import *
+from neural_transport.datasets.grids import (
+    LATLON_PROTOTYPE_COORDS, VERTICAL_LAYERS_PROTOTYPE_COORDS,
+)
 from neural_transport.datasets.vars import *
 from neural_transport.models.gnn.mesh import get_gridnc_from_grid
-from neural_transport.tools.conversion import *
+from neural_transport.tools.conversion import density_to_massmix, massmix_to_density
 from neural_transport.tools.obspack_helper import extract_obspack_locs_from_xarray
 from neural_transport.tools.xarray_helper import tensor_to_xarray
 
@@ -204,7 +206,7 @@ class CarbonDataset(Dataset):
             step_idx = t % n_samples_per_startdate
             if step_idx + 1 >= len(self.ds.step):
                 print("oh", step_idx, t, n_samples_per_startdate, len(self.ds.step))
-            startdate_slice = slice(startdate_idx, startdate_idx + 1)
+            slice(startdate_idx, startdate_idx + 1)
             step_slice = slice(
                 step_idx * self.n_timesteps, (step_idx + 1) * self.n_timesteps + 1
             )

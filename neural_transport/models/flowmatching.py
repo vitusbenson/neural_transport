@@ -47,18 +47,31 @@ class MaskedVelocityWrapper(VelocityWrapper):
         obs_mask=None,
         obs_values=None,
         dt=None,
+        ak=None,
         **generate_kwargs,
     ):
         super().__init__(submodel=submodel, nlev=nlev, static_inputs=static_inputs)
         self.obs_mask = obs_mask
         self.obs_values = obs_values
         self.dt = dt
+        self.ak = ak
 
         self.masking_time = generate_kwargs.get("masking_time", None)
         self.t_threshold = generate_kwargs.get("t_threshold", 0.9)
         self.masking_method = generate_kwargs.get("masking_method", "interpolate")
 
     def forward(self, x, t):
+        if self.masking_method == "simple":
+            x_masked = self.masking_simple(x)
+        elif self.masking_method == "interpolate":
+            x_masked = self.masking_interpolate(x, t)
+        elif self.masking_method == "preserve_global_mean":
+            x_masked = self.masking_preserve_global_mean(x)
+        elif self.masking_method == "preserve_global_mean_and_var":
+            x_masked = self.masking_preserve_global_mean_and_var(x)
+        elif self.masking_method == "total_column_average":
+            x_masked = self.masking_total_column_average(x, ak=self.ak)
+
         masking_time = self.masking_time
         t_threshold = self.t_threshold
         if masking_time == "smooth_late_masking":
@@ -71,17 +84,8 @@ class MaskedVelocityWrapper(VelocityWrapper):
             mask_weight = (t < t_threshold).float().view(-1, 1, 1, 1)
         else:
             mask_weight = 1.0
-
-        if self.masking_method == "simple":
-            x_masked = self.masking_simple(x)
-        elif self.masking_method == "interpolate":
-            x_masked = self.masking_interpolate(x, t)
-        elif self.masking_method == "preserve_global_mean":
-            x_masked = self.masking_preserve_global_mean(x)
-        elif self.masking_method == "preserve_global_mean_and_var":
-            x_masked = self.masking_preserve_global_mean_and_var(x)
-        
         x_effective = mask_weight * x_masked + (1.0 - mask_weight) * x
+
         # dxt = (x_effective - x)/dt + f(x_effective, t)
         dtx = (x_effective - x) / self.dt + super().forward(x_effective, t)
         # dxt = f(x,t)
@@ -193,6 +197,13 @@ class MaskedVelocityWrapper(VelocityWrapper):
         )
 
         return x_final
+    
+    def masking_total_column_average(self, x, ak=None):
+        if ak is None:
+            ak = torch.ones(x.shape, device=x.device)
+        x_averaged = (ak * x).sum(dim=1, keepdim=True)  # [B 1 Nlat Nlon]
+        x_masked = torch.where(self.obs_mask, self.obs_values.detach()/x_averaged.clamp(min=1e-12) * x, x)
+        return x_masked
 
 
 class FlowMatching(RegularGridModel):
@@ -237,10 +248,19 @@ class FlowMatching(RegularGridModel):
             if "obs_mask" in batch and "obs_values" in batch:
                 obs_mask = batch["obs_mask"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2) # [B C Nlat Nlon]
                 obs_values = batch["obs_values"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)
+                if "xco2_averaging_kernel" in batch: # Do I really want averaging kernel to go through preprocess_inputs or should it be before? But if not preprocessed, need to adjust shapes
+                    ak = batch["xco2_averaging_kernel"]
+                else:
+                    ak = None
             else:
                 obs_mask = None
                 obs_values = None
-            trajectory = self.inference_forward(x_in, x_init, obs_mask, obs_values, generate_kwargs=self.generate_kwargs)
+            trajectory = self.inference_forward(
+                x_in, x_init,
+                obs_mask, obs_values,
+                ak=ak,
+                generate_kwargs=self.generate_kwargs
+            )
             x_out = trajectory[-1,...]
             sol = self.postprocess_outputs(x_out, batch)
             T, B, C, Nlat, Nlon = trajectory.shape
@@ -302,6 +322,7 @@ class FlowMatching(RegularGridModel):
             obs_mask=None, obs_values=None,
             static_inputs=None,
             dt=None,
+            ak=None,
             generate_kwargs=None,
             ):
         if generate_kwargs is None:
@@ -315,6 +336,7 @@ class FlowMatching(RegularGridModel):
                 obs_mask=obs_mask,
                 obs_values=obs_values,
                 dt=dt,
+                ak=ak,
                 **generate_kwargs,
             )
         else:
@@ -329,6 +351,7 @@ class FlowMatching(RegularGridModel):
             self,
             x_in, x_init,
             obs_mask, obs_values,
+            ak=None,
             generate_kwargs=None
             ):
         if generate_kwargs is None:
@@ -352,6 +375,7 @@ class FlowMatching(RegularGridModel):
             obs_mask=obs_mask,
             obs_values=obs_values,
             dt=dt,
+            ak=ak,
             generate_kwargs=generate_kwargs,
             # static_inputs=x_in[:,:self.nlev*len(self.target_vars),:,:],  # [B C Nlat Nlon] (static inputs for conditioning later)
         )

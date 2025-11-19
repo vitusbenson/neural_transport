@@ -6,7 +6,9 @@ import torch
 import xarray as xr
 from cdo import Cdo
 
-from neural_transport.neural_transport.plots.plot_results import plot_noise_diagnostics, plot_masking_diagnostics
+from neural_transport.plots.plot_results import (
+    plot_noise_diagnostics, plot_masking_diagnostics
+)
 
 
 def get_zarrpath_obspath(out_path, rollout, freq, zarr_filename=None, zero_surfflux=False):
@@ -323,10 +325,6 @@ def iterative_generate(
             {k: dataset.tensor_to_xarray(pred) for k, pred in preds_fixed.items()}
         )
 
-        # ds = ds.assign_coords(
-        #     time=prototype_zarr.time[:traj.shape[1]],
-        #     sample=("sample", [i]),
-        # )
         ds = ds.assign_coords(
             time=("time", prototype_zarr.time[:traj.shape[1]].values if traj.ndim > 0 else [0]),
             sample=("sample", [i]),
