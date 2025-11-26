@@ -171,13 +171,15 @@ class CarbonDataset(Dataset):
 
         if load_obspack:
 
-            self.obspack_ds = (
-                xr.open_zarr(
-                    self.data_path.parent.parent / "Obspack" / f"obspack_{freq}.zarr"
-                )
-                .sel(time=ds.time, method="nearest")
-                .compute()
+            obspack_ds = xr.open_zarr(
+                self.data_path.parent.parent / "Obspack" / f"obspack_{freq}.zarr"
             )
+            obspack_time_min = obspack_ds.time.min().values
+            obspack_time_max = obspack_ds.time.max().values
+            ds_filtered = ds.sel(time=slice(obspack_time_min, obspack_time_max))
+            self.obspack_ds = obspack_ds.sel(
+                time=ds_filtered.time, method="nearest"
+            ).compute()
 
             self.obspack_ds["lat"] = self.obspack_ds.lat.interpolate_na(
                 dim="time", method="nearest", fill_value="extrapolate"

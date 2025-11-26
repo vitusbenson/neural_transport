@@ -197,7 +197,7 @@ class MaskedVelocityWrapper(VelocityWrapper):
         )
 
         return x_final
-    
+
     def masking_total_column_average(self, x, ak=None):
         if ak is None:
             ak = torch.ones(x.shape, device=x.device)
@@ -211,6 +211,7 @@ class FlowMatching(RegularGridModel):
             self,
             submodel="unet",
             model_kwargs={},
+            generating=False,
             return_intermediates=False,
             method='midpoint',
             nlev=1,
@@ -220,6 +221,7 @@ class FlowMatching(RegularGridModel):
         
         self.submodel = MODELS[submodel](**model_kwargs)
         self.return_intermediates = return_intermediates
+        self.generating = generating
         self.method = method
         self.nlev = nlev
         self.step_size = step_size
@@ -233,24 +235,27 @@ class FlowMatching(RegularGridModel):
         if self.training:
             x_out, dx_t = self.training_forward(batch)
             preds = self.postprocess_outputs(x_out, batch, denormalize=False)
-            preds["dx_t"] = dx_t.permute(0, 2, 3, 1).reshape(*preds[self.target_vars[0]].shape) # [B N C]
+            preds["dx_t"] = dx_t.permute(0, 2, 3, 1).reshape(*preds[self.target_vars[0]].shape)  # [B N C]
             return preds
-        elif self.return_intermediates:
+        elif self.generating:
             x_in = self.preprocess_inputs(batch)
             all_levels = x_in[:, :self.nlev*len(self.target_vars), :, :]  # [B C Nlat Nlon]
             # surface_level = x_in[:, :1, :, :]  # [B 1 Nlat Nlon]
             if "noise" in batch:
                 noise = batch["noise"]
                 B, N, C = noise.shape
-                x_init = noise.reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2) # [B C Nlat Nlon]
+                x_init = noise.reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)  # [B C Nlat Nlon]
             else:
                 x_init = torch.randn_like(all_levels, device=x_in.device)
             if "obs_mask" in batch and "obs_values" in batch:
-                obs_mask = batch["obs_mask"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2) # [B C Nlat Nlon]
-                obs_values = batch["obs_values"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)
-                if "xco2_averaging_kernel" in batch: # Do I really want averaging kernel to go through preprocess_inputs or should it be before? But if not preprocessed, need to adjust shapes
+                obs_mask = batch["obs_mask"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)  # [B C Nlat Nlon]
+                if "xco2_averaging_kernel" in batch:
+                    print("Using xco2_averaging_kernel for obs_values")
+                    obs_values = batch["obs_values"].reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2)  # [B C=1 Nlat Nlon]
                     ak = batch["xco2_averaging_kernel"]
                 else:
+                    print("Not using xco2_averaging_kernel for obs_values")
+                    obs_values = batch["obs_values"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)  # [B C Nlat Nlon]
                     ak = None
             else:
                 obs_mask = None
@@ -262,11 +267,12 @@ class FlowMatching(RegularGridModel):
                 generate_kwargs=self.generate_kwargs
             )
             x_out = trajectory[-1,...]
-            sol = self.postprocess_outputs(x_out, batch)
-            T, B, C, Nlat, Nlon = trajectory.shape
-            trajectory = trajectory.permute(0, 1, 3, 4, 2) # [T B Nlat Nlon C]
-            trajectory = trajectory.reshape(T, B, Nlat*Nlon, C) # [T B Nlat*Nlon C]
-            sol["trajectory"] = trajectory
+            if self.return_intermediates:
+                sol = self.postprocess_outputs(x_out, batch)
+                T, B, C, Nlat, Nlon = trajectory.shape
+                trajectory = trajectory.permute(0, 1, 3, 4, 2)  # [T B Nlat Nlon C]
+                trajectory = trajectory.reshape(T, B, Nlat*Nlon, C)  # [T B Nlat*Nlon C]
+                sol["trajectory"] = trajectory
             return sol
         else:
             return super().forward(batch)
@@ -326,7 +332,7 @@ class FlowMatching(RegularGridModel):
             generate_kwargs=None,
             ):
         if generate_kwargs is None:
-            generate_kwargs = {}
+            generate_kwargs = getattr(self, 'generate_kwargs', {})
 
         if obs_mask is not None and obs_values is not None:
             return MaskedVelocityWrapper(
@@ -386,5 +392,5 @@ class FlowMatching(RegularGridModel):
                             x_init=x_init, method=self.method,
                             step_size=self.step_size,
                             return_intermediates=self.return_intermediates
-        ) # [T B C Nlat Nlon]
+        )  # [T B C Nlat Nlon]
         return trajectory

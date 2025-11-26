@@ -9,7 +9,9 @@ import xarray as xr
 from neural_transport.datamodule import CarbonDataModule, CarbonDataset
 from neural_transport.inference.analyse import compute_local_scores, compute_score_df, compute_score_df_generate
 from neural_transport.inference.forecast import iterative_forecast
-from neural_transport.inference.generative import iterative_generate
+from neural_transport.inference.generative import (
+    iterative_generate, iterative_generate_oco2,
+)
 from neural_transport.plots.plot_results import (
     animate_predictions,
     plot_metrics,
@@ -199,20 +201,37 @@ def predict(
         print(f"Generating {ckptpath} {ckpt} CKPT")
         model = NeuralTransport.load_from_checkpoint(ckptpath, **lit_module_kwargs)
         outpath.mkdir(parents=True, exist_ok=True)
-        iterative_generate(
-            model,
-            dataset,
-            outpath,
-            rollout=(freq != "singlestep"),
-            device=device,
-            freq=freq,
-            zero_surfflux=zero_surfflux,
-            remap=("latlon" not in data_kwargs["grid"]),
-            target_vars_3d=["co2massmix"],
-            target_vars_2d=[],
-            save_obs=save_obs,
-            **generate_kwargs,
-        )
+        if generate_kwargs["pattern"] == "oco2":
+            iterative_generate_oco2(
+                model,
+                dataset,
+                outpath,
+                rollout=(freq != "singlestep"),
+                device=device,
+                verbose=True,
+                freq=freq,
+                zero_surfflux=zero_surfflux,
+                remap=("latlon" not in data_kwargs["grid"]),
+                target_vars_3d=[],
+                target_vars_2d=["xco2_2019_scale"],
+                save_obs=save_obs,
+                **generate_kwargs,
+            )
+        else:
+            iterative_generate(
+                model,
+                dataset,
+                outpath,
+                rollout=(freq != "singlestep"),
+                device=device,
+                freq=freq,
+                zero_surfflux=zero_surfflux,
+                remap=("latlon" not in data_kwargs["grid"]),
+                target_vars_3d=["co2massmix"],
+                target_vars_2d=[],
+                save_obs=save_obs,
+                **generate_kwargs,
+            )
     else:
         print(f"Forecasting {ckptpath} {ckpt} CKPT")
         model = NeuralTransport.load_from_checkpoint(ckptpath, **lit_module_kwargs)
@@ -427,6 +446,12 @@ def train_and_eval_singlestep(
         data_path_forecast
         / f"{data_kwargs['dataset']}_{data_kwargs['grid']}_{data_kwargs['vertical_levels']}_{data_kwargs['freq']}.zarr"
     )
+    ### !!! Caution: need to fix this properly!!!
+    target_path = (
+        Path("/Net/Groups/BGI/tscratch/vbenson/graph_tm/data/Carbontracker/train")
+        / f"carbontracker_{data_kwargs['grid']}_{data_kwargs['vertical_levels']}_{data_kwargs['freq']}.zarr")
+
+    ### !!!
     pred_path = (
         run_dir
         / "singlestep"

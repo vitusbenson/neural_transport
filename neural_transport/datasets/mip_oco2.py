@@ -610,23 +610,27 @@ def vertical_aggregation_oco2(ds: xr.Dataset, levels: list[list[int]]) -> xr.Dat
     if "level" not in ds.dims:
         raise ValueError("Dataset must contain 'level' dimension (20 levels)")
 
-    vertical_vars = [v for v in ds if "level" in ds[v].dims]
+    vertical_vars = [v for v in ds if "level" in ds[v].dims and v != "pressure_weight"]
     vertical_ds = ds[vertical_vars]
 
     aggregated_list = []
+    aggregated_weights = []
     for i, lvl in enumerate(levels):
+        pressure_weights = ds["pressure_weight"].isel(level=lvl)
         if len(lvl) > 1:
-            pressure_weights = ds["pressure_weight"].isel(level=lvl)
-            pressure_weights = pressure_weights / pressure_weights.sum("level")
+            pw_norm = pressure_weights / pressure_weights.sum("level")
 
-            ds_aggregated = (vertical_ds.isel(level=lvl) * pressure_weights).sum("level")
+            ds_aggregated = (vertical_ds.isel(level=lvl) * pw_norm).sum("level")
             ds_aggregated = ds_aggregated.assign_coords(dict(level=[i]))
+            pw_out = pressure_weights.sum("level")
         else:
             ds_aggregated = vertical_ds.isel(level=lvl).assign_coords(dict(level=[i]))
-        ds_aggregated = ds_aggregated.drop_vars("pressure_weight", errors="ignore")
+            pw_out = pressure_weights.assign_coords(dict(level=[i]))
         aggregated_list.append(ds_aggregated)
+        aggregated_weights.append(pw_out)
 
     ds_agg = xr.concat(aggregated_list, dim="level")
+    ds_agg["pressure_weight"] = xr.concat(aggregated_weights, dim="level")
 
     # Attach non-vertical variables
     for v in ds:
