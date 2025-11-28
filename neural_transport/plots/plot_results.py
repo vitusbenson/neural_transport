@@ -1032,6 +1032,7 @@ def plot_panel(ax, data, title, vmin=None, vmax=None, aspect_ratio=2.0, bold=Fal
 def plot_obs_mask_and_samples(
     batch,
     preds_var,
+    varname="co2massmix",
     nlat=32,
     nlon=64,
     max_samples=6,
@@ -1047,13 +1048,16 @@ def plot_obs_mask_and_samples(
 
     obs_values = batch["obs_values"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
     obs_mask = batch["obs_mask"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
-    target_vals = batch["co2massmix"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
+    target_vals = batch[varname][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
     masked_obs = np.where(obs_mask, obs_values, np.nan)
+    print(f"DEBUG: preds_var coords: {preds_var.coords}")
 
-    # Generated samples [sample, lat, lon, level]
+    # Generated samples [sample, lat, lon, level, (time)]
     samples = preds_var
     if "level" in samples.dims:
         samples = samples.isel(level=0)
+    if "time" in samples.dims:
+        samples = samples.isel(time=0)
     samples_np = samples.values  # shape: [sample, lat, lon]
     n_samples = min(samples_np.shape[0], max_samples)
 
@@ -1121,6 +1125,7 @@ def plot_masking_diagnostics(
         fig = plot_obs_mask_and_samples(
             batch,
             preds_var,
+            varname=varname,
             nlat=nlat,
             nlon=nlon,
             max_samples=6,

@@ -77,10 +77,6 @@ def generate_noise(batch, target_var="co2massmix", n_samples=10, noise=None):
     all_levels = batch[target_var] # [T N C]
     all_levels = all_levels.unsqueeze(0) # [B T N C]
 
-    ### !!! Caution: need to fix this properly by inserting target_vars_3d[0] in generate_noise!!!
-    if target_var == "xco2_2019_scale":
-        all_levels = all_levels.expand(-1, -1, -1, 10)
-
     if noise is None:
         return [torch.randn_like(all_levels) for _ in range(n_samples)]
 
@@ -243,6 +239,10 @@ def create_mask(batch, target_var="co2massmix", obs_fraction=0.1, pattern="rando
     return obs_mask, obs_values  # [B T N C] each
 
 
+def is_bad_sample(arr, thresh=1e6):
+        return np.isnan(arr).any() or np.isinf(arr).any() or np.nanmax(np.abs(arr)) > thresh
+
+
 def iterative_generate_oco2(
     model,
     dataset,
@@ -254,7 +254,7 @@ def iterative_generate_oco2(
     freq=None,
     zero_surfflux=False,
     remap=False,
-    target_vars_3d=[],
+    forcing_vars_3d=[],
     target_vars_2d=[],
     save_obs=True,
     **generate_kwargs,
@@ -271,7 +271,7 @@ def iterative_generate_oco2(
 
     prototype_zarr = dataset.create_prototype_zarr(
         zarrpath,
-        target_vars_3d=target_vars_3d,
+        target_vars_3d=forcing_vars_3d,
         target_vars_2d=target_vars_2d,
         grid="default" if remap else None,
     )
@@ -289,8 +289,10 @@ def iterative_generate_oco2(
         batch = {k: v.unsqueeze(0).to(device) for k, v in dataset[t].items()}
 
         # Noise
-        ### !!! target_var = target_vars_3d[0] but somehow there is only offset and scale for 3d vars
-        noise_list = generate_noise(dataset[t], target_var=target_vars_2d[0], n_samples=n_samples, noise=noise)
+        noise_list = generate_noise(dataset[t],
+                                    target_var=forcing_vars_3d[0],
+                                    n_samples=n_samples,
+                                    noise=noise)
         if analyze_noise and noise is not None:
             if noise in ["spiral_noise", "spiral_outward_noise"]:
                 angles = torch.linspace(0, 4*torch.pi, n_samples) # thetas
@@ -316,9 +318,9 @@ def iterative_generate_oco2(
         if masking:
             target_var = target_vars_2d[0]
             obs_mask, obs_values = create_oco2_mask(batch, target_var=target_var)
-            batch["obs_mask"] = obs_mask.expand(-1, -1, -1, 10)  # [B=1 T N C=10]
+            batch["obs_mask"] = obs_mask
             obs_values_normed = model.model.normalize_observations(obs_values, batch, target_var=target_var)
-            ### !!! normalization causes C=1 to increase to C=10. Do I want this?
+            batch["obs_mask"] = obs_mask.expand(-1, -1, -1, 10)  # [B=1 T N C=10]
             batch["obs_values"] = obs_values_normed
 
         for k in batch.keys():
@@ -353,11 +355,6 @@ def iterative_generate_oco2(
             sample=("sample", np.arange(n_samples)),
             time=("time", [prototype_zarr.isel(time=t).time.values]*n_samples),
         )
-
-        ### !!! Caution: need to fix this properly!!!
-        ds["co2massmix"] = ds["xco2_2019_scale"]
-        ds = ds.drop_vars("xco2_2019_scale")
-        ### !!!
         
         if remap:
             ds = remap_with_cdo(dataset, prototype_zarr.isel(time=0), ds)
@@ -370,9 +367,6 @@ def iterative_generate_oco2(
         dss.append(ds)
 
     ### !!! Caution: need to fix this properly!!!
-    def is_bad_sample(arr, thresh=1e6):
-        return np.isnan(arr).any() or np.isinf(arr).any() or np.nanmax(np.abs(arr)) > thresh
-
     good_dss = []
     for i, ds in enumerate(dss):
         # if is_bad_sample(ds[target_vars_2d[0]].values):
@@ -393,7 +387,7 @@ def iterative_generate_oco2(
     if analyze_masking and masking:
         plot_masking_diagnostics(batch, ds_all,
                                  str(outpath).replace("preds", "plots"),
-                                 varnames=target_vars_3d, nlat=nlat, nlon=nlon,
+                                 varnames=target_vars_2d, nlat=nlat, nlon=nlon,
                                  imgformats=["png"])
 
     return ds_all
@@ -525,9 +519,6 @@ def iterative_generate(
         dss.append(ds)
 
     ### !!! Caution: need to fix this properly!!!
-    def is_bad_sample(arr, thresh=1e6):
-        return np.isnan(arr).any() or np.isinf(arr).any() or np.nanmax(np.abs(arr)) > thresh
-
     good_dss = []
     for i, ds in enumerate(dss):
         if is_bad_sample(ds["co2massmix"].values):

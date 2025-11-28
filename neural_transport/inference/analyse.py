@@ -305,7 +305,7 @@ def compute_score_df(targs, preds, freq="QS"):
 
     return df
 
-def compute_score_df_generate(targs, preds, **generate_kwargs):
+def compute_score_df_generate(targs, preds, target_var="co2massmix", **generate_kwargs):
     """
     Compute metrics for generated samples where:
       - targs : xr.Dataset, [time, level, lat, lon]
@@ -323,12 +323,12 @@ def compute_score_df_generate(targs, preds, **generate_kwargs):
     # start = pytime.time()
 
     # Convert to mole fraction
-    molemix_targ = massmix_to_molemix(targs.co2massmix).transpose("level", "lat", "lon")
-    molemix_pred = massmix_to_molemix(preds.co2massmix).transpose("sample", "level", "lat", "lon")
+    molemix_targ = massmix_to_molemix(targs[target_var]).transpose("level", "lat", "lon")
+    molemix_pred = massmix_to_molemix(preds[target_var]).transpose("sample", "level", "lat", "lon")
 
     # Weights (cos(lat)) – no time dependence, just lat dimension
     weights = np.cos(np.deg2rad(targs.lat))
-    _, weights = xr.broadcast(targs.co2massmix, weights)
+    _, weights = xr.broadcast(targs[target_var], weights)
 
     # print(f"Data Loading {pytime.time() - start}")
 
@@ -344,11 +344,11 @@ def compute_score_df_generate(targs, preds, **generate_kwargs):
 
         # Mass balance metrics
         if "airmass" in targs and "airmass" in preds:
-            targ_mass = (targs.co2massmix * targs.airmass) / 1e6
-            pred_mass = (preds.co2massmix.isel(sample=i) * targs.airmass) / 1e6
+            targ_mass = (targs[target_var] * targs.airmass) / 1e6
+            pred_mass = (preds[target_var].isel(sample=i) * targs.airmass) / 1e6
         else:
-            targ_mass = targs.co2massmix
-            pred_mass = preds.co2massmix.isel(sample=i)
+            targ_mass = targs[target_var]
+            pred_mass = preds[target_var].isel(sample=i)
 
         targ_mass_sum = targ_mass.sum(["lat", "lon", "level"]).compute() / 3.664
         pred_mass_sum = pred_mass.sum(["lat", "lon", "level"]).compute() / 3.664

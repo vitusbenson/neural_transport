@@ -212,8 +212,8 @@ def predict(
                 freq=freq,
                 zero_surfflux=zero_surfflux,
                 remap=("latlon" not in data_kwargs["grid"]),
-                target_vars_3d=[],
-                target_vars_2d=["xco2_2019_scale"],
+                forcing_vars_3d=data_kwargs["forcing_vars"],
+                target_vars_2d=data_kwargs["target_vars"],
                 save_obs=save_obs,
                 **generate_kwargs,
             )
@@ -227,7 +227,7 @@ def predict(
                 freq=freq,
                 zero_surfflux=zero_surfflux,
                 remap=("latlon" not in data_kwargs["grid"]),
-                target_vars_3d=["co2massmix"],
+                target_vars_3d=data_kwargs["target_vars"],
                 target_vars_2d=[],
                 save_obs=save_obs,
                 **generate_kwargs,
@@ -245,7 +245,7 @@ def predict(
             verbose=True,
             freq=freq,
             remap=("latlon" not in data_kwargs["grid"]),
-            target_vars_3d=["co2massmix"],
+            target_vars_3d=data_kwargs["target_vars"],
             target_vars_2d=[],
             zero_surfflux=zero_surfflux,
         )
@@ -264,9 +264,12 @@ def load_pred_targ(target_path, pred_path):
     return co2targ, co2pred
 
 
-def score(target_path, pred_path,
-          obs_pred_path=None, freq="QS",
-          generate_kwargs=None):
+def score(target_path: str,
+          pred_path: str,
+          obs_pred_path: str | None = None,
+          freq: str | None = "QS",
+          target_var: str | None = "co2massmix",
+          generate_kwargs: dict | None = None) -> None:
     co2targ, co2pred = load_pred_targ(target_path, pred_path)
     co2pred = co2pred.isel(time=slice(1, None))
     co2targ = co2targ.isel(time=slice(1, None)).isel(time=slice(len(co2pred.time)))
@@ -278,7 +281,7 @@ def score(target_path, pred_path,
 
     metrics = {}
     if generate_kwargs:
-        df_full, df_global_scalars, maps = compute_score_df_generate(co2targ, co2pred, **generate_kwargs)
+        df_full, df_global_scalars, maps = compute_score_df_generate(co2targ, co2pred, target_var=target_var, **generate_kwargs)
         df_full.index = pd.MultiIndex.from_product(
             [[f"{model_name}_{singlestep_or_rollout}_{ckpt_name}"], df_full.index],
             names=["model", "sample"],
@@ -339,8 +342,9 @@ def plot(
     co2pred = co2pred.isel(time=slice(1, None))
     co2targ = co2targ.isel(time=slice(1, None))
     co2targ = co2targ.isel(time=slice(None, len(co2pred.time)))
-    co2pred["co2molemix"] = massmix_to_molemix(co2pred.co2massmix)
-    co2targ["co2molemix"] = massmix_to_molemix(co2targ.co2massmix)
+    co2massmix = data_kwargs['target_vars'][0]
+    co2pred["co2molemix"] = massmix_to_molemix(co2pred[co2massmix])
+    co2targ["co2molemix"] = massmix_to_molemix(co2targ[co2massmix])
 
     plot_path.mkdir(parents=True, exist_ok=True)
     if "metrics" in plot_types:
@@ -469,8 +473,12 @@ def train_and_eval_singlestep(
     if type(lit_module_kwargs['model']).__name__ == "FlowMatching" or lit_module_kwargs['model'] == "flowmatching":
         obs_pred_path = None
         plot_types += ["samples"]
+    
+    target_var = data_kwargs['target_vars'][0]
     score(target_path, pred_path,
-          obs_pred_path=obs_pred_path, freq=freq, generate_kwargs=generate_kwargs)
+          obs_pred_path=obs_pred_path,
+          freq=freq, target_var=target_var,
+          generate_kwargs=generate_kwargs)
     plot(
         target_path,
         pred_path,

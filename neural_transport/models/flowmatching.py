@@ -250,11 +250,9 @@ class FlowMatching(RegularGridModel):
             if "obs_mask" in batch and "obs_values" in batch:
                 obs_mask = batch["obs_mask"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)  # [B C Nlat Nlon]
                 if "xco2_averaging_kernel" in batch:
-                    print("Using xco2_averaging_kernel for obs_values")
                     obs_values = batch["obs_values"].reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2)  # [B C=1 Nlat Nlon]
-                    ak = batch["xco2_averaging_kernel"]
+                    ak = batch["xco2_averaging_kernel"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)  # [B C Nlat Nlon]
                 else:
-                    print("Not using xco2_averaging_kernel for obs_values")
                     obs_values = batch["obs_values"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)  # [B C Nlat Nlon]
                     ak = None
             else:
