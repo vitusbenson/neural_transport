@@ -164,7 +164,18 @@ def create_oco2_mask(batch, target_var="xco2_2019_scale"):
     """
     obs_mask = ~torch.isnan(batch[target_var])
     obs_values = batch[target_var].clone()
+    # obs_values = torch.where(obs_mask, obs_values, torch.zeros_like(obs_values))
     obs_values = molemix_to_massmix(obs_values)
+
+    # Handle xco2_averaging_kernel
+    ak = batch["xco2_averaging_kernel"].clone()  # [B, T, N, C=10]
+    n_levels = ak.shape[-1]
+    ak_mask = obs_mask.expand(-1, -1, -1, n_levels)  # [B, T, N, C=10]
+    valid_ak = ak[ak_mask]
+    mean_ak_per_level = valid_ak.reshape(-1, n_levels).mean(dim=0)  # [C=10]
+    mean_ak_full = mean_ak_per_level.view(1, 1, 1, -1).expand_as(ak)
+    ak_cleaned = torch.where(ak_mask, ak, mean_ak_full)
+    batch["xco2_averaging_kernel"] = ak_cleaned
 
     return obs_mask, obs_values  # [B T N C] each
 
@@ -318,10 +329,10 @@ def iterative_generate_oco2(
         if masking:
             target_var = target_vars_2d[0]
             obs_mask, obs_values = create_oco2_mask(batch, target_var=target_var)
+
             batch["obs_mask"] = obs_mask
-            obs_values_normed = model.model.normalize_observations(obs_values, batch, target_var=target_var)
-            batch["obs_mask"] = obs_mask.expand(-1, -1, -1, 10)  # [B=1 T N C=10]
-            batch["obs_values"] = obs_values_normed
+            obs_values_normed = model.model.normalize_observations(obs_values, batch, target_var=target_var, targshift=False)
+            batch["obs_values"] = obs_values_normed  # [B=1 T=1 N=2048 C=1]
 
         for k in batch.keys():
             batch[k] = batch[k].expand(n_samples, -1, -1, -1)  # [B=n_samples T N C]

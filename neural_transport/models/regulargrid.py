@@ -148,15 +148,22 @@ class RegularGridModel(nn.Module):
         return batch_normalized
     
 
-    def normalize_observations(self, obs_values, batch, target_var):
+    def normalize_observations(self, obs_values, batch, target_var, targshift=None):
         mean = batch[f"{target_var}_offset"]
         std = batch[f"{target_var}_scale"]
         
-        obs_norm = (obs_values - mean) / std
-        
-        if self.targshift:
-            obs_mask = batch["obs_mask"]
-            mask = obs_mask.bool()
+        obs_mask = batch["obs_mask"]
+        mask = obs_mask.bool()
+
+        obs_norm = torch.where(
+            mask,
+            (obs_values - mean) / std,
+            obs_values,
+        )
+
+        if targshift is None:
+            targshift = self.targshift
+        if targshift:
             # mean = torch.nanmean(obs_norm, dim=(1,2), keepdim=True)
             mean = ((batch[target_var] - mean) / std).mean((1, 2), keepdim=True)
             obs_norm = torch.where(mask, obs_norm - mean, obs_norm)

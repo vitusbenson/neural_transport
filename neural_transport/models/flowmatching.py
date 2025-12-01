@@ -48,6 +48,8 @@ class MaskedVelocityWrapper(VelocityWrapper):
         obs_values=None,
         dt=None,
         ak=None,
+        # xco2_prior=None,
+        # co2_profile_prior=None,
         **generate_kwargs,
     ):
         super().__init__(submodel=submodel, nlev=nlev, static_inputs=static_inputs)
@@ -55,6 +57,8 @@ class MaskedVelocityWrapper(VelocityWrapper):
         self.obs_values = obs_values
         self.dt = dt
         self.ak = ak
+        # self.xco2_prior = xco2_prior
+        # self.co2_profile_prior = co2_profile_prior
 
         self.masking_time = generate_kwargs.get("masking_time", None)
         self.t_threshold = generate_kwargs.get("t_threshold", 0.9)
@@ -70,7 +74,7 @@ class MaskedVelocityWrapper(VelocityWrapper):
         elif self.masking_method == "preserve_global_mean_and_var":
             x_masked = self.masking_preserve_global_mean_and_var(x)
         elif self.masking_method == "total_column_average":
-            x_masked = self.masking_total_column_average(x, ak=self.ak)
+            x_masked = self.masking_total_column_average(x, ak=self.ak) # xco2_prior=self.xco2_prior, co2_profile_prior=self.co2_profile_prior)
 
         masking_time = self.masking_time
         t_threshold = self.t_threshold
@@ -198,11 +202,58 @@ class MaskedVelocityWrapper(VelocityWrapper):
 
         return x_final
 
-    def masking_total_column_average(self, x, ak=None):
+    def masking_total_column_average_multiplicative(self, x, ak=None):
+        """
+        Constrain vertical profile using column-averaged observations (XCO2).
+        
+        Args:
+            x: [B, C, Nlat, Nlon] - the C-level CO2 field
+            ak: [B, C, Nlat, Nlon] - averaging kernel for each level
+        
+        obs_values is [B, 1, Nlat, Nlon] - XCO2 column observations
+        obs_mask is [B, 1, Nlat, Nlon] - spatial mask
+        We compute: x_averaged = sum(ak * x) over levels
+        Then scale each level: x_new = x * (obs_values / x_averaged)
+        """
         if ak is None:
             ak = torch.ones(x.shape, device=x.device)
         x_averaged = (ak * x).sum(dim=1, keepdim=True)  # [B 1 Nlat Nlon]
-        x_masked = torch.where(self.obs_mask, self.obs_values.detach()/x_averaged.clamp(min=1e-12) * x, x)
+        ### !!! Caution: this needs to be done in denormalized space !!!
+        scale_factor = (self.obs_values.detach() / x_averaged.clamp(min=1e-12))  # [B 1 Nlat Nlon]
+        x_masked = torch.where(
+            self.obs_mask,
+            scale_factor * x,
+            x
+        )
+        return x_masked
+    
+    def masking_total_column_average(self, x, ak=None):
+        """
+        Constrain vertical profile using column-averaged observations (XCO2).
+        
+        Args:
+            x: [B, C, Nlat, Nlon] - the C-level CO2 field
+            ak: [B, C, Nlat, Nlon] - averaging kernel for each level
+        
+        obs_values is [B, 1, Nlat, Nlon] - XCO2 column observations
+        obs_mask is [B, 1, Nlat, Nlon] - spatial mask
+        We compute: x_averaged = sum(ak * x) over levels
+        Then distribute correction: x_new = x + ak_normalized * (obs_values - x_averaged)
+        """      
+        if ak is None:
+            ak = torch.ones(x.shape, device=x.device)
+
+        x_averaged = (ak * x).sum(dim=1, keepdim=True)  # [B 1 Nlat Nlon]
+        correction = self.obs_values.detach() - x_averaged  # [B, 1, Nlat, Nlon]
+        ak_normalized = ak / ak.sum(dim=1, keepdim=True).clamp(min=1e-12)
+        distributed_correction = ak_normalized * correction  # [B, C=10, Nlat, Nlon]
+
+        x_masked = torch.where(
+            self.obs_mask,
+            x + distributed_correction,
+            x
+        )
+
         return x_masked
 
 
@@ -248,13 +299,18 @@ class FlowMatching(RegularGridModel):
             else:
                 x_init = torch.randn_like(all_levels, device=x_in.device)
             if "obs_mask" in batch and "obs_values" in batch:
-                obs_mask = batch["obs_mask"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)  # [B C Nlat Nlon]
                 if "xco2_averaging_kernel" in batch:
-                    obs_values = batch["obs_values"].reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2)  # [B C=1 Nlat Nlon]
+                    obs_mask = batch["obs_mask"].reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2)  # [B 1 Nlat Nlon]
+                    obs_values = batch["obs_values"].reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2)  # [B 1 Nlat Nlon]
                     ak = batch["xco2_averaging_kernel"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)  # [B C Nlat Nlon]
+                    # xco2_prior = batch["xco2_apriori"].reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2)
+                    # co2_profile_prior = batch["co2_profile_apriori"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)
                 else:
+                    obs_mask = batch["obs_mask"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)  # [B C Nlat Nlon]
                     obs_values = batch["obs_values"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)  # [B C Nlat Nlon]
                     ak = None
+                    # xco2_prior = None
+                    # co2_profile_prior = None
             else:
                 obs_mask = None
                 obs_values = None
@@ -262,6 +318,8 @@ class FlowMatching(RegularGridModel):
                 x_in, x_init,
                 obs_mask, obs_values,
                 ak=ak,
+                # xco2_prior=xco2_prior,
+                # co2_profile_prior=co2_profile_prior,
                 generate_kwargs=self.generate_kwargs
             )
             x_out = trajectory[-1,...]
@@ -327,6 +385,8 @@ class FlowMatching(RegularGridModel):
             static_inputs=None,
             dt=None,
             ak=None,
+            # xco2_prior=None,
+            # co2_profile_prior=None,
             generate_kwargs=None,
             ):
         if generate_kwargs is None:
@@ -341,6 +401,8 @@ class FlowMatching(RegularGridModel):
                 obs_values=obs_values,
                 dt=dt,
                 ak=ak,
+                # xco2_prior=xco2_prior,
+                # co2_profile_prior=co2_profile_prior,
                 **generate_kwargs,
             )
         else:
@@ -356,6 +418,8 @@ class FlowMatching(RegularGridModel):
             x_in, x_init,
             obs_mask, obs_values,
             ak=None,
+            # xco2_prior=None,
+            # co2_profile_prior=None,
             generate_kwargs=None
             ):
         if generate_kwargs is None:
@@ -380,6 +444,8 @@ class FlowMatching(RegularGridModel):
             obs_values=obs_values,
             dt=dt,
             ak=ak,
+            # xco2_prior=xco2_prior,
+            # co2_profile_prior=co2_profile_prior,
             generate_kwargs=generate_kwargs,
             # static_inputs=x_in[:,:self.nlev*len(self.target_vars),:,:],  # [B C Nlat Nlon] (static inputs for conditioning later)
         )
@@ -391,4 +457,7 @@ class FlowMatching(RegularGridModel):
                             step_size=self.step_size,
                             return_intermediates=self.return_intermediates
         )  # [T B C Nlat Nlon]
+
+        print(f"DEBUG inference: trajectory has NaN: {torch.isnan(trajectory).any()}")
+        print(f"DEBUG inference: trajectory[-1] stats: min={trajectory[-1].min()}, max={trajectory[-1].max()}")
         return trajectory
