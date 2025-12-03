@@ -41,30 +41,32 @@ class VelocityWrapper(nn.Module):
 class MaskedVelocityWrapper(VelocityWrapper):
     def __init__(
         self,
-        submodel,
-        nlev=1,
-        static_inputs=None,
-        obs_mask=None,
-        obs_values=None,
-        dt=None,
-        ak=None,
-        # xco2_prior=None,
-        # co2_profile_prior=None,
+        submodel: nn.Module,
+        masking_config: dict,
+        nlev: int = 1,
+        static_inputs: dict | None = None,
         **generate_kwargs,
     ):
         super().__init__(submodel=submodel, nlev=nlev, static_inputs=static_inputs)
-        self.obs_mask = obs_mask
-        self.obs_values = obs_values
-        self.dt = dt
-        self.ak = ak
-        # self.xco2_prior = xco2_prior
-        # self.co2_profile_prior = co2_profile_prior
+        self.obs_mask = masking_config.get("obs_mask", None)
+        self.obs_values = masking_config.get("obs_values", None)
+        self.obs_mean = masking_config.get("obs_mean", None)
+        self.obs_std = masking_config.get("obs_std", None)
+        self.target_mean = masking_config.get("target_mean", None)
+        self.target_std = masking_config.get("target_std", None)
+        self.ak = masking_config.get("ak", None)
+        self.xco2_prior = masking_config.get("xco2_prior", None)
+        self.co2_profile_prior = masking_config.get("co2_profile_prior", None)
+        self.dt = masking_config.get("dt", None)
 
         self.masking_time = generate_kwargs.get("masking_time", None)
         self.t_threshold = generate_kwargs.get("t_threshold", 0.9)
         self.masking_method = generate_kwargs.get("masking_method", "interpolate")
 
     def forward(self, x, t):
+        if torch.isnan(x).any():
+            print(f"\nDEBUG MaskedVelocityWrapper.forward: INPUT x has NaN at t={t}")
+            print(f"  x NaN count: {torch.isnan(x).sum()}")
         if self.masking_method == "simple":
             x_masked = self.masking_simple(x)
         elif self.masking_method == "interpolate":
@@ -74,8 +76,12 @@ class MaskedVelocityWrapper(VelocityWrapper):
         elif self.masking_method == "preserve_global_mean_and_var":
             x_masked = self.masking_preserve_global_mean_and_var(x)
         elif self.masking_method == "total_column_average":
-            x_masked = self.masking_total_column_average(x, ak=self.ak) # xco2_prior=self.xco2_prior, co2_profile_prior=self.co2_profile_prior)
+            x_masked = self.masking_total_column_average(x)
 
+        if torch.isnan(x_masked).any():
+            print(f"\nDEBUG MaskedVelocityWrapper.forward: x_masked has NaN at t={t}")
+            print(f"  x_masked NaN count: {torch.isnan(x_masked).sum()}")
+            print(f"  masking_method: {self.masking_method}")
         masking_time = self.masking_time
         t_threshold = self.t_threshold
         if masking_time == "smooth_late_masking":
@@ -94,6 +100,11 @@ class MaskedVelocityWrapper(VelocityWrapper):
         dtx = (x_effective - x) / self.dt + super().forward(x_effective, t)
         # dxt = f(x,t)
         # dxt = torch.where(self.obs_mask, self.obs_values - x, super().forward(x, t))
+        if torch.isnan(dtx).any():
+            print(f"\nDEBUG MaskedVelocityWrapper.forward: OUTPUT dtx has NaN at t={t}")
+            print(f"  dtx NaN count: {torch.isnan(dtx).sum()}")
+            print(f"  (x_effective - x)/dt stats: min={(x_effective - x).min()/self.dt:.6f}, max={(x_effective - x).max()/self.dt:.6f}")
+    
         return dtx
 
     def masking_simple(self, x):
@@ -202,38 +213,70 @@ class MaskedVelocityWrapper(VelocityWrapper):
 
         return x_final
 
-    def masking_total_column_average_multiplicative(self, x, ak=None):
+    def masking_total_column_average(self, x):
         """
         Constrain vertical profile using column-averaged observations (XCO2).
         
         Args:
             x: [B, C, Nlat, Nlon] - the C-level CO2 field
-            ak: [B, C, Nlat, Nlon] - averaging kernel for each level
-        
-        obs_values is [B, 1, Nlat, Nlon] - XCO2 column observations
-        obs_mask is [B, 1, Nlat, Nlon] - spatial mask
+
+        ak: [B, C, Nlat, Nlon] - averaging kernel for each level
+        xco2_prior: [B, 1, Nlat, Nlon] - prior XCO2 column observations
+        co2_profile_prior: [B, C, Nlat, Nlon] - prior CO2 profile
+        obs_values: [B, 1, Nlat, Nlon] - XCO2 column observations
+        obs_mask: [B, 1, Nlat, Nlon] - spatial mask
         We compute: x_averaged = sum(ak * x) over levels
         Then scale each level: x_new = x * (obs_values / x_averaged)
         """
-        if ak is None:
-            ak = torch.ones(x.shape, device=x.device)
-        x_averaged = (ak * x).sum(dim=1, keepdim=True)  # [B 1 Nlat Nlon]
-        ### !!! Caution: this needs to be done in denormalized space !!!
-        scale_factor = (self.obs_values.detach() / x_averaged.clamp(min=1e-12))  # [B 1 Nlat Nlon]
+        print("\nDEBUG masking_total_column_average START:")
+        print(f"  x shape: {x.shape}, has NaN: {torch.isnan(x).any()}")
+        if self.ak is None:
+            self.ak = torch.ones(x.shape, device=x.device)
+        x_physical = x * self.target_std + self.target_mean
+        print(f"  x_physical has NaN: {torch.isnan(x_physical).any()}")
+        if torch.isnan(x_physical).any():
+            print(f"    target_std has NaN: {torch.isnan(self.target_std).any()}")
+            print(f"    target_mean has NaN: {torch.isnan(self.target_mean).any()}")
+        x_averaged_physical = self.xco2_prior + (self.ak * (x_physical - self.co2_profile_prior)).sum(dim=1, keepdim=True)  # [B 1 Nlat Nlon]
+        print("  Using prior correction")
+        print(f"    xco2_prior has NaN: {torch.isnan(self.xco2_prior).any()}")
+        print(f"    co2_profile_prior has NaN: {torch.isnan(self.co2_profile_prior).any()}")
+        print(f"  x_averaged_physical has NaN: {torch.isnan(x_averaged_physical).any()}")
+        valid = x_averaged_physical[~torch.isnan(x_averaged_physical)]
+        if valid.numel() > 0:
+            print(f"    stats: min={valid.min():.6f}, max={valid.max():.6f}")
+        obs_physical = self.obs_values * self.obs_std + self.obs_mean
+        print(f"  obs_physical has NaN: {torch.isnan(obs_physical).any()}")
+        if torch.isnan(obs_physical).any():
+            print(f"    obs_values has NaN: {torch.isnan(self.obs_values).any()}")
+            print(f"    obs_std has NaN: {torch.isnan(self.obs_std).any()}")
+            print(f"    obs_mean has NaN: {torch.isnan(self.obs_mean).any()}")
+        scale_factor = (obs_physical.detach() / x_averaged_physical.clamp(min=1e-12))  # [B 1 Nlat Nlon]
+        print(f"  scale_factor has NaN: {torch.isnan(scale_factor).any()}")
+        if not torch.isnan(scale_factor).any():
+            valid_sf = scale_factor[self.obs_mask]
+            if valid_sf.numel() > 0:
+                print(f"    scale_factor[obs_mask] stats: min={valid_sf.min():.6f}, max={valid_sf.max():.6f}")
+        x_scaled_physical = scale_factor * x_physical  # [B C Nlat Nlon]
+        x_scaled = (x_scaled_physical - self.target_mean) / self.target_std
+
         x_masked = torch.where(
             self.obs_mask,
-            scale_factor * x,
+            x_scaled,
             x
         )
+        print(f"  x_masked (final) has NaN: {torch.isnan(x_masked).any()}")
         return x_masked
     
-    def masking_total_column_average(self, x, ak=None):
+    def masking_total_column_average_additive(self, x, ak=None, xco2_prior=None, co2_profile_prior=None):
         """
         Constrain vertical profile using column-averaged observations (XCO2).
         
         Args:
             x: [B, C, Nlat, Nlon] - the C-level CO2 field
             ak: [B, C, Nlat, Nlon] - averaging kernel for each level
+            xco2_prior: [B, 1, Nlat, Nlon] - prior XCO2 column observations
+            co2_profile_prior: [B, C, Nlat, Nlon] - prior CO2 profile
         
         obs_values is [B, 1, Nlat, Nlon] - XCO2 column observations
         obs_mask is [B, 1, Nlat, Nlon] - spatial mask
@@ -299,27 +342,13 @@ class FlowMatching(RegularGridModel):
             else:
                 x_init = torch.randn_like(all_levels, device=x_in.device)
             if "obs_mask" in batch and "obs_values" in batch:
-                if "xco2_averaging_kernel" in batch:
-                    obs_mask = batch["obs_mask"].reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2)  # [B 1 Nlat Nlon]
-                    obs_values = batch["obs_values"].reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2)  # [B 1 Nlat Nlon]
-                    ak = batch["xco2_averaging_kernel"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)  # [B C Nlat Nlon]
-                    # xco2_prior = batch["xco2_apriori"].reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2)
-                    # co2_profile_prior = batch["co2_profile_apriori"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)
-                else:
-                    obs_mask = batch["obs_mask"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)  # [B C Nlat Nlon]
-                    obs_values = batch["obs_values"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)  # [B C Nlat Nlon]
-                    ak = None
-                    # xco2_prior = None
-                    # co2_profile_prior = None
+                obs_var = self.generate_kwargs.get("obs_var", None)
+                masking_config = self.prepare_masking_config(batch, B, C, obs_var)
             else:
-                obs_mask = None
-                obs_values = None
+                masking_config = {}
             trajectory = self.inference_forward(
                 x_in, x_init,
-                obs_mask, obs_values,
-                ak=ak,
-                # xco2_prior=xco2_prior,
-                # co2_profile_prior=co2_profile_prior,
+                masking_config=masking_config,
                 generate_kwargs=self.generate_kwargs
             )
             x_out = trajectory[-1,...]
@@ -379,30 +408,57 @@ class FlowMatching(RegularGridModel):
 
         return x_out, dx_t #, x_1_normalized # return {self.target_vars[0]: x_out}
 
+    def prepare_masking_config(self, batch, B, C, obs_var):
+        obs_mask = batch["obs_mask"].reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2)
+        obs_values = batch["obs_values"].reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2)
+        if "xco2_averaging_kernel" in batch:
+            ak = batch["xco2_averaging_kernel"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)
+            xco2_prior = batch["xco2_apriori"].reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2)
+            co2_profile_prior = batch["co2_profile_apriori"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)
+        else:
+            ak = None
+            xco2_prior = None
+            co2_profile_prior = None
+
+        obs_mean = batch[f"{obs_var}_offset"].view(B, 1, 1, 1)
+        obs_std = batch[f"{obs_var}_scale"].view(B, 1, 1, 1)
+        target_mean = batch[f"{self.target_vars[0]}_offset"].view(B, 1, 1, 1)
+        target_std = batch[f"{self.target_vars[0]}_scale"].view(B, 1, 1, 1)
+
+        masking_config = {
+            "obs_mask": obs_mask,        # [B 1 Nlat Nlon]
+            "obs_values": obs_values,    # [B 1 Nlat Nlon]
+            "obs_mean": obs_mean,        # [B 1 1 1]
+            "obs_std": obs_std,          # [B 1 1 1]
+            "target_mean": target_mean,  # [B 1 1 1]
+            "target_std": target_std,    # [B 1 1 1]
+            "ak": ak,                    # [B C Nlat Nlon]
+            "xco2_prior": xco2_prior,
+            "co2_profile_prior": co2_profile_prior,
+        }        
+        return masking_config
+
     def return_velocity_wrapper(
-            self, submodel,
-            obs_mask=None, obs_values=None,
+            self,
+            submodel,
             static_inputs=None,
-            dt=None,
-            ak=None,
-            # xco2_prior=None,
-            # co2_profile_prior=None,
+            masking_config=None,
             generate_kwargs=None,
             ):
+        if masking_config is None:
+            masking_config = getattr(self, 'masking_config', {})
+        obs_mask = masking_config.get("obs_mask", None)
+        obs_values = masking_config.get("obs_values", None)
+
         if generate_kwargs is None:
             generate_kwargs = getattr(self, 'generate_kwargs', {})
 
         if obs_mask is not None and obs_values is not None:
             return MaskedVelocityWrapper(
                 submodel=submodel,
+                masking_config=masking_config,
                 nlev=self.nlev,
                 static_inputs=static_inputs,
-                obs_mask=obs_mask,
-                obs_values=obs_values,
-                dt=dt,
-                ak=ak,
-                # xco2_prior=xco2_prior,
-                # co2_profile_prior=co2_profile_prior,
                 **generate_kwargs,
             )
         else:
@@ -416,10 +472,7 @@ class FlowMatching(RegularGridModel):
     def inference_forward(
             self,
             x_in, x_init,
-            obs_mask, obs_values,
-            ak=None,
-            # xco2_prior=None,
-            # co2_profile_prior=None,
+            masking_config=None,
             generate_kwargs=None
             ):
         if generate_kwargs is None:
@@ -435,17 +488,13 @@ class FlowMatching(RegularGridModel):
         else:
             time_grid = torch.linspace(0, 1, steps=10, device=x_init.device) 
         dt = (time_grid[-1] - time_grid[0]) / (len(time_grid) - 1)
+        masking_config["dt"] = dt
 
         # UNet expects normalization parameters
         velocity_model = self.return_velocity_wrapper(
             submodel=self.submodel,
             static_inputs=None,
-            obs_mask=obs_mask,
-            obs_values=obs_values,
-            dt=dt,
-            ak=ak,
-            # xco2_prior=xco2_prior,
-            # co2_profile_prior=co2_profile_prior,
+            masking_config=masking_config,
             generate_kwargs=generate_kwargs,
             # static_inputs=x_in[:,:self.nlev*len(self.target_vars),:,:],  # [B C Nlat Nlon] (static inputs for conditioning later)
         )

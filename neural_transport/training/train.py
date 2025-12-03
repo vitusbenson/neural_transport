@@ -475,6 +475,9 @@ def train_and_eval_singlestep(
         plot_types += ["samples"]
     
     target_var = data_kwargs['target_vars'][0]
+    ### !!! Caution: need to fix this properly!!!
+    target_var = "co2massmix"
+    ### !!!
     score(target_path, pred_path,
           obs_pred_path=obs_pred_path,
           freq=freq, target_var=target_var,
