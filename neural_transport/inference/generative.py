@@ -72,15 +72,15 @@ def remap_with_cdo(dataset, prototype_zarr, ds):
     return ds_remap
 
 
-def generate_noise(batch, target_var="co2massmix", n_samples=10, noise=None):
+def generate_noise(batch, target_var="co2massmix", n_samples=10, noise_pattern=None):
 
     all_levels = batch[target_var] # [T N C]
     all_levels = all_levels.unsqueeze(0) # [B T N C]
 
-    if noise is None:
+    if noise_pattern is None:
         return [torch.randn_like(all_levels) for _ in range(n_samples)]
 
-    elif noise == "spiral_outward_noise":
+    elif noise_pattern == "spiral_outward_noise":
         # Step 1: pick a reference noise vector
         x0 = torch.randn_like(all_levels)
         # Step 2: pick a direction vector (independent random noise)
@@ -98,7 +98,7 @@ def generate_noise(batch, target_var="co2massmix", n_samples=10, noise=None):
             spiral_noises.append(x_init_scaled)
         return spiral_noises
 
-    elif noise == "spiral_noise":
+    elif noise_pattern == "spiral_noise":
         x0 = torch.randn_like(all_levels)
         v = torch.randn_like(all_levels)
         angles = torch.linspace(0, 4*torch.pi, n_samples)
@@ -109,19 +109,19 @@ def generate_noise(batch, target_var="co2massmix", n_samples=10, noise=None):
             spiral_noises.append(x_init)
         return spiral_noises
 
-    elif noise == "geodesic_noise":
+    elif noise_pattern == "geodesic_noise":
         x0 = torch.randn_like(all_levels)
         v = torch.randn_like(all_levels)
         alphas = torch.linspace(0, 1, n_samples)
         return [torch.sqrt((1 - alpha)) * x0 + torch.sqrt(alpha) * v for alpha in alphas]
 
-    elif noise == "linear_noise":
+    elif noise_pattern == "linear_noise":
         x0 = torch.randn_like(all_levels)
         v = torch.randn_like(all_levels)
         alphas = torch.linspace(0, 1, n_samples)
         return [(1 - alpha) * x0 + alpha * v for alpha in alphas]
 
-    elif noise == "antipodal_orthogonal_noise":
+    elif noise_pattern == "antipodal_orthogonal_noise":
         x0 = torch.randn_like(all_levels)
         n_dirs = n_samples // 2  # each direction will yield a +v and -v pair
         # Start with random Gaussian directions
@@ -147,7 +147,38 @@ def generate_noise(batch, target_var="co2massmix", n_samples=10, noise=None):
         return all_noises[:n_samples]
 
     else:
-        raise ValueError(f"Unknown noise type: {noise}")
+        raise ValueError(f"Unknown noise type: {noise_pattern}")
+
+
+def noise(batch: dict,
+          target_var: str | None = "co2massmix",
+          n_samples: int | None = 10,
+          noise_pattern: str | None = None,
+          analyze_noise: bool = False,
+          outpath: Path | str = None,
+) -> list:
+    noise_list = generate_noise(batch, target_var=target_var, n_samples=n_samples, noise_pattern=noise_pattern)
+    if analyze_noise and noise_pattern is not None:
+            if noise_pattern in ["spiral_noise", "spiral_outward_noise"]:
+                angles = torch.linspace(0, 4*torch.pi, n_samples) # thetas
+                param_name = "$\\theta$"
+            elif noise_pattern in ["geodesic_noise", "linear_noise"]:
+                angles = torch.linspace(0, 1, n_samples)  # alphas
+                param_name = "$\\alpha$"
+            elif noise_pattern == "antipodal_orthogonal_noise":
+                labels = []
+                for i in range(n_samples // 2):
+                    labels += [f"{i+1}a", f"{i+1}b"]
+                if n_samples % 2 == 1:
+                    labels.append(f"{(n_samples // 2) + 1}a")
+                angles = labels
+                param_name = "Index pair"
+            else:
+                angles = torch.arange(n_samples)  # index
+                param_name = "Index"
+            plot_noise_diagnostics(noise_list, angles, str(outpath).replace("preds", "plots"),
+                                   label=param_name, imgformats=["png"])
+    return noise_list
 
 
 def create_oco2_mask(batch, target_var="xco2_2019_scale"):
@@ -257,6 +288,7 @@ def is_bad_sample(arr, thresh=1e6):
 def iterative_generate_oco2(
     model,
     dataset,
+    dataset_gen,
     outpath,
     rollout=False,
     device="cuda",
@@ -265,7 +297,7 @@ def iterative_generate_oco2(
     freq=None,
     zero_surfflux=False,
     remap=False,
-    forcing_vars_3d=[],
+    target_vars_3d=[],
     target_vars_2d=[],
     save_obs=True,
     **generate_kwargs,
@@ -273,7 +305,7 @@ def iterative_generate_oco2(
     n_samples = generate_kwargs.get("n_samples", 10)
     masking = generate_kwargs.get("masking", True)
     analyze_masking = generate_kwargs.get("analyze_masking", False)
-    noise = generate_kwargs.get("noise", None)
+    noise_pattern = generate_kwargs.get("noise_pattern", None)
     analyze_noise = generate_kwargs.get("analyze_noise", False)
 
     nlat, nlon = model.model.in_nlat, model.model.in_nlon
@@ -282,7 +314,7 @@ def iterative_generate_oco2(
 
     prototype_zarr = dataset.create_prototype_zarr(
         zarrpath,
-        target_vars_3d=forcing_vars_3d,
+        target_vars_3d=target_vars_3d,
         target_vars_2d=target_vars_2d,
         grid="default" if remap else None,
     )
@@ -293,51 +325,33 @@ def iterative_generate_oco2(
 
     dss = []
     obss = []
-    T = len(dataset)
-    T = 5 # for testing
+    T = len(dataset_gen)
+    T = 5 # for testing (T = len(dataset) and then take overlap)
 
     for t in tqdm(range(T), desc="Timestep") if verbose else range(T):
+        batch_gen = {k: v.unsqueeze(0).to(device) for k, v in dataset_gen[t].items()}
         batch = {k: v.unsqueeze(0).to(device) for k, v in dataset[t].items()}
 
         # Noise
-        noise_list = generate_noise(dataset[t],
-                                    target_var=forcing_vars_3d[0],
-                                    n_samples=n_samples,
-                                    noise=noise)
-        if analyze_noise and noise is not None:
-            if noise in ["spiral_noise", "spiral_outward_noise"]:
-                angles = torch.linspace(0, 4*torch.pi, n_samples) # thetas
-                param_name = "$\\theta$"
-            elif noise in ["geodesic_noise", "linear_noise"]:
-                angles = torch.linspace(0, 1, n_samples)  # alphas
-                param_name = "$\\alpha$"
-            elif noise == "antipodal_orthogonal_noise":
-                labels = []
-                for i in range(n_samples // 2):
-                    labels += [f"{i+1}a", f"{i+1}b"]
-                if n_samples % 2 == 1:
-                    labels.append(f"{(n_samples // 2) + 1}a")
-                angles = labels
-                param_name = "Index pair"
-            else:
-                angles = torch.arange(n_samples)  # index
-                param_name = "Index"
-            plot_noise_diagnostics(noise_list, angles, str(outpath).replace("preds", "plots"),
-                                   label=param_name, imgformats=["png"])
+        noise_list = noise(dataset_gen[t],
+                           target_var=generate_kwargs["generate_data_kwargs"]["forcing_vars"][0],n_samples=n_samples,
+                           noise_pattern=noise_pattern,
+                           analyze_noise=analyze_noise,
+                           outpath=outpath)
 
         # Masking
         if masking:
             target_var = target_vars_2d[0]
-            obs_mask, obs_values = create_oco2_mask(batch, target_var=target_var)
-
-            batch["obs_mask"] = obs_mask
-            obs_values_normed = model.model.normalize_observations(obs_values, batch, target_var=target_var, targshift=False)
+            obs_mask, obs_values = create_oco2_mask(batch_gen, target_var=target_var)
+            batch_gen["obs_mask"] = obs_mask
+            obs_values_normed = model.model.normalize_observations(obs_values, batch_gen, target_var=target_var, targshift=False)
+            for k in target_vars_2d + generate_kwargs["generate_data_kwargs"]["forcing_vars"] + ["obs_mask"]:
+                batch[k] = batch_gen[k]
             batch["obs_values"] = obs_values_normed  # [B=1 T=1 N=2048 C=1]
 
         for k in batch.keys():
             batch[k] = batch[k].expand(n_samples, -1, -1, -1)  # [B=n_samples T N C]
         batch["noise"] = torch.cat(noise_list, dim=0).to(device)  # [B=n_samples T N C]
-
         if zero_surfflux:
             for var in ["co2flux_anthro", "co2flux_land", "co2flux_ocean"]:
                 batch[var] = torch.zeros_like(batch[var])
@@ -398,7 +412,7 @@ def iterative_generate_oco2(
     if analyze_masking and masking:
         plot_masking_diagnostics(batch, ds_all,
                                  str(outpath).replace("preds", "plots"),
-                                 varnames=target_vars_2d, nlat=nlat, nlon=nlon,
+                                 varnames=target_vars_3d, nlat=nlat, nlon=nlon,
                                  imgformats=["png"])
 
     return ds_all
@@ -424,7 +438,7 @@ def iterative_generate(
     pattern = generate_kwargs.get("pattern", "vertical")
     analyze_masking = generate_kwargs.get("analyze_masking", False)
     obs_fraction = generate_kwargs.get("obs_fraction", 0.2)
-    noise = generate_kwargs.get("noise", None)
+    noise_pattern = generate_kwargs.get("noise_pattern", None)
     analyze_noise = generate_kwargs.get("analyze_noise", False)
 
     nlat, nlon = model.model.in_nlat, model.model.in_nlon
@@ -445,27 +459,12 @@ def iterative_generate(
     obss = []
 
     # Noise
-    noise_list = generate_noise(dataset[0], target_var=target_vars_3d[0], n_samples=n_samples, noise=noise)
-    if analyze_noise and noise is not None:
-        if noise in ["spiral_noise", "spiral_outward_noise"]:
-            angles = torch.linspace(0, 4*torch.pi, n_samples) # thetas
-            param_name = "$\\theta$"
-        elif noise in ["geodesic_noise", "linear_noise"]:
-            angles = torch.linspace(0, 1, n_samples)  # alphas
-            param_name = "$\\alpha$"
-        elif noise == "antipodal_orthogonal_noise":
-            labels = []
-            for i in range(n_samples // 2):
-                labels += [f"{i+1}a", f"{i+1}b"]
-            if n_samples % 2 == 1:
-                labels.append(f"{(n_samples // 2) + 1}a")
-            angles = labels
-            param_name = "Index pair"
-        else:
-            angles = torch.arange(n_samples)  # index
-            param_name = "Index"
-        plot_noise_diagnostics(noise_list, angles, str(outpath).replace("preds", "plots"),
-                               label=param_name, imgformats=["png"])
+    noise_list = noise(dataset[0],
+                       target_var=target_vars_3d[0],
+                       n_samples=n_samples,
+                       noise_pattern=noise_pattern,
+                       analyze_noise=analyze_noise,
+                       outpath=outpath)
 
     base_batch = {k: v.unsqueeze(0).to(device) for k, v in dataset[0].items()} # condition on the first timestep
 

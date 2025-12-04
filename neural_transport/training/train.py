@@ -202,9 +202,11 @@ def predict(
         model = NeuralTransport.load_from_checkpoint(ckptpath, **lit_module_kwargs)
         outpath.mkdir(parents=True, exist_ok=True)
         if generate_kwargs["pattern"] == "oco2":
+            dataset_gen = load_dataset(generate_kwargs["data_path_generate"], generate_kwargs["generate_data_kwargs"])
             iterative_generate_oco2(
                 model,
                 dataset,
+                dataset_gen,
                 outpath,
                 rollout=(freq != "singlestep"),
                 device=device,
@@ -212,8 +214,8 @@ def predict(
                 freq=freq,
                 zero_surfflux=zero_surfflux,
                 remap=("latlon" not in data_kwargs["grid"]),
-                forcing_vars_3d=data_kwargs["forcing_vars"],
-                target_vars_2d=data_kwargs["target_vars"],
+                target_vars_3d=data_kwargs["target_vars"],
+                target_vars_2d=generate_kwargs["generate_data_kwargs"]["target_vars"],
                 save_obs=save_obs,
                 **generate_kwargs,
             )
@@ -452,7 +454,7 @@ def train_and_eval_singlestep(
     )
     # ### !!! Caution: need to fix this properly!!!
     # target_path = (
-    #     Path("/Net/Groups/BGI/tscratch/vbenson/graph_tm/data/Carbontracker/train")
+    #     Path("/Net/Groups/BGI/tscratch/vbenson/graph_tm/data/Carbontracker/test/")
     #     / f"carbontracker_{data_kwargs['grid']}_{data_kwargs['vertical_levels']}_{data_kwargs['freq']}.zarr")
 
     # ### !!!
