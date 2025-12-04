@@ -450,12 +450,12 @@ def train_and_eval_singlestep(
         data_path_forecast
         / f"{data_kwargs['dataset']}_{data_kwargs['grid']}_{data_kwargs['vertical_levels']}_{data_kwargs['freq']}.zarr"
     )
-    ### !!! Caution: need to fix this properly!!!
-    target_path = (
-        Path("/Net/Groups/BGI/tscratch/vbenson/graph_tm/data/Carbontracker/train")
-        / f"carbontracker_{data_kwargs['grid']}_{data_kwargs['vertical_levels']}_{data_kwargs['freq']}.zarr")
+    # ### !!! Caution: need to fix this properly!!!
+    # target_path = (
+    #     Path("/Net/Groups/BGI/tscratch/vbenson/graph_tm/data/Carbontracker/train")
+    #     / f"carbontracker_{data_kwargs['grid']}_{data_kwargs['vertical_levels']}_{data_kwargs['freq']}.zarr")
 
-    ### !!!
+    # ### !!!
     pred_path = (
         run_dir
         / "singlestep"
@@ -475,9 +475,9 @@ def train_and_eval_singlestep(
         plot_types += ["samples"]
     
     target_var = data_kwargs['target_vars'][0]
-    ### !!! Caution: need to fix this properly!!!
-    target_var = "co2massmix"
-    ### !!!
+    # ### !!! Caution: need to fix this properly!!!
+    # target_var = "co2massmix"
+    # ### !!!
     score(target_path, pred_path,
           obs_pred_path=obs_pred_path,
           freq=freq, target_var=target_var,

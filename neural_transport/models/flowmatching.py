@@ -213,7 +213,7 @@ class MaskedVelocityWrapper(VelocityWrapper):
 
         return x_final
 
-    def masking_total_column_average(self, x):
+    def masking_total_column_average_multiplicative(self, x):
         """
         Constrain vertical profile using column-averaged observations (XCO2).
         
@@ -225,7 +225,7 @@ class MaskedVelocityWrapper(VelocityWrapper):
         co2_profile_prior: [B, C, Nlat, Nlon] - prior CO2 profile
         obs_values: [B, 1, Nlat, Nlon] - XCO2 column observations
         obs_mask: [B, 1, Nlat, Nlon] - spatial mask
-        We compute: x_averaged = sum(ak * x) over levels
+        We compute: x_averaged = xco2_prior + sum(ak * (x - co2_profile_prior)) over levels
         Then scale each level: x_new = x * (obs_values / x_averaged)
         """
         print("\nDEBUG masking_total_column_average START:")
@@ -268,28 +268,21 @@ class MaskedVelocityWrapper(VelocityWrapper):
         print(f"  x_masked (final) has NaN: {torch.isnan(x_masked).any()}")
         return x_masked
     
-    def masking_total_column_average_additive(self, x, ak=None, xco2_prior=None, co2_profile_prior=None):
+    def masking_total_column_average(self, x):
         """
         Constrain vertical profile using column-averaged observations (XCO2).
         
         Args:
             x: [B, C, Nlat, Nlon] - the C-level CO2 field
-            ak: [B, C, Nlat, Nlon] - averaging kernel for each level
-            xco2_prior: [B, 1, Nlat, Nlon] - prior XCO2 column observations
-            co2_profile_prior: [B, C, Nlat, Nlon] - prior CO2 profile
-        
-        obs_values is [B, 1, Nlat, Nlon] - XCO2 column observations
-        obs_mask is [B, 1, Nlat, Nlon] - spatial mask
-        We compute: x_averaged = sum(ak * x) over levels
-        Then distribute correction: x_new = x + ak_normalized * (obs_values - x_averaged)
         """      
-        if ak is None:
-            ak = torch.ones(x.shape, device=x.device)
+        if self.ak is None:
+            self.ak = torch.ones(x.shape, device=x.device)
+        
+        B = x.shape[0]
 
-        x_averaged = (ak * x).sum(dim=1, keepdim=True)  # [B 1 Nlat Nlon]
-        correction = self.obs_values.detach() - x_averaged  # [B, 1, Nlat, Nlon]
-        ak_normalized = ak / ak.sum(dim=1, keepdim=True).clamp(min=1e-12)
-        distributed_correction = ak_normalized * correction  # [B, C=10, Nlat, Nlon]
+        correction = (1 / B * (self.obs_values.detach() - self.xco2_prior) - (self.ak * (x - self.co2_profile_prior))).sum(dim=1, keepdim=True)  # [B 1 Nlat Nlon]
+        # distributed_correction should be 1/self.ak times correction at each level
+        distributed_correction = 1/self.ak * correction  # [B C Nlat Nlon]
 
         x_masked = torch.where(
             self.obs_mask,
@@ -342,7 +335,7 @@ class FlowMatching(RegularGridModel):
             else:
                 x_init = torch.randn_like(all_levels, device=x_in.device)
             if "obs_mask" in batch and "obs_values" in batch:
-                obs_var = self.generate_kwargs.get("obs_var", None)
+                obs_var = self.generate_kwargs.get("obs_var", "co2massmix")
                 masking_config = self.prepare_masking_config(batch, B, C, obs_var)
             else:
                 masking_config = {}
@@ -409,13 +402,18 @@ class FlowMatching(RegularGridModel):
         return x_out, dx_t #, x_1_normalized # return {self.target_vars[0]: x_out}
 
     def prepare_masking_config(self, batch, B, C, obs_var):
-        obs_mask = batch["obs_mask"].reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2)
-        obs_values = batch["obs_values"].reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2)
+        print("\nDEBUG prepare_masking_config:")
+        print(f"  obs_var: {obs_var}")
+        print(f"  batch keys: {list(batch.keys())}")
         if "xco2_averaging_kernel" in batch:
+            obs_mask = batch["obs_mask"].reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2)
+            obs_values = batch["obs_values"].reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2)
             ak = batch["xco2_averaging_kernel"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)
             xco2_prior = batch["xco2_apriori"].reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2)
             co2_profile_prior = batch["co2_profile_apriori"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)
         else:
+            obs_mask = batch["obs_mask"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)
+            obs_values = batch["obs_values"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)
             ak = None
             xco2_prior = None
             co2_profile_prior = None
