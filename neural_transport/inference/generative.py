@@ -378,8 +378,8 @@ def iterative_generate_oco2(
         ds = ds.assign_coords(
             trajectory_steps=("trajectory_steps", np.arange(traj.shape[1])),
             sample=("sample", np.arange(n_samples)),
-            time=("time", [prototype_zarr.isel(time=t).time.values]*n_samples),
         )
+        ds = ds.expand_dims(time=[prototype_zarr.isel(time=t).time.values])
         
         if remap:
             ds = remap_with_cdo(dataset, prototype_zarr.isel(time=0), ds)
@@ -394,7 +394,7 @@ def iterative_generate_oco2(
     ### !!! Caution: need to fix this properly!!!
     good_dss = []
     for i, ds in enumerate(dss):
-        # if is_bad_sample(ds[target_vars_2d[0]].values):
+        # if is_bad_sample(ds[target_vars_3d[0]].values):
         #     print(f"Skipping bad sample {i}")
         #     continue
         good_dss.append(ds)

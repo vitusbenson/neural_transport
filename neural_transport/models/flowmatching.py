@@ -75,8 +75,12 @@ class MaskedVelocityWrapper(VelocityWrapper):
             x_masked = self.masking_preserve_global_mean(x)
         elif self.masking_method == "preserve_global_mean_and_var":
             x_masked = self.masking_preserve_global_mean_and_var(x)
-        elif self.masking_method == "total_column_average":
-            x_masked = self.masking_total_column_average(x)
+        elif self.masking_method == "total_column_average_test":
+            x_masked = self.masking_total_column_average_test(x)
+        elif self.masking_method == "total_column_average_add":
+            x_masked = self.masking_total_column_average_add(x)
+        elif self.masking_method == "total_column_average_mult":
+            x_masked = self.masking_total_column_average_mult(x)
 
         if torch.isnan(x_masked).any():
             print(f"\nDEBUG MaskedVelocityWrapper.forward: x_masked has NaN at t={t}")
@@ -213,9 +217,9 @@ class MaskedVelocityWrapper(VelocityWrapper):
 
         return x_final
 
-    def masking_total_column_average_multiplicative(self, x):
+    def masking_total_column_average_test(self, x):
         """
-        Constrain vertical profile using column-averaged observations (XCO2).
+        Constrain vertical profile adjusting (multiplicative) column-averaged observations (XCO2).
         
         Args:
             x: [B, C, Nlat, Nlon] - the C-level CO2 field
@@ -268,9 +272,9 @@ class MaskedVelocityWrapper(VelocityWrapper):
         print(f"  x_masked (final) has NaN: {torch.isnan(x_masked).any()}")
         return x_masked
     
-    def masking_total_column_average(self, x):
+    def masking_total_column_average_add(self, x):
         """
-        Constrain vertical profile using column-averaged observations (XCO2).
+        Constrain vertical profile adjusting (additive) column-averaged observations (XCO2).
         
         Args:
             x: [B, C, Nlat, Nlon] - the C-level CO2 field
@@ -287,6 +291,34 @@ class MaskedVelocityWrapper(VelocityWrapper):
         x_masked = torch.where(
             self.obs_mask,
             x + distributed_correction,
+            x
+        )
+
+        return x_masked
+
+    def masking_total_column_average_mult(self, x):
+        """
+        Constrain vertical profile adjusting (multiplicative) column-averaged observations (XCO2).
+        
+        Args:
+            x: [B, C, Nlat, Nlon] - the C-level CO2 field
+        """
+        if self.ak is None:
+            self.ak = torch.ones(x.shape, device=x.device)
+        x_physical = x * self.target_std + self.target_mean
+        obs_physical = self.obs_values * self.obs_std + self.obs_mean
+        B = x.shape[0]
+
+        xco2_physical = self.xco2_prior + (self.ak * (x_physical - self.co2_profile_prior)).sum(dim=1, keepdim=True)  # [B 1 Nlat Nlon]
+
+        correction = (self.xco2_prior / (B * self.ak) + x_physical - self.co2_profile_prior) * (obs_physical / xco2_physical - 1)  # [B C Nlat Nlon]
+
+        x_scaled_physical = x_physical + correction  # [B C Nlat Nlon]
+        x_scaled = (x_scaled_physical - self.target_mean) / self.target_std
+
+        x_masked = torch.where(
+            self.obs_mask,
+            x_scaled,
             x
         )
 

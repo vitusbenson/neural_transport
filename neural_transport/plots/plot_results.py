@@ -751,7 +751,10 @@ def animate_predictions(
 
         # !!!Caution!!! this is a quick fix producing random movie snippets of different samples, not a continuous time frame, though if noise is generated in a path, it shows this path in latent space
         if "sample" in pred.dims and "time" in targ.dims:
-            pred = pred.rename({"sample": "time"})
+            if "time" in pred.dims:
+                pred = pred.isel(sample=np.random.randint(0, pred.sizes["sample"]), drop=True)
+            else:
+                pred = pred.rename({"sample": "time"})
             min_len = min(pred.sizes["time"], targ.sizes["time"])
             pred = pred.isel(time=slice(0, min_len))
             targ = targ.isel(time=slice(0, min_len))
@@ -1065,6 +1068,7 @@ def plot_obs_mask_and_samples(
     vmin = np.nanmin([np.nanmin(target_vals), np.nanmin(samples_np[:n_samples, ...])])
     vmax = np.nanmax([np.nanmax(target_vals), np.nanmax(samples_np[:n_samples, ...])])
     obs_min, obs_max = np.nanmin(masked_obs), np.nanmax(masked_obs)
+    targ_min, targ_max = np.nanmin(target_vals), np.nanmax(target_vals)
 
     # Figure setup
     aspect_ratio = nlon / nlat
@@ -1075,7 +1079,7 @@ def plot_obs_mask_and_samples(
     axs = axs.reshape(2, 4)
 
     # Panels ([0,0]: Ground truth, [1,0]: Masked obs, [0,1..3] and [1,1..3]: samples)
-    im = plot_panel(axs[0, 0], target_vals, "Ground Truth", vmin=vmin, vmax=vmax, aspect_ratio=aspect_ratio, bold=True)
+    im = plot_panel(axs[0, 0], target_vals, "Ground Truth", vmin=targ_min, vmax=targ_max, aspect_ratio=aspect_ratio, bold=True)
     plot_panel(axs[1, 0], np.ma.masked_invalid(masked_obs), "Masked Observations",
                vmin=obs_min, vmax=obs_max, aspect_ratio=aspect_ratio, bold=True)
 
