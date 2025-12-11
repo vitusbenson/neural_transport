@@ -197,6 +197,8 @@ def create_oco2_mask(batch, target_var="xco2_2019_scale"):
     obs_values = batch[target_var].clone()
     # obs_values = torch.where(obs_mask, obs_values, torch.zeros_like(obs_values))
     obs_values = molemix_to_massmix(obs_values)
+    batch[f"{target_var}_offset"] = molemix_to_massmix(batch[f"{target_var}_offset"])
+    batch[f"{target_var}_scale"] = molemix_to_massmix(batch[f"{target_var}_scale"])
 
     # Handle xco2_averaging_kernel
     ak = batch["xco2_averaging_kernel"].clone()  # [B, T, N, C=10]
@@ -284,6 +286,24 @@ def create_mask(batch, target_var="co2massmix", obs_fraction=0.1, pattern="rando
 def is_bad_sample(arr, thresh=1e6):
         return np.isnan(arr).any() or np.isinf(arr).any() or np.nanmax(np.abs(arr)) > thresh
 
+def align_time(time, time_gen):
+    """
+    Find the index offset to align time of masking with trained dataset.
+    Returns:
+      offset: int, such that time_gen[i + offset] == time[i]
+    """
+    if time[-1] < time_gen[0]:
+        raise ValueError("No overlap: time from trained dataset is before masking dataset.")
+    elif time[0] > time_gen[-1]:
+        raise ValueError("No overlap: time from trained dataset is after masking dataset.")
+    elif time[0] == time_gen[0]:
+        return 0
+    elif time[0] > time_gen[0]:
+        offset = (time_gen == time[0]).argmax().item()
+        return offset
+    else:  # time[0] < time_gen[0]
+        offset = - (time == time_gen[0]).argmax().item()
+        return offset
 
 def iterative_generate_oco2(
     model,
@@ -326,11 +346,16 @@ def iterative_generate_oco2(
     dss = []
     obss = []
     T = len(dataset_gen)
-    T = 5 # for testing (T = len(dataset) and then take overlap)
+    T = 5 # for testing (T = len(dataset) and then take overlap, only for testing is dataset necessary)
+    offset = align_time(dataset.ds.time.values, dataset_gen.ds.time.values)
 
     for t in tqdm(range(T), desc="Timestep") if verbose else range(T):
-        batch_gen = {k: v.unsqueeze(0).to(device) for k, v in dataset_gen[t].items()}
-        batch = {k: v.unsqueeze(0).to(device) for k, v in dataset[t].items()}
+        if offset > 0:    
+            batch_gen = {k: v.unsqueeze(0).to(device) for k, v in dataset_gen[t + offset].items()}
+            batch = {k: v.unsqueeze(0).to(device) for k, v in dataset[t].items()}
+        else:
+            batch_gen = {k: v.unsqueeze(0).to(device) for k, v in dataset_gen[t].items()}
+            batch = {k: v.unsqueeze(0).to(device) for k, v in dataset[t - offset].items()}
 
         # Noise
         noise_list = noise(dataset_gen[t],
@@ -348,6 +373,16 @@ def iterative_generate_oco2(
             for k in target_vars_2d + generate_kwargs["generate_data_kwargs"]["forcing_vars"] + ["obs_mask"]:
                 batch[k] = batch_gen[k]
             batch["obs_values"] = obs_values_normed  # [B=1 T=1 N=2048 C=1]
+            print(f"\nDEBUG iterative_generate_oco2 t={t}")
+            print("  obs_values stats:")
+            obs_valid = obs_values[~torch.isnan(obs_values)]
+            print(f"    min={obs_valid.min().item():.6f}, max={obs_valid.max().item():.6f}")
+            print(f"    mean={obs_valid.mean().item():.6f}, std={obs_valid.std().item():.6f}")
+            print("  obs_values_normed stats:")
+            obs_normed_valid = obs_values_normed[~torch.isnan(obs_values_normed)]
+            print(f"  min={obs_normed_valid.min().item():.6f}, max={obs_normed_valid.max().item():.6f}")
+            print(f"  mean={obs_normed_valid.mean().item():.6f}, std={obs_normed_valid.std().item():.6f}")
+
 
         for k in batch.keys():
             batch[k] = batch[k].expand(n_samples, -1, -1, -1)  # [B=n_samples T N C]
@@ -454,6 +489,7 @@ def iterative_generate(
 
     model = model.eval().to(device)
     model.return_intermediates = True
+    model.model.generate_kwargs = generate_kwargs
 
     dss = []
     obss = []
