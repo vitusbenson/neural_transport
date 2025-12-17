@@ -1,4 +1,5 @@
 from typing import Optional
+import inspect
 
 # torch
 import torch
@@ -57,7 +58,7 @@ class MaskedVelocityWrapper(VelocityWrapper):
         self.ak = masking_config.get("ak", None)
         self.xco2_prior = masking_config.get("xco2_prior", None)
         self.co2_profile_prior = masking_config.get("co2_profile_prior", None)
-        self.dt = masking_config.get("dt", None)
+        self.time_grid = masking_config.get("time_grid", None)
 
         self.masking_time = generate_kwargs.get("masking_time", None)
         self.t_threshold = generate_kwargs.get("t_threshold", 0.9)
@@ -76,27 +77,54 @@ class MaskedVelocityWrapper(VelocityWrapper):
         if torch.isnan(x).any():
             print(f"\nDEBUG MaskedVelocityWrapper.forward: INPUT x has NaN at t={t}")
             print(f"  x NaN count: {torch.isnan(x).sum()}")
-        if self.masking_method == "simple":
-            x_masked = self.masking_simple(x)
-        elif self.masking_method == "interpolate":
-            x_masked = self.masking_interpolate(x, t)
-        elif self.masking_method == "preserve_global_mean":
-            x_masked = self.masking_preserve_global_mean(x)
-        elif self.masking_method == "preserve_global_mean_and_var":
-            x_masked = self.masking_preserve_global_mean_and_var(x)
-        elif self.masking_method == "total_column_average_test":
-            x_masked = self.masking_total_column_average_test(x)
-        elif self.masking_method == "total_column_average_add":
-            x_masked = self.masking_total_column_average_add(x)
-        elif self.masking_method == "total_column_average_mult":
-            x_masked = self.masking_total_column_average_mult(x)
-        elif self.masking_method == "total_column_average_test_basic":
-            x_masked = self.masking_total_column_average_test_basic(x)
-
+        x_masked = self.apply_masking(x, t)
         if torch.isnan(x_masked).any():
             print(f"\nDEBUG MaskedVelocityWrapper.forward: x_masked has NaN at t={t}")
             print(f"  x_masked NaN count: {torch.isnan(x_masked).sum()}")
             print(f"  masking_method: {self.masking_method}")
+
+        x_effective = self.apply_temporal_weighting(x, x_masked, t)
+
+        dt = self.compute_dt(t)
+        print(f"  t={t.item()}")
+        print(f"  dt={dt}")
+        
+        # dxt = (x_effective - x)/dt + f(x_effective, t)
+        dtx = (x_effective - x) / dt + super().forward(x_effective, t)
+        import matplotlib.pyplot as plt
+        plt.figure()
+        plt.subplot(1,2,1)
+        plt.imshow(dtx[0].mean(dim=0).detach().cpu().numpy())
+        plt.subplot(1,2,2)
+        plt.imshow(((x_effective - x) / dt)[0].mean(dim=0).detach().cpu().numpy())
+        plt.colorbar()
+        plt.title(f"dtx at t={t}")
+        plt.savefig(f"dtx_t{int(t.item()*100)}.png")
+        plt.close()
+        # dxt = f(x,t)
+        # dxt = torch.where(self.obs_mask, self.obs_values - x, super().forward(x, t))
+        if torch.isnan(dtx).any():
+            print(f"\nDEBUG MaskedVelocityWrapper.forward: OUTPUT dtx has NaN at t={t}")
+            print(f"  dtx NaN count: {torch.isnan(dtx).sum()}")
+            print(f"  (x_effective - x)/dt stats: min={(x_effective - x).min()/dt:.6f}, max={(x_effective - x).max()/dt:.6f}")
+
+        return dtx
+
+    def apply_masking(self, x, t):
+        """Route to appropriate masking method."""
+        masking_fn = getattr(self, f"masking_{self.masking_method}", None)
+        if masking_fn is None:
+            raise ValueError(f"Unknown masking method: {self.masking_method}")
+
+        sig = inspect.signature(masking_fn)
+        if 't' in sig.parameters:
+            x_masked = masking_fn(x, t)
+        else:
+            x_masked = masking_fn(x)
+        return x_masked
+    
+    def apply_temporal_weighting(self, x, x_masked, t):
+        """Apply temporal weighting based on masking_time strategy."""
         masking_time = self.masking_time
         t_threshold = self.t_threshold
         if masking_time == "smooth_late_masking":
@@ -109,18 +137,21 @@ class MaskedVelocityWrapper(VelocityWrapper):
             mask_weight = (t < t_threshold).float().view(-1, 1, 1, 1)
         else:
             mask_weight = 1.0
-        x_effective = mask_weight * x_masked + (1.0 - mask_weight) * x
-
-        # dxt = (x_effective - x)/dt + f(x_effective, t)
-        dtx = (x_effective - x) / self.dt + super().forward(x_effective, t)
-        # dxt = f(x,t)
-        # dxt = torch.where(self.obs_mask, self.obs_values - x, super().forward(x, t))
-        if torch.isnan(dtx).any():
-            print(f"\nDEBUG MaskedVelocityWrapper.forward: OUTPUT dtx has NaN at t={t}")
-            print(f"  dtx NaN count: {torch.isnan(dtx).sum()}")
-            print(f"  (x_effective - x)/dt stats: min={(x_effective - x).min()/self.dt:.6f}, max={(x_effective - x).max()/self.dt:.6f}")
+        
+        return mask_weight * x_masked + (1.0 - mask_weight) * x
     
-        return dtx
+    def compute_dt(self, t):
+        if self.time_grid is not None:
+            idx = torch.searchsorted(self.time_grid, t.item())
+            if idx == 0:
+                dt = self.time_grid[1] - self.time_grid[0]
+            elif idx >= len(self.time_grid):
+                dt = self.time_grid[-1] - self.time_grid[-2]
+            else:
+                dt = self.time_grid[idx] - self.time_grid[idx-1]
+        else:
+            dt = 0.1  # fallback
+        return dt
 
     def masking_simple(self, x):
         x_masked = torch.where(self.obs_mask, self.obs_values.detach(), x)
@@ -337,6 +368,40 @@ class MaskedVelocityWrapper(VelocityWrapper):
         print(f"    x_masked stats: min={x_masked.min():.6f}, max={x_masked.max():.6f}")
         print(f"    x_masked norm: {x_masked.norm(dim=(2,3)).mean()}")
         return x_masked
+    
+    def masking_total_column_average_simple(self, x):
+        print("\nDEBUG masking_total_column_average_simple")
+        print(f"  x shape: {x.shape}, has NaN: {torch.isnan(x).any()}")
+        print(f"    x stats: min={x.min():.6f}, max={x.max():.6f}")
+        print(f"    x norm: {x.norm(dim=(2,3)).mean()}")
+        if self.ak is None:
+            self.ak = torch.ones(x.shape, device=x.device)
+        
+        ak_sum = self.ak.sum(dim=1, keepdim=True).clamp(min=1e-12)
+        xco2 = (self.ak * x).sum(dim=1, keepdim=True) / ak_sum  # [B 1 Nlat Nlon]
+        print(f"  xco2 shape: {xco2.shape}, has NaN: {torch.isnan(xco2).any()}")
+        xco2_valid = xco2[~torch.isnan(xco2)]
+        if xco2_valid.numel() > 0:
+            print(f"    xco2 valid stats: min={xco2_valid.min():.6f}, max={xco2_valid.max():.6f}")
+                
+        column_error = self.obs_values.detach() - xco2  # [B 1 Nlat Nlon]
+        
+        ak_normalized = self.ak / ak_sum  # [B C Nlat Nlon]
+        distributed_correction = ak_normalized * column_error  # [B C Nlat Nlon]
+        print(f"  distributed_correction shape: {distributed_correction.shape}, has NaN: {torch.isnan(distributed_correction).any()}")
+        distributed_correction_valid = distributed_correction[~torch.isnan(distributed_correction)]
+        if distributed_correction_valid.numel() > 0:
+            print(f"    distributed_correction valid stats: min={distributed_correction_valid.min():.6f}, max={distributed_correction_valid.max():.6f}")
+
+        x_masked = torch.where(
+            self.obs_mask,
+            x + distributed_correction,
+            x
+        )
+        print(f"  x_masked shape {x_masked.shape}, has NaN: {torch.isnan(x_masked).any()}")
+        print(f"    x_masked stats: min={x_masked.min():.6f}, max={x_masked.max():.6f}")
+        print(f"    x_masked norm: {x_masked.norm(dim=(2,3)).mean()}")
+        return x_masked
 
     def masking_total_column_average_add(self, x):
         """
@@ -420,6 +485,105 @@ class MaskedVelocityWrapper(VelocityWrapper):
         print(f"    x_masked stats: min={x_masked.min():.6f}, max={x_masked.max():.6f}")
         print(f"    x_masked norm: {x_masked.norm(dim=(2,3)).mean()}")
 
+        return x_masked
+    
+    def masking_total_column_average_simple_unitary(self, x):
+        print("\nDEBUG masking_total_column_average_simple_unitary")
+        print(f"  x shape: {x.shape}, has NaN: {torch.isnan(x).any()}")
+        print(f"    x stats: min={x.min():.6f}, max={x.max():.6f}")
+        print(f"    x norm: {x.norm(dim=(2,3)).mean()}")
+        if self.ak is None:
+            self.ak = torch.ones(x.shape, device=x.device)
+
+        ak_sum = self.ak.sum(dim=1, keepdim=True).clamp(min=1e-12)
+        xco2 = (self.ak * x).sum(dim=1, keepdim=True)  # [B 1 Nlat Nlon]
+        print(f"  xco2 shape: {xco2.shape}, has NaN: {torch.isnan(xco2).any()}")
+        xco2_valid = xco2[~torch.isnan(xco2)]
+        if xco2_valid.numel() > 0:
+            print(f"    xco2 valid stats: min={xco2_valid.min():.6f}, max={xco2_valid.max():.6f}")
+
+        column_error = (self.obs_values.detach() - xco2) / ak_sum  # [B 1 Nlat Nlon]
+
+        unitary = torch.ones(x.shape, device=x.device)  # [B C Nlat Nlon]
+        distributed_correction = unitary * column_error  # [B C Nlat Nlon]
+        print(f"  distributed_correction shape: {distributed_correction.shape}, has NaN: {torch.isnan(distributed_correction).any()}")
+        distributed_correction_valid = distributed_correction[~torch.isnan(distributed_correction)]
+        if distributed_correction_valid.numel() > 0:
+            print(f"    distributed_correction valid stats: min={distributed_correction_valid.min():.6f}, max={distributed_correction_valid.max():.6f}")
+
+        x_masked = torch.where(
+            self.obs_mask,
+            x + distributed_correction,
+            x
+        )
+        print(f"  x_masked shape {x_masked.shape}, has NaN: {torch.isnan(x_masked).any()}")
+        print(f"    x_masked stats: min={x_masked.min():.6f}, max={x_masked.max():.6f}")
+        print(f"    x_masked norm: {x_masked.norm(dim=(2,3)).mean()}")
+        return x_masked
+
+    def masking_total_column_average_simple_diag(self, x):
+        print("\nDEBUG masking_total_column_average_simple_diag")
+        print(f"  x shape: {x.shape}, has NaN: {torch.isnan(x).any()}")
+        print(f"    x stats: min={x.min():.6f}, max={x.max():.6f}")
+        print(f"    x norm: {x.norm(dim=(2,3)).mean()}")
+        if self.ak is None:
+            self.ak = torch.ones(x.shape, device=x.device)
+
+        ak2_sum = (self.ak ** 2).sum(dim=1, keepdim=True).clamp(min=1e-12)
+        xco2 = (self.ak * x).sum(dim=1, keepdim=True)  # [B 1 Nlat Nlon]
+        print(f"  xco2 shape: {xco2.shape}, has NaN: {torch.isnan(xco2).any()}")
+        xco2_valid = xco2[~torch.isnan(xco2)]
+        if xco2_valid.numel() > 0:
+            print(f"    xco2 valid stats: min={xco2_valid.min():.6f}, max={xco2_valid.max():.6f}")
+
+        column_error = (self.obs_values.detach() - xco2) / ak2_sum  # [B 1 Nlat Nlon]
+
+        distributed_correction = self.ak * column_error  # [B C Nlat Nlon]
+        print(f"  distributed_correction shape: {distributed_correction.shape}, has NaN: {torch.isnan(distributed_correction).any()}")
+        distributed_correction_valid = distributed_correction[~torch.isnan(distributed_correction)]
+        if distributed_correction_valid.numel() > 0:
+            print(f"    distributed_correction valid stats: min={distributed_correction_valid.min():.6f}, max={distributed_correction_valid.max():.6f}")
+
+        x_masked = torch.where(
+            self.obs_mask,
+            x + distributed_correction,
+            x
+        )
+        print(f"  x_masked shape {x_masked.shape}, has NaN: {torch.isnan(x_masked).any()}")
+        print(f"    x_masked stats: min={x_masked.min():.6f}, max={x_masked.max():.6f}")
+        print(f"    x_masked norm: {x_masked.norm(dim=(2,3)).mean()}")
+        return x_masked
+
+    def masking_total_column_average_simple_invdiag(self, x):
+        print("\nDEBUG masking_total_column_average_simple_invdiag")
+        print(f"  x shape: {x.shape}, has NaN: {torch.isnan(x).any()}")
+        print(f"    x stats: min={x.min():.6f}, max={x.max():.6f}")
+        print(f"    x norm: {x.norm(dim=(2,3)).mean()}")
+        if self.ak is None:
+            self.ak = torch.ones(x.shape, device=x.device)
+
+        xco2 = (self.ak * x).sum(dim=1, keepdim=True)  # [B 1 Nlat Nlon]
+        print(f"  xco2 shape: {xco2.shape}, has NaN: {torch.isnan(xco2).any()}")
+        xco2_valid = xco2[~torch.isnan(xco2)]
+        if xco2_valid.numel() > 0:
+            print(f"    xco2 valid stats: min={xco2_valid.min():.6f}, max={xco2_valid.max():.6f}")
+
+        column_error = self.obs_values.detach() - xco2  # [B 1 Nlat Nlon]
+
+        distributed_correction = (1/self.ak) * column_error  # [B C Nlat Nlon]
+        print(f"  distributed_correction shape: {distributed_correction.shape}, has NaN: {torch.isnan(distributed_correction).any()}")
+        distributed_correction_valid = distributed_correction[~torch.isnan(distributed_correction)]
+        if distributed_correction_valid.numel() > 0:
+            print(f"    distributed_correction valid stats: min={distributed_correction_valid.min():.6f}, max={distributed_correction_valid.max():.6f}")
+
+        x_masked = torch.where(
+            self.obs_mask,
+            x + distributed_correction,
+            x
+        )
+        print(f"  x_masked shape {x_masked.shape}, has NaN: {torch.isnan(x_masked).any()}")
+        print(f"    x_masked stats: min={x_masked.min():.6f}, max={x_masked.max():.6f}")
+        print(f"    x_masked norm: {x_masked.norm(dim=(2,3)).mean()}")
         return x_masked
 
 
@@ -607,16 +771,19 @@ class FlowMatching(RegularGridModel):
             generate_kwargs = {}
 
         refine_start = generate_kwargs.get("refine_start", 1.0)
+        steps = generate_kwargs.get("steps", 11)
 
         # get timesteps for integration [T]
         if refine_start < 1.0:
-            coarse = torch.linspace(0, refine_start, steps=11, device=x_init.device)[:-1]
-            fine = torch.linspace(refine_start, 1.0, steps=11, device=x_init.device)
+            coarse = torch.linspace(0, refine_start, steps=steps, device=x_init.device)[:-1]
+            fine = torch.linspace(refine_start, 1.0, steps=steps, device=x_init.device)
             time_grid = torch.cat([coarse, fine[1:]])
         else:
-            time_grid = torch.linspace(0, 1, steps=10, device=x_init.device) 
-        dt = (time_grid[-1] - time_grid[0]) / (len(time_grid) - 1)
-        masking_config["dt"] = dt
+            time_grid = torch.linspace(0, 1, steps=steps-1, device=x_init.device) 
+        print("\nDEBUG inference_forward:")
+        print(f"  time_grid: {time_grid}")
+        print(f"  time_grid diffs: {torch.diff(time_grid)}")
+        masking_config["time_grid"] = time_grid
 
         # UNet expects normalization parameters
         velocity_model = self.return_velocity_wrapper(

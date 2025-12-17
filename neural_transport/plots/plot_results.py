@@ -1053,7 +1053,14 @@ def plot_obs_mask_and_samples(
     obs_mask = batch["obs_mask"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
     target_vals = batch[varname][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
     masked_obs = np.where(obs_mask, obs_values, np.nan)
-    print(f"DEBUG: preds_var coords: {preds_var.coords}")
+    print("\nDEBUG: masking plot")
+    print(f"  preds_var type: {type(preds_var)}, dims: {preds_var.dims if hasattr(preds_var, 'dims') else 'N/A'}")
+    if hasattr(preds_var, 'coords') and 'time' in preds_var.coords:
+        print(f"  preds_var time values: {preds_var.coords['time'].values}")
+    if "time_dataset" in batch:
+        print(f"  batch time_dataset (CT trained): {batch['time_dataset']}")
+    if "time_dataset_gen" in batch:
+        print(f"  batch time_dataset_gen (OCO-2 masking): {batch['time_dataset_gen']}")
 
     # Generated samples [sample, lat, lon, level, (time)]
     samples = preds_var
@@ -1106,6 +1113,98 @@ def plot_obs_mask_and_samples(
     return fig
 
 
+def plot_obs_mask_and_samples_x(
+    batch,
+    preds_var,
+    varname="co2massmix",
+    nlat=32,
+    nlon=64,
+    max_samples=6,
+):
+    """
+    Plot observed values, masked observations, and several generated samples.
+    Layout: 2x4 grid
+      [0,0] = Ground Truth
+      [1,0] = Masked Observations
+      [0,1..3], [1,1..3] = Generated Samples (up to 6)
+    """
+    b, t, c = 0, 0, 0
+
+    obs_values = batch["obs_values"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
+    obs_mask = batch["obs_mask"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
+    masked_obs = np.where(obs_mask, obs_values, np.nan)
+
+    # Generated samples [sample, lat, lon, level, (time)]
+    samples = preds_var
+    if "time" in samples.dims:
+        samples = samples.isel(time=t)
+
+    if "xco2_averaging_kernel" in batch:
+        ak = batch["xco2_averaging_kernel"][b, t, :, :].detach().cpu()  # [N, C]
+        print("\nDEBUG: masking plot with AK")
+        print(f"  ak shape: {ak.shape}")
+        print(f"  ak is nan: {torch.isnan(ak).any().item()}")
+        vals = batch[varname][b, t, :, :].detach().cpu()  # [N, C]
+        target_vals = (ak * vals).sum(dim=-1).numpy().reshape(nlat, nlon)
+        if "level" in samples.dims:
+            ak_reshaped = ak.numpy().reshape(nlat, nlon, -1)  # [lat, lon, level]
+            samples_np = samples.values  # [sample, lat, lon, level]
+            samples_list = []
+            for i in range(min(samples_np.shape[0], max_samples)):
+                samples_list.append((ak_reshaped * samples_np[i]).sum(axis=-1))
+            samples = xr.DataArray(
+                np.array(samples_list),
+                dims=["sample", "lat", "lon"]
+            )
+    else:
+        target_vals = batch[varname][b, t, :, :].mean(dim=-1).detach().cpu().numpy().reshape(nlat, nlon)
+        if "level" in samples.dims:
+            samples = samples.mean(dim="level")
+
+    samples_np = samples.values  # shape: [sample, lat, lon]
+    n_samples = min(samples_np.shape[0], max_samples)
+
+    # Global color limits
+    vmin = np.nanmin([np.nanmin(target_vals), np.nanmin(samples_np[:n_samples, ...])])
+    vmax = np.nanmax([np.nanmax(target_vals), np.nanmax(samples_np[:n_samples, ...])])
+    obs_min, obs_max = np.nanmin(masked_obs), np.nanmax(masked_obs)
+    targ_min, targ_max = np.nanmin(target_vals), np.nanmax(target_vals)
+
+    # Figure setup
+    aspect_ratio = nlon / nlat
+    base_size = 3.0
+    fig_width = 4 * base_size * (aspect_ratio / 2)
+    fig_height = 2 * base_size
+    fig, axs = plt.subplots(2, 4, figsize=(fig_width, fig_height))
+    axs = axs.reshape(2, 4)
+
+    # Panels ([0,0]: Ground truth, [1,0]: Masked obs, [0,1..3] and [1,1..3]: samples)
+    im = plot_panel(axs[0, 0], target_vals, "Ground Truth", vmin=targ_min, vmax=targ_max, aspect_ratio=aspect_ratio, bold=True)
+    plot_panel(axs[1, 0], np.ma.masked_invalid(masked_obs), "Masked Observations",
+               vmin=obs_min, vmax=obs_max, aspect_ratio=aspect_ratio, bold=True)
+
+    for i in range(n_samples):
+        row = 0 if i < 3 else 1
+        col = (i % 3) + 1
+        plot_panel(axs[row, col], samples_np[i, :, :], f"Sample {i}",
+                   vmin=vmin, vmax=vmax, aspect_ratio=aspect_ratio)
+
+    fig.text(0.56, 0.9, "Generated Samples", fontsize=14, fontweight="bold", ha="center", va="top")
+
+    for row in range(2):
+        for col in range(4):
+            if not axs[row, col].images:
+                axs[row, col].axis("off")
+
+    # Shared colorbar
+    cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
+    fig.colorbar(im, cax=cbar_ax, orientation="vertical", label="CO₂ [ppm]")
+
+    fig.suptitle("Observations vs Generated Samples", fontsize=16)
+    plt.tight_layout(rect=[0, 0, 0.9, 1])
+
+    return fig
+
 def plot_masking_diagnostics(
         batch,
         preds,
@@ -1126,7 +1225,7 @@ def plot_masking_diagnostics(
 
         preds_var = preds[varname]
 
-        fig = plot_obs_mask_and_samples(
+        fig = plot_obs_mask_and_samples_x(
             batch,
             preds_var,
             varname=varname,
