@@ -164,7 +164,10 @@ class RegularGridModel(nn.Module):
             obs_values,
         )
 
-        print(f"  obs_norm stats before targshift: min={obs_norm[mask].min().item():.6f}, max={obs_norm[mask].max().item():.6f}, mean={obs_norm[mask].mean().item():.6f}, std={obs_norm[mask].std().item():.6f}")
+        if mask.any():
+            print(f"  obs_norm stats before targshift: min={obs_norm[mask].min().item():.6f}, max={obs_norm[mask].max().item():.6f}, mean={obs_norm[mask].mean().item():.6f}, std={obs_norm[mask].std().item():.6f}")
+        else:
+            print("  obs_norm: mask is all False, no observations to normalize")
 
         if targshift is None:
             targshift = self.targshift
@@ -173,7 +176,10 @@ class RegularGridModel(nn.Module):
             mean = ((batch[target_var] - mean) / std).mean((1, 2), keepdim=True)
             obs_norm = torch.where(mask, obs_norm - mean, obs_norm)
             print(f"  mean used for targshift: {mean.flatten()[0]:.6f}")
-            print(f"  obs_norm stats after targshift: min={obs_norm[mask].min().item():.6f}, max={obs_norm[mask].max().item():.6f}, mean={obs_norm[mask].mean().item():.6f}, std={obs_norm[mask].std().item():.6f}")
+            if mask.any():
+                print(f"  obs_norm stats after targshift: min={obs_norm[mask].min().item():.6f}, max={obs_norm[mask].max().item():.6f}, mean={obs_norm[mask].mean().item():.6f}, std={obs_norm[mask].std().item():.6f}")
+            else:
+                print("  obs_norm: mask is all False after targshift")
 
         return obs_norm
 

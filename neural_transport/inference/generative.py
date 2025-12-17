@@ -150,6 +150,38 @@ def generate_noise(batch, target_var="co2massmix", n_samples=10, noise_pattern=N
         raise ValueError(f"Unknown noise type: {noise_pattern}")
 
 
+def get_batches(t, offset, dataset, dataset_gen, window_steps, device):
+    """
+    Collect batches over a time window.
+    For sparse observation variables (target_vars_2d, xco2*): union all non-NaN observations
+    For other variables: take mean over window
+    """
+    if offset > 0:
+        t_start_gen = t + offset
+        t_start_gt = t
+    else:
+        t_start_gen = t
+        t_start_gt = t - offset
+    t_end_gen = min(t_start_gen + window_steps, len(dataset_gen))
+    t_end_gt = min(t_start_gt + window_steps, len(dataset))
+
+    batch_list = []
+    for t_win in range(t_start_gt, t_end_gt):
+        batch_list.append({k: v.unsqueeze(0).to(device) for k, v in dataset[t_win].items()})
+    batch = {}
+    for k in batch_list[0].keys():
+        batch[k] = torch.stack([b[k] for b in batch_list], dim=0).mean(dim=0)
+
+    batch_gen_list = []
+    for t_win in range(t_start_gen, t_end_gen):
+        batch_gen_list.append({k: v.unsqueeze(0).to(device) for k, v in dataset_gen[t_win].items()})
+    batch_gen = {}
+    for k in batch_gen_list[0].keys():
+        batch_gen[k] = torch.nanmean(torch.stack([b[k] for b in batch_gen_list], dim=0), dim=0)
+
+    return batch, batch_gen
+
+
 def noise(batch: dict,
           target_var: str | None = "co2massmix",
           n_samples: int | None = 10,
@@ -202,6 +234,16 @@ def create_oco2_mask(batch, target_var="xco2_2019_scale"):
 
     # Handle xco2_averaging_kernel
     ak = batch["xco2_averaging_kernel"].clone()  # [B, T, N, C=10]
+    # ### DEBUG: Zero out the top level (C=9) as the values are skewed in this level
+    # print("DEBUG: Zeroing out top level of xco2_averaging_kernel")
+    # ak_9 = ak[..., 9]
+    # print(f"  mean ak level 9 = {ak_9.nanmean().item():.6f}")
+    # for i in range(ak.shape[-1]):
+    #     if i == 0:
+    #         print(f"  only level {i} non-zero values")
+    #         continue
+    #     ak[..., i] = 0.0
+    # ### End DEBUG
     n_levels = ak.shape[-1]
     ak_mask = obs_mask.expand(-1, -1, -1, n_levels)  # [B, T, N, C=10]
     valid_ak = ak[ak_mask]
@@ -286,6 +328,22 @@ def create_mask(batch, target_var="co2massmix", obs_fraction=0.1, pattern="rando
 def is_bad_sample(arr, thresh=1e6):
         return np.isnan(arr).any() or np.isinf(arr).any() or np.nanmax(np.abs(arr)) > thresh
 
+
+def parse_freq(freq: str) -> int:
+    """Convert `freq` (e.g.: '3h', '6h', '1D', ...) into appropriate integer hours."""
+    num = int(''.join(filter(str.isdigit, freq)))
+    unit = ''.join(filter(str.isalpha, freq))
+
+    valid_units = {"h", "D"}
+    if unit not in valid_units:
+        raise ValueError(f"Unsupported frequency unit: {unit}")
+    if unit == "h":
+        hours = num
+    elif unit == "D":
+        hours = num * 24
+    return hours
+
+
 def align_time(time, time_gen):
     """
     Find the index offset to align time of masking with trained dataset.
@@ -327,6 +385,8 @@ def iterative_generate_oco2(
     analyze_masking = generate_kwargs.get("analyze_masking", False)
     noise_pattern = generate_kwargs.get("noise_pattern", None)
     analyze_noise = generate_kwargs.get("analyze_noise", False)
+    freq_int = parse_freq(generate_kwargs.get("generate_data_kwargs", {}).get("freq", "6h"))
+    window_hours = generate_kwargs.get("window_hours", freq_int)
 
     nlat, nlon = model.model.in_nlat, model.model.in_nlon
 
@@ -348,14 +408,13 @@ def iterative_generate_oco2(
     T = len(dataset_gen)
     T = 5 # for testing (T = len(dataset) and then take overlap, only for testing is dataset necessary)
     offset = align_time(dataset.ds.time.values, dataset_gen.ds.time.values)
+    
+    window_steps = max(1, window_hours // freq_int)
+    print(f"Using observation window: {window_hours} hours = {window_steps} timesteps")
 
     for t in tqdm(range(T), desc="Timestep") if verbose else range(T):
-        if offset > 0:    
-            batch_gen = {k: v.unsqueeze(0).to(device) for k, v in dataset_gen[t + offset].items()}
-            batch = {k: v.unsqueeze(0).to(device) for k, v in dataset[t].items()}
-        else:
-            batch_gen = {k: v.unsqueeze(0).to(device) for k, v in dataset_gen[t].items()}
-            batch = {k: v.unsqueeze(0).to(device) for k, v in dataset[t - offset].items()}
+        # batches: dict of tensors [B T N C]
+        batch, batch_gen = get_batches(t, offset, dataset, dataset_gen, window_steps, device)
 
         # Noise
         noise_list = noise(dataset_gen[t],
@@ -367,10 +426,12 @@ def iterative_generate_oco2(
         # Masking
         if masking:
             target_var = target_vars_2d[0]
+    
             obs_mask, obs_values = create_oco2_mask(batch_gen, target_var=target_var)
+            batch_gen["obs_mask_original"] = obs_mask.clone()
             batch_gen["obs_mask"] = obs_mask
             obs_values_normed = model.model.normalize_observations(obs_values, batch_gen, target_var=target_var, targshift=False)
-            for k in target_vars_2d + generate_kwargs["generate_data_kwargs"]["forcing_vars"] + ["obs_mask"]:
+            for k in target_vars_2d + generate_kwargs["generate_data_kwargs"]["forcing_vars"] + ["obs_mask", "obs_mask_original"]:
                 batch[k] = batch_gen[k]
             batch["obs_values"] = obs_values_normed  # [B=1 T=1 N=2048 C=1]
             print(f"\nDEBUG iterative_generate_oco2 t={t}")
@@ -382,6 +443,8 @@ def iterative_generate_oco2(
             obs_normed_valid = obs_values_normed[~torch.isnan(obs_values_normed)]
             print(f"  min={obs_normed_valid.min().item():.6f}, max={obs_normed_valid.max().item():.6f}")
             print(f"  mean={obs_normed_valid.mean().item():.6f}, std={obs_normed_valid.std().item():.6f}")
+            # ### DEBUG: no masking
+            # batch["obs_mask"] = torch.zeros_like(obs_mask, dtype=torch.bool)
 
 
         for k in batch.keys():

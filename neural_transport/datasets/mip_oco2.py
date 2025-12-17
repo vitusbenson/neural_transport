@@ -572,7 +572,7 @@ MIP_OCO2_LEVEL_AGG = dict(
         [7, 6],                 # 370–312 hPa (mid troposphere)
         [5, 4, 3],              # 256–156 hPa (mid-upper troposphere)
         [2, 1, 0],              # 105-0.1 hPa (upper stratosphere)
-    ][::-1],  # ordered such that averaging_kernel behaves linearly and somewaht resembles the Carbontracker l10 levels
+    ][::-1],  # ordered such that averaging_kernel behaves linearly and somewhat resembles the Carbontracker l10 levels
     l5=[
         [0, 1, 2, 3, 4],      # upper stratosphere
         [5, 6, 7, 8],         # upper/mid-troposphere

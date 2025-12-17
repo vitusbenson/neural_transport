@@ -1053,14 +1053,6 @@ def plot_obs_mask_and_samples(
     obs_mask = batch["obs_mask"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
     target_vals = batch[varname][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
     masked_obs = np.where(obs_mask, obs_values, np.nan)
-    print("\nDEBUG: masking plot")
-    print(f"  preds_var type: {type(preds_var)}, dims: {preds_var.dims if hasattr(preds_var, 'dims') else 'N/A'}")
-    if hasattr(preds_var, 'coords') and 'time' in preds_var.coords:
-        print(f"  preds_var time values: {preds_var.coords['time'].values}")
-    if "time_dataset" in batch:
-        print(f"  batch time_dataset (CT trained): {batch['time_dataset']}")
-    if "time_dataset_gen" in batch:
-        print(f"  batch time_dataset_gen (OCO-2 masking): {batch['time_dataset_gen']}")
 
     # Generated samples [sample, lat, lon, level, (time)]
     samples = preds_var
@@ -1141,9 +1133,8 @@ def plot_obs_mask_and_samples_x(
 
     if "xco2_averaging_kernel" in batch:
         ak = batch["xco2_averaging_kernel"][b, t, :, :].detach().cpu()  # [N, C]
-        print("\nDEBUG: masking plot with AK")
-        print(f"  ak shape: {ak.shape}")
-        print(f"  ak is nan: {torch.isnan(ak).any().item()}")
+        ak_sum = ak.sum(dim=-1, keepdim=True)  # [N, 1]
+        ak = ak / ak_sum
         vals = batch[varname][b, t, :, :].detach().cpu()  # [N, C]
         target_vals = (ak * vals).sum(dim=-1).numpy().reshape(nlat, nlon)
         if "level" in samples.dims:
@@ -1167,7 +1158,10 @@ def plot_obs_mask_and_samples_x(
     # Global color limits
     vmin = np.nanmin([np.nanmin(target_vals), np.nanmin(samples_np[:n_samples, ...])])
     vmax = np.nanmax([np.nanmax(target_vals), np.nanmax(samples_np[:n_samples, ...])])
-    obs_min, obs_max = np.nanmin(masked_obs), np.nanmax(masked_obs)
+    if np.all(np.isnan(masked_obs)):
+        obs_min, obs_max = vmin, vmax  # Use same limits as samples
+    else:
+        obs_min, obs_max = np.nanmin(masked_obs), np.nanmax(masked_obs)
     targ_min, targ_max = np.nanmin(target_vals), np.nanmax(target_vals)
 
     # Figure setup
@@ -1198,12 +1192,105 @@ def plot_obs_mask_and_samples_x(
 
     # Shared colorbar
     cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
-    fig.colorbar(im, cax=cbar_ax, orientation="vertical", label="CO₂ [ppm]")
+    fig.colorbar(im, cax=cbar_ax, orientation="vertical", label="XCO₂ [ppm]")
 
     fig.suptitle("Observations vs Generated Samples", fontsize=16)
     plt.tight_layout(rect=[0, 0, 0.9, 1])
 
     return fig
+
+
+def plot_mask_pattern_on_samples(
+    batch,
+    preds_var,
+    nlat=32,
+    nlon=64,
+    max_samples=6,
+):
+    """
+    Plot generated samples with mask pattern overlaid as contours.
+    This helps debug if mask pattern artifacts appear in generated samples.
+    """
+    b, t, c = 0, 0, 0
+
+    # Get mask pattern
+    if "obs_mask_original" in batch:
+        obs_mask = batch["obs_mask_original"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
+    else:
+        obs_mask = batch["obs_mask"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
+
+    # Generated samples [sample, lat, lon, level, (time)]
+    samples = preds_var
+    if "time" in samples.dims:
+        samples = samples.isel(time=t)
+
+    if "xco2_averaging_kernel" in batch:
+        ak = batch["xco2_averaging_kernel"][b, t, :, :].detach().cpu()  # [N, C]
+        ak_sum = ak.sum(dim=-1, keepdim=True)  # [N, 1]
+        ak = ak / ak_sum
+        if "level" in samples.dims:
+            ak_reshaped = ak.numpy().reshape(nlat, nlon, -1)  # [lat, lon, level]
+            samples_np = samples.values  # [sample, lat, lon, level]
+            samples_list = []
+            for i in range(min(samples_np.shape[0], max_samples)):
+                samples_list.append((ak_reshaped * samples_np[i]).sum(axis=-1))
+            samples = xr.DataArray(
+                np.array(samples_list),
+                dims=["sample", "lat", "lon"]
+            )
+    else:
+        if "level" in samples.dims:
+            samples = samples.mean(dim="level")
+
+    samples_np = samples.values  # shape: [sample, lat, lon]
+    n_samples = min(samples_np.shape[0], max_samples)
+
+    # Global color limits
+    vmin = np.nanmin(samples_np[:n_samples, ...])
+    vmax = np.nanmax(samples_np[:n_samples, ...])
+
+    # Figure setup
+    aspect_ratio = nlon / nlat
+    base_size = 3.0
+    fig_width = 3 * base_size * (aspect_ratio / 2)
+    fig_height = 2 * base_size
+    fig, axs = plt.subplots(2, 3, figsize=(fig_width, fig_height))
+    axs = axs.flatten()
+
+    for i in range(n_samples):
+        ax = axs[i]
+        # Plot sample
+        im = ax.imshow(
+            samples_np[i, :, :],
+            cmap="cividis",
+            vmin=vmin,
+            vmax=vmax,
+            aspect=aspect_ratio / 2,
+            origin='lower',
+        )
+        # Overlay mask as red contour
+        ax.contour(
+            obs_mask,
+            levels=[0.5],
+            colors='red',
+            linewidths=1.5,
+        )
+        ax.set_title(f"Sample {i} + Mask", fontsize=11)
+        ax.axis("off")
+
+    # Hide unused subplots
+    for i in range(n_samples, len(axs)):
+        axs[i].axis("off")
+
+    # Shared colorbar
+    cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
+    fig.colorbar(im, cax=cbar_ax, orientation="vertical", label="CO₂ [ppm]")
+
+    fig.suptitle("Generated Samples with Mask Pattern Overlay (red contour)", fontsize=14)
+    plt.tight_layout(rect=[0, 0, 0.9, 1])
+
+    return fig
+
 
 def plot_masking_diagnostics(
         batch,
@@ -1237,6 +1324,19 @@ def plot_masking_diagnostics(
         for fmt in imgformats:
             fig.savefig(out_dir / f"masking_{varname}.{fmt}", dpi=300)
         plt.close(fig)
+
+        # Plot mask pattern overlay on generated samples
+        if "obs_mask_original" in batch:
+            fig_mask = plot_mask_pattern_on_samples(
+                batch,
+                preds_var,
+                nlat=nlat,
+                nlon=nlon,
+                max_samples=6,
+            )
+            for fmt in imgformats:
+                fig_mask.savefig(out_dir / f"masking_{varname}_mask_overlay.{fmt}", dpi=300)
+            plt.close(fig_mask)
 
     return
 
