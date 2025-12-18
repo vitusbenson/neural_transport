@@ -408,7 +408,7 @@ def iterative_generate_oco2(
     T = len(dataset_gen)
     T = 5 # for testing (T = len(dataset) and then take overlap, only for testing is dataset necessary)
     offset = align_time(dataset.ds.time.values, dataset_gen.ds.time.values)
-    
+    print(f"Time alignment offset: {offset} timesteps")
     window_steps = max(1, window_hours // freq_int)
     print(f"Using observation window: {window_hours} hours = {window_steps} timesteps")
 
@@ -417,7 +417,7 @@ def iterative_generate_oco2(
         batch, batch_gen = get_batches(t, offset, dataset, dataset_gen, window_steps, device)
 
         # Noise
-        noise_list = noise(dataset_gen[t],
+        noise_list = noise(dataset_gen[0],  # only shape matters
                            target_var=generate_kwargs["generate_data_kwargs"]["forcing_vars"][0],n_samples=n_samples,
                            noise_pattern=noise_pattern,
                            analyze_noise=analyze_noise,
@@ -426,7 +426,6 @@ def iterative_generate_oco2(
         # Masking
         if masking:
             target_var = target_vars_2d[0]
-    
             obs_mask, obs_values = create_oco2_mask(batch_gen, target_var=target_var)
             batch_gen["obs_mask_original"] = obs_mask.clone()
             batch_gen["obs_mask"] = obs_mask
@@ -445,7 +444,10 @@ def iterative_generate_oco2(
             print(f"  mean={obs_normed_valid.mean().item():.6f}, std={obs_normed_valid.std().item():.6f}")
             # ### DEBUG: no masking
             # batch["obs_mask"] = torch.zeros_like(obs_mask, dtype=torch.bool)
-
+            # ### DEBUG: test non tca masking_methods
+            # batch["obs_mask"] = batch["obs_mask"].expand(-1, -1, -1, 10)
+            # batch["obs_values"] = batch["obs_values"].expand(-1, -1, -1, 10)
+            # ### End DEBUG
 
         for k in batch.keys():
             batch[k] = batch[k].expand(n_samples, -1, -1, -1)  # [B=n_samples T N C]
@@ -492,9 +494,9 @@ def iterative_generate_oco2(
     ### !!! Caution: need to fix this properly!!!
     good_dss = []
     for i, ds in enumerate(dss):
-        # if is_bad_sample(ds[target_vars_3d[0]].values):
-        #     print(f"Skipping bad sample {i}")
-        #     continue
+        if is_bad_sample(ds[target_vars_3d[0]].values):
+            print(f"Skipping bad sample {i}")
+            continue
         good_dss.append(ds)
 
     ds_all = xr.concat(good_dss, dim="time")
@@ -507,6 +509,11 @@ def iterative_generate_oco2(
 
     ds_all.to_zarr(zarrpath, mode="w")
 
+    # ### DEBUG: no masking
+    # masking = True
+    # batch["obs_mask"] = torch.zeros_like(batch["co2massmix"], dtype=torch.bool)
+    # batch["obs_values"] = torch.full_like(batch["co2massmix"], float('nan'), device=device)
+    # ### End DEBUG
     if analyze_masking and masking:
         plot_masking_diagnostics(batch, ds_all,
                                  str(outpath).replace("preds", "plots"),

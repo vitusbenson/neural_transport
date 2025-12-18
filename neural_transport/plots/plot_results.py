@@ -1159,7 +1159,7 @@ def plot_obs_mask_and_samples_x(
     vmin = np.nanmin([np.nanmin(target_vals), np.nanmin(samples_np[:n_samples, ...])])
     vmax = np.nanmax([np.nanmax(target_vals), np.nanmax(samples_np[:n_samples, ...])])
     if np.all(np.isnan(masked_obs)):
-        obs_min, obs_max = vmin, vmax  # Use same limits as samples
+        obs_min, obs_max = vmin, vmax
     else:
         obs_min, obs_max = np.nanmin(masked_obs), np.nanmax(masked_obs)
     targ_min, targ_max = np.nanmin(target_vals), np.nanmax(target_vals)

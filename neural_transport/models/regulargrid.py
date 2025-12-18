@@ -169,6 +169,7 @@ class RegularGridModel(nn.Module):
         else:
             print("  obs_norm: mask is all False, no observations to normalize")
 
+        ### Implement targshift with observations stats from larger set, e.g. 16-day window
         if targshift is None:
             targshift = self.targshift
         if targshift:
