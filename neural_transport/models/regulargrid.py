@@ -173,8 +173,7 @@ class RegularGridModel(nn.Module):
         if targshift is None:
             targshift = self.targshift
         if targshift:
-            # mean = torch.nanmean(obs_norm, dim=(1,2), keepdim=True)
-            mean = ((batch[target_var] - mean) / std).mean((1, 2), keepdim=True)
+            mean = torch.nanmean((batch[target_var] - mean) / std, dim=(1, 2), keepdim=True)
             obs_norm = torch.where(mask, obs_norm - mean, obs_norm)
             print(f"  mean used for targshift: {mean.flatten()[0]:.6f}")
             if mask.any():

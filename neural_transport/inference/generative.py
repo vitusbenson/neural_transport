@@ -255,6 +255,93 @@ def create_oco2_mask(batch, target_var="xco2_2019_scale"):
     return obs_mask, obs_values  # [B T N C] each
 
 
+def create_oco2_mask_test(
+    batch,
+    target_var="xco2_2019_scale",
+    pattern="diagonal",
+    nlat=32,
+    nlon=64,
+):
+    """
+    Create synthetic OCO-2-like observation masks for testing.
+
+    Args:
+        batch: dict of tensors [B, T, N, C]
+        target_var: variable used to infer shape
+        pattern:
+            - "diagonal"   : diagonal stripe (lat = lon)
+            - "leftright"  : left half observed
+            - "topbottom"  : top half observed
+            - "checkerboard"
+            - "center_box" : central rectangle
+        nlat, nlon: grid dimensions (must satisfy nlat * nlon == N)
+
+    Returns:
+        obs_mask   : bool [B, T, N, C]
+        obs_values : float [B, T, N, C] (NaN outside mask)
+    """
+
+    B, T, N, C = batch[target_var].shape
+    device = batch[target_var].device
+    # value = torch.nanmean(batch[target_var], dim=2).item()
+    value = batch[f"{target_var}_offset"]
+    value = molemix_to_massmix(value)
+    # value = 615.927185  # set to fixed value for testing as something with normalization is wrong
+    print(f"Creating synthetic OCO-2 mask with pattern '{pattern}', value={value:.6f}")
+
+    assert nlat * nlon == N, "nlat * nlon must equal N"
+
+    grid = torch.arange(N, device=device).reshape(nlat, nlon)
+
+    mask2d = torch.zeros((nlat, nlon), dtype=torch.bool, device=device)
+
+    if pattern == "diagonal":
+        for i in range(min(nlat, nlon)):
+            mask2d[i, i] = True
+
+    elif pattern == "leftright":
+        mask2d[:, : nlon // 2] = True
+
+    elif pattern == "topbottom":
+        mask2d[: nlat // 2, :] = True
+
+    elif pattern == "checkerboard":
+        mask2d = (
+            (torch.arange(nlat, device=device)[:, None]
+           + torch.arange(nlon, device=device)[None, :]) % 2 == 0
+        )
+
+    elif pattern == "center_box":
+        lat0, lat1 = nlat // 4, 3 * nlat // 4
+        lon0, lon1 = nlon // 4, 3 * nlon // 4
+        mask2d[lat0:lat1, lon0:lon1] = True
+
+    else:
+        raise ValueError(f"Unknown test pattern: {pattern}")
+
+    obs_indices = grid[mask2d].reshape(-1)
+
+    obs_mask = torch.zeros((B, T, N, C), dtype=torch.bool, device=device)
+    obs_values = torch.full(
+        (B, T, N, C), float("nan"), device=device
+    )
+
+    obs_mask[:, :, obs_indices, :] = True
+    obs_values[:, :, obs_indices, :] = value
+
+    # Handle xco2_averaging_kernel
+    ak = batch["xco2_averaging_kernel"].clone()  # [B, T, N, C=10]
+    n_levels = ak.shape[-1]
+    true_mask = ~torch.isnan(batch[target_var])
+    ak_mask = true_mask.expand(-1, -1, -1, n_levels)  # [B, T, N, C=10]
+    valid_ak = ak[ak_mask]
+    mean_ak_per_level = valid_ak.reshape(-1, n_levels).mean(dim=0)  # [C=10]
+    mean_ak_full = mean_ak_per_level.view(1, 1, 1, -1).expand_as(ak)
+    batch["xco2_averaging_kernel"] = mean_ak_full
+
+    return obs_mask, obs_values  # [B T N C] each
+
+
 def create_mask(batch, target_var="co2massmix", obs_fraction=0.1, pattern="random", nlat=32, nlon=64):
     """
     Create a random observation mask for the input batch.
@@ -426,7 +513,9 @@ def iterative_generate_oco2(
         # Masking
         if masking:
             target_var = target_vars_2d[0]
-            obs_mask, obs_values = create_oco2_mask(batch_gen, target_var=target_var)
+            ### DEBUG: test synthetic masking
+            obs_mask, obs_values = create_oco2_mask_test(batch_gen, target_var=target_var, pattern="diagonal", nlat=nlat, nlon=nlon)
+            # obs_mask, obs_values = create_oco2_mask(batch_gen, target_var=target_var)
             batch_gen["obs_mask_original"] = obs_mask.clone()
             batch_gen["obs_mask"] = obs_mask
             obs_values_normed = model.model.normalize_observations(obs_values, batch_gen, target_var=target_var, targshift=False)
