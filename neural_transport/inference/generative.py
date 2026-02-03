@@ -522,21 +522,6 @@ def iterative_generate_oco2(
             for k in target_vars_2d + generate_kwargs["generate_data_kwargs"]["forcing_vars"] + ["obs_mask", "obs_mask_original"]:
                 batch[k] = batch_gen[k]
             batch["obs_values"] = obs_values_normed  # [B=1 T=1 N=2048 C=1]
-            print(f"\nDEBUG iterative_generate_oco2 t={t}")
-            print("  obs_values stats:")
-            obs_valid = obs_values[~torch.isnan(obs_values)]
-            print(f"    min={obs_valid.min().item():.6f}, max={obs_valid.max().item():.6f}")
-            print(f"    mean={obs_valid.mean().item():.6f}, std={obs_valid.std().item():.6f}")
-            print("  obs_values_normed stats:")
-            obs_normed_valid = obs_values_normed[~torch.isnan(obs_values_normed)]
-            print(f"  min={obs_normed_valid.min().item():.6f}, max={obs_normed_valid.max().item():.6f}")
-            print(f"  mean={obs_normed_valid.mean().item():.6f}, std={obs_normed_valid.std().item():.6f}")
-            # ### DEBUG: no masking
-            # batch["obs_mask"] = torch.zeros_like(obs_mask, dtype=torch.bool)
-            # ### DEBUG: test non tca masking_methods
-            # batch["obs_mask"] = batch["obs_mask"].expand(-1, -1, -1, 10)
-            # batch["obs_values"] = batch["obs_values"].expand(-1, -1, -1, 10)
-            # ### End DEBUG
 
         for k in batch.keys():
             batch[k] = batch[k].expand(n_samples, -1, -1, -1)  # [B=n_samples T N C]
