@@ -64,49 +64,16 @@ class MaskedVelocityWrapper(VelocityWrapper):
         self.t_threshold = generate_kwargs.get("t_threshold", 0.9)
         self.masking_method = generate_kwargs.get("masking_method", "interpolate")
 
-        print("\nDEBUG MaskedVelocityWrapper init")
-        obs_valid = self.obs_values[~torch.isnan(self.obs_values)]
-        if obs_valid.numel() > 0:
-            print(f"  obs_values valid stats: min={obs_valid.min():.6f}, max={obs_valid.max():.6f}")
-        print(f"  obs_mean: {self.obs_mean.flatten()[0]:.6f}")
-        print(f"  obs_std: {self.obs_std.flatten()[0]:.6f}")
-        print(f"  target_mean: {self.target_mean.flatten()[0]:.6f}")
-        print(f"  target_std: {self.target_std.flatten()[0]:.6f}")
-
     def forward(self, x, t):
-        if torch.isnan(x).any():
-            print(f"\nDEBUG MaskedVelocityWrapper.forward: INPUT x has NaN at t={t}")
-            print(f"  x NaN count: {torch.isnan(x).sum()}")
         x_masked = self.apply_masking(x, t)
-        if torch.isnan(x_masked).any():
-            print(f"\nDEBUG MaskedVelocityWrapper.forward: x_masked has NaN at t={t}")
-            print(f"  x_masked NaN count: {torch.isnan(x_masked).sum()}")
-            print(f"  masking_method: {self.masking_method}")
-
         x_effective = self.apply_temporal_weighting(x, x_masked, t)
 
         dt = self.compute_dt(t)
-        print(f"  t={t.item()}")
-        print(f"  dt={dt}")
-        
+
         # dxt = (x_effective - x)/dt + f(x_effective, t)
         dtx = (x_effective - x) / dt + super().forward(x_effective, t)
-        import matplotlib.pyplot as plt
-        plt.figure()
-        plt.subplot(1,2,1)
-        plt.imshow(dtx[0].mean(dim=0).detach().cpu().numpy())
-        plt.subplot(1,2,2)
-        plt.imshow(((x_effective - x) / dt)[0].mean(dim=0).detach().cpu().numpy())
-        plt.colorbar()
-        plt.title(f"dtx at t={t}")
-        plt.savefig(f"dtx_t{int(t.item()*100)}.png")
-        plt.close()
         # dxt = f(x,t)
         # dxt = torch.where(self.obs_mask, self.obs_values - x, super().forward(x, t))
-        if torch.isnan(dtx).any():
-            print(f"\nDEBUG MaskedVelocityWrapper.forward: OUTPUT dtx has NaN at t={t}")
-            print(f"  dtx NaN count: {torch.isnan(dtx).sum()}")
-            print(f"  (x_effective - x)/dt stats: min={(x_effective - x).min()/dt:.6f}, max={(x_effective - x).max()/dt:.6f}")
 
         return dtx
 
@@ -274,133 +241,59 @@ class MaskedVelocityWrapper(VelocityWrapper):
         We compute: x_averaged = xco2_prior + sum(ak * (x - co2_profile_prior)) over levels
         Then scale each level: x_new = x * (obs_values / x_averaged)
         """
-        print("\nDEBUG masking_total_column_average_test")
-        print(f"  x shape: {x.shape}, has NaN: {torch.isnan(x).any()}")
-        print(f"    x stats: min={x.min():.6f}, max={x.max():.6f}")
-        print(f"    x norm: {x.norm(dim=(2,3)).mean()}")
         if self.ak is None:
             self.ak = torch.ones(x.shape, device=x.device)
         x_physical = x * self.target_std + self.target_mean
-        print(f"  x_physical shape: {x_physical.shape}, has NaN: {torch.isnan(x_physical).any()}")
-        print(f"    x_physical stats: min={x_physical.min():.6f}, max={x_physical.max():.6f}")
-        print(f"    x_physical norm: {x_physical.norm(dim=(2,3)).mean()}")
-        if torch.isnan(x_physical).any():
-            print(f"  target_std has NaN: {torch.isnan(self.target_std).any()}")
-            print(f"  target_mean has NaN: {torch.isnan(self.target_mean).any()}")
         x_averaged_physical = self.xco2_prior + (self.ak * (x_physical - self.co2_profile_prior)).sum(dim=1, keepdim=True)  # [B 1 Nlat Nlon]
-        print("  Using prior correction")
-        print(f"    xco2_prior shape {self.xco2_prior.shape}, has NaN: {torch.isnan(self.xco2_prior).any()}")
-        print(f"    co2_profile_prior shape {self.co2_profile_prior.shape}, has NaN: {torch.isnan(self.co2_profile_prior).any()}")
-        print(f"  x_averaged_physical shape {x_averaged_physical.shape}, has NaN: {torch.isnan(x_averaged_physical).any()}")
-        x_ap_valid = x_averaged_physical[~torch.isnan(x_averaged_physical)]
-        if x_ap_valid.numel() > 0:
-            print(f"    x_averaged_physical valid stats: min={x_ap_valid.min():.6f}, max={x_ap_valid.max():.6f}")
         obs_physical = self.obs_values * self.obs_std + self.obs_mean
-        print(f"  obs_physical shape {obs_physical.shape}, has NaN: {torch.isnan(obs_physical).any()}")
-        if torch.isnan(obs_physical).any():
-            print(f"    obs_values has NaN: {torch.isnan(self.obs_values).any()}")
-            print(f"    obs_std has NaN: {torch.isnan(self.obs_std).any()}")
-            print(f"    obs_mean has NaN: {torch.isnan(self.obs_mean).any()}")
-        op_valid = obs_physical[~torch.isnan(obs_physical)]
-        if op_valid.numel() > 0:
-            print(f"    obs_physical valid stats: min={op_valid.min():.6f}, max={op_valid.max():.6f}")
+    
         scale_factor = (obs_physical.detach() / x_averaged_physical.clamp(min=1e-12))  # [B 1 Nlat Nlon]
-        print(f"  scale_factor shape {scale_factor.shape}, has NaN: {torch.isnan(scale_factor).any()}")
-        if not torch.isnan(scale_factor).any():
-            valid_sf = scale_factor[self.obs_mask]
-            print(f"    scale_factor shape {valid_sf.shape}, has NaN on obs_mask: {torch.isnan(valid_sf).any()}")
-            print(f"      scale_factor stats: min={valid_sf.min():.6f}, max={valid_sf.max():.6f}")
-            if valid_sf.numel() > 0:
-                print(f"      scale_factor[obs_mask] stats: min={valid_sf.min():.6f}, max={valid_sf.max():.6f}")
         x_scaled_physical = scale_factor * x_physical  # [B C Nlat Nlon]
-        print(f"  x_scaled_physical shape {x_scaled_physical.shape}, has NaN: {torch.isnan(x_scaled_physical).any()}")
-        x_sp_valid = x_scaled_physical[~torch.isnan(x_scaled_physical)]
-        if x_sp_valid.numel() > 0:
-            print(f"    x_scaled_physical valid stats: min={x_sp_valid.min():.6f}, max={x_sp_valid.max():.6f}")
         x_scaled = (x_scaled_physical - self.target_mean) / self.target_std
-        print(f"  x_scaled shape {x_scaled.shape}, has NaN: {torch.isnan(x_scaled).any()}")
-        x_s_valid = x_scaled[~torch.isnan(x_scaled)]
-        if x_s_valid.numel() > 0:
-            print(f"    x_scaled valid stats: min={x_s_valid.min():.6f}, max={x_s_valid.max():.6f}")
+
         x_masked = torch.where(
             self.obs_mask,
             x_scaled,
             x
         )
-        print(f"  x_masked (final) shape {x_masked.shape}, has NaN: {torch.isnan(x_masked).any()}")
-        print(f"    x_masked (final) stats: min={x_masked.min():.6f}, max={x_masked.max():.6f}")
-        print(f"    x_masked (final) norm: {x_masked.norm(dim=(2,3)).mean()}")
         return x_masked
 
     def masking_total_column_average_test_basic(self, x):
-        print("\nDEBUG masking_total_column_average_test_basic")
-        print(f"  x shape: {x.shape}, has NaN: {torch.isnan(x).any()}")
-        print(f"    x stats: min={x.min():.6f}, max={x.max():.6f}")
-        print(f"    x norm: {x.norm(dim=(2,3)).mean()}")
         if self.ak is None:
             self.ak = torch.ones(x.shape, device=x.device)
         
         C = x.shape[1]
         xco2 = self.obs_values.sum(dim=1, keepdim=True)  # [B 1 Nlat Nlon]
-        print(f"  xco2 shape: {xco2.shape}, has NaN: {torch.isnan(xco2).any()}")
-        xco2_valid = xco2[~torch.isnan(xco2)]
-        if xco2_valid.numel() > 0:
-            print(f"    xco2 valid stats: min={xco2_valid.min():.6f}, max={xco2_valid.max():.6f}")
 
         correction = 1/C * (xco2 / C - self.ak * x).sum(dim=1, keepdim=True)  # [B 1 Nlat Nlon]
-        print(f"  correction shape: {correction.shape}, has NaN: {torch.isnan(correction).any()}")
-        correction_valid = correction[~torch.isnan(correction)]
-        if correction_valid.numel() > 0:
-            print(f"    correction valid stats: min={correction_valid.min():.6f}, max={correction_valid.max():.6f}")
 
         distributed_correction = 1/self.ak * correction  # [B C Nlat Nlon]
-        print(f"  distributed_correction shape: {distributed_correction.shape}, has NaN: {torch.isnan(distributed_correction).any()}")
-        distributed_correction_valid = distributed_correction[~torch.isnan(distributed_correction)]
-        if distributed_correction_valid.numel() > 0:
-            print(f"    distributed_correction valid stats: min={distributed_correction_valid.min():.6f}, max={distributed_correction_valid.max():.6f}")
 
         x_masked = torch.where(
             self.obs_mask,
             x + distributed_correction,
             x
         )
-        print(f"  x_masked shape {x_masked.shape}, has NaN: {torch.isnan(x_masked).any()}")
-        print(f"    x_masked stats: min={x_masked.min():.6f}, max={x_masked.max():.6f}")
-        print(f"    x_masked norm: {x_masked.norm(dim=(2,3)).mean()}")
         return x_masked
     
     def masking_total_column_average_simple(self, x):
-        print("\nDEBUG masking_total_column_average_simple")
-        print(f"  x shape: {x.shape}, has NaN: {torch.isnan(x).any()}")
-        print(f"    x stats: min={x.min():.6f}, max={x.max():.6f}")
-        print(f"    x norm: {x.norm(dim=(2,3)).mean()}")
         if self.ak is None:
             self.ak = torch.ones(x.shape, device=x.device)
         
         ak_sum = self.ak.sum(dim=1, keepdim=True).clamp(min=1e-12)
         xco2 = (self.ak * x).sum(dim=1, keepdim=True) / ak_sum  # [B 1 Nlat Nlon]
-        print(f"  xco2 shape: {xco2.shape}, has NaN: {torch.isnan(xco2).any()}")
-        xco2_valid = xco2[~torch.isnan(xco2)]
-        if xco2_valid.numel() > 0:
-            print(f"    xco2 valid stats: min={xco2_valid.min():.6f}, max={xco2_valid.max():.6f}")
-                
+        
         column_error = self.obs_values.detach() - xco2  # [B 1 Nlat Nlon]
         
         ak_normalized = self.ak / ak_sum  # [B C Nlat Nlon]
         distributed_correction = ak_normalized * column_error  # [B C Nlat Nlon]
-        print(f"  distributed_correction shape: {distributed_correction.shape}, has NaN: {torch.isnan(distributed_correction).any()}")
-        distributed_correction_valid = distributed_correction[~torch.isnan(distributed_correction)]
-        if distributed_correction_valid.numel() > 0:
-            print(f"    distributed_correction valid stats: min={distributed_correction_valid.min():.6f}, max={distributed_correction_valid.max():.6f}")
 
         x_masked = torch.where(
             self.obs_mask,
             x + distributed_correction,
             x
         )
-        print(f"  x_masked shape {x_masked.shape}, has NaN: {torch.isnan(x_masked).any()}")
-        print(f"    x_masked stats: min={x_masked.min():.6f}, max={x_masked.max():.6f}")
-        print(f"    x_masked norm: {x_masked.norm(dim=(2,3)).mean()}")
+
         return x_masked
 
     def masking_total_column_average_add(self, x):
@@ -410,34 +303,21 @@ class MaskedVelocityWrapper(VelocityWrapper):
         Args:
             x: [B, C, Nlat, Nlon] - the C-level CO2 field
         """      
-        print("\nDEBUG masking_total_column_average_add")
-        print(f"  x shape: {x.shape}, has NaN: {torch.isnan(x).any()}")
-        print(f"    x stats: min={x.min():.6f}, max={x.max():.6f}")
-        print(f"    x norm: {x.norm(dim=(2,3)).mean()}")
+
         if self.ak is None:
             self.ak = torch.ones(x.shape, device=x.device)
         
         C = x.shape[1]
 
         correction = (1 / C * (self.obs_values.detach() - self.xco2_prior) - (self.ak * (x - self.co2_profile_prior))).sum(dim=1, keepdim=True)  # [B 1 Nlat Nlon]
-        print(f"  correction shape: {correction.shape}, has NaN: {torch.isnan(correction).any()}")
-        correction_valid = correction[~torch.isnan(correction)]
-        if correction_valid.numel() > 0:
-            print(f"    correction valid stats: min={correction_valid.min():.6f}, max={correction_valid.max():.6f}")
+
         distributed_correction = 1/self.ak * correction  # [B C Nlat Nlon]
-        print(f"  distributed_correction shape: {distributed_correction.shape}, has NaN: {torch.isnan(distributed_correction).any()}")
-        distributed_correction_valid = distributed_correction[~torch.isnan(distributed_correction)]
-        if distributed_correction_valid.numel() > 0:
-            print(f"    distributed_correction valid stats: min={distributed_correction_valid.min():.6f}, max={distributed_correction_valid.max():.6f}")
 
         x_masked = torch.where(
             self.obs_mask,
             x + distributed_correction,
             x
         )
-        print(f"  x_masked shape {x_masked.shape}, has NaN: {torch.isnan(x_masked).any()}")
-        print(f"    x_masked stats: min={x_masked.min():.6f}, max={x_masked.max():.6f}")
-        print(f"    x_masked norm: {x_masked.norm(dim=(2,3)).mean()}")
 
         return x_masked
 
@@ -448,26 +328,12 @@ class MaskedVelocityWrapper(VelocityWrapper):
         Args:
             x: [B, C, Nlat, Nlon] - the C-level CO2 field
         """
-        print("\nDEBUG masking_total_column_average_mult")
-        print(f"  x shape: {x.shape}, has NaN: {torch.isnan(x).any()}")
-        print(f"    x stats: min={x.min():.6f}, max={x.max():.6f}")
-        print(f"    x norm: {x.norm(dim=(2,3)).mean()}")
+
         if self.ak is None:
             self.ak = torch.ones(x.shape, device=x.device)
         x_physical = x * self.target_std + self.target_mean
-        print(f"  x_physical shape: {x_physical.shape}, has NaN: {torch.isnan(x_physical).any()}")
-        print(f"    x_physical stats: min={x_physical.min():.6f}, max={x_physical.max():.6f}")
-        print(f"    x_physical norm: {x_physical.norm(dim=(2,3)).mean()}")
         obs_physical = self.obs_values * self.obs_std + self.obs_mean
         C = x.shape[1]
-        print(f"  obs_physical shape {obs_physical.shape}, has NaN: {torch.isnan(obs_physical).any()}")
-        if torch.isnan(obs_physical).any():
-            print(f"    obs_values has NaN: {torch.isnan(self.obs_values).any()}")
-            print(f"    obs_std has NaN: {torch.isnan(self.obs_std).any()}")
-            print(f"    obs_mean has NaN: {torch.isnan(self.obs_mean).any()}")
-        op_valid = obs_physical[~torch.isnan(obs_physical)]
-        if op_valid.numel() > 0:
-            print(f"    obs_physical valid stats: min={op_valid.min():.6f}, max={op_valid.max():.6f}")
 
         xco2_physical = self.xco2_prior + (self.ak * (x_physical - self.co2_profile_prior)).sum(dim=1, keepdim=True)  # [B 1 Nlat Nlon]
 
@@ -481,109 +347,61 @@ class MaskedVelocityWrapper(VelocityWrapper):
             x_scaled,
             x
         )
-        print(f"  x_masked shape {x_masked.shape}, has NaN: {torch.isnan(x_masked).any()}")
-        print(f"    x_masked stats: min={x_masked.min():.6f}, max={x_masked.max():.6f}")
-        print(f"    x_masked norm: {x_masked.norm(dim=(2,3)).mean()}")
 
         return x_masked
     
     def masking_total_column_average_simple_unitary(self, x):
-        print("\nDEBUG masking_total_column_average_simple_unitary")
-        print(f"  x shape: {x.shape}, has NaN: {torch.isnan(x).any()}")
-        print(f"    x stats: min={x.min():.6f}, max={x.max():.6f}")
-        print(f"    x norm: {x.norm(dim=(2,3)).mean()}")
         if self.ak is None:
             self.ak = torch.ones(x.shape, device=x.device)
 
         ak_sum = self.ak.sum(dim=1, keepdim=True).clamp(min=1e-12)
         xco2 = (self.ak * x).sum(dim=1, keepdim=True)  # [B 1 Nlat Nlon]
-        print(f"  xco2 shape: {xco2.shape}, has NaN: {torch.isnan(xco2).any()}")
-        xco2_valid = xco2[~torch.isnan(xco2)]
-        if xco2_valid.numel() > 0:
-            print(f"    xco2 valid stats: min={xco2_valid.min():.6f}, max={xco2_valid.max():.6f}")
 
         column_error = (self.obs_values.detach() - xco2) / ak_sum  # [B 1 Nlat Nlon]
 
         unitary = torch.ones(x.shape, device=x.device)  # [B C Nlat Nlon]
         distributed_correction = unitary * column_error  # [B C Nlat Nlon]
-        print(f"  distributed_correction shape: {distributed_correction.shape}, has NaN: {torch.isnan(distributed_correction).any()}")
-        distributed_correction_valid = distributed_correction[~torch.isnan(distributed_correction)]
-        if distributed_correction_valid.numel() > 0:
-            print(f"    distributed_correction valid stats: min={distributed_correction_valid.min():.6f}, max={distributed_correction_valid.max():.6f}")
 
         x_masked = torch.where(
             self.obs_mask,
             x + distributed_correction,
             x
         )
-        print(f"  x_masked shape {x_masked.shape}, has NaN: {torch.isnan(x_masked).any()}")
-        print(f"    x_masked stats: min={x_masked.min():.6f}, max={x_masked.max():.6f}")
-        print(f"    x_masked norm: {x_masked.norm(dim=(2,3)).mean()}")
         return x_masked
 
     def masking_total_column_average_simple_diag(self, x):
-        print("\nDEBUG masking_total_column_average_simple_diag")
-        print(f"  x shape: {x.shape}, has NaN: {torch.isnan(x).any()}")
-        print(f"    x stats: min={x.min():.6f}, max={x.max():.6f}")
-        print(f"    x norm: {x.norm(dim=(2,3)).mean()}")
         if self.ak is None:
             self.ak = torch.ones(x.shape, device=x.device)
 
         ak2_sum = (self.ak ** 2).sum(dim=1, keepdim=True).clamp(min=1e-12)
         xco2 = (self.ak * x).sum(dim=1, keepdim=True)  # [B 1 Nlat Nlon]
-        print(f"  xco2 shape: {xco2.shape}, has NaN: {torch.isnan(xco2).any()}")
-        xco2_valid = xco2[~torch.isnan(xco2)]
-        if xco2_valid.numel() > 0:
-            print(f"    xco2 valid stats: min={xco2_valid.min():.6f}, max={xco2_valid.max():.6f}")
 
         column_error = (self.obs_values.detach() - xco2) / ak2_sum  # [B 1 Nlat Nlon]
 
         distributed_correction = self.ak * column_error  # [B C Nlat Nlon]
-        print(f"  distributed_correction shape: {distributed_correction.shape}, has NaN: {torch.isnan(distributed_correction).any()}")
-        distributed_correction_valid = distributed_correction[~torch.isnan(distributed_correction)]
-        if distributed_correction_valid.numel() > 0:
-            print(f"    distributed_correction valid stats: min={distributed_correction_valid.min():.6f}, max={distributed_correction_valid.max():.6f}")
 
         x_masked = torch.where(
             self.obs_mask,
             x + distributed_correction,
             x
         )
-        print(f"  x_masked shape {x_masked.shape}, has NaN: {torch.isnan(x_masked).any()}")
-        print(f"    x_masked stats: min={x_masked.min():.6f}, max={x_masked.max():.6f}")
-        print(f"    x_masked norm: {x_masked.norm(dim=(2,3)).mean()}")
         return x_masked
 
     def masking_total_column_average_simple_invdiag(self, x):
-        print("\nDEBUG masking_total_column_average_simple_invdiag")
-        print(f"  x shape: {x.shape}, has NaN: {torch.isnan(x).any()}")
-        print(f"    x stats: min={x.min():.6f}, max={x.max():.6f}")
-        print(f"    x norm: {x.norm(dim=(2,3)).mean()}")
         if self.ak is None:
             self.ak = torch.ones(x.shape, device=x.device)
 
         xco2 = (self.ak * x).sum(dim=1, keepdim=True)  # [B 1 Nlat Nlon]
-        print(f"  xco2 shape: {xco2.shape}, has NaN: {torch.isnan(xco2).any()}")
-        xco2_valid = xco2[~torch.isnan(xco2)]
-        if xco2_valid.numel() > 0:
-            print(f"    xco2 valid stats: min={xco2_valid.min():.6f}, max={xco2_valid.max():.6f}")
 
         column_error = self.obs_values.detach() - xco2  # [B 1 Nlat Nlon]
 
         distributed_correction = (1/self.ak) * column_error  # [B C Nlat Nlon]
-        print(f"  distributed_correction shape: {distributed_correction.shape}, has NaN: {torch.isnan(distributed_correction).any()}")
-        distributed_correction_valid = distributed_correction[~torch.isnan(distributed_correction)]
-        if distributed_correction_valid.numel() > 0:
-            print(f"    distributed_correction valid stats: min={distributed_correction_valid.min():.6f}, max={distributed_correction_valid.max():.6f}")
 
         x_masked = torch.where(
             self.obs_mask,
             x + distributed_correction,
             x
         )
-        print(f"  x_masked shape {x_masked.shape}, has NaN: {torch.isnan(x_masked).any()}")
-        print(f"    x_masked stats: min={x_masked.min():.6f}, max={x_masked.max():.6f}")
-        print(f"    x_masked norm: {x_masked.norm(dim=(2,3)).mean()}")
         return x_masked
 
 
@@ -696,9 +514,6 @@ class FlowMatching(RegularGridModel):
         return x_out, dx_t #, x_1_normalized # return {self.target_vars[0]: x_out}
 
     def prepare_masking_config(self, batch, B, C, obs_var):
-        # print("\nDEBUG prepare_masking_config:")
-        # print(f"  obs_var: {obs_var}")
-        # print(f"  batch keys: {list(batch.keys())}")
         if "xco2_averaging_kernel" in batch:
             obs_mask = batch["obs_mask"].reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2)
             obs_values = batch["obs_values"].reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2)
@@ -780,9 +595,6 @@ class FlowMatching(RegularGridModel):
             time_grid = torch.cat([coarse, fine[1:]])
         else:
             time_grid = torch.linspace(0, 1, steps=steps-1, device=x_init.device) 
-        print("\nDEBUG inference_forward:")
-        print(f"  time_grid: {time_grid}")
-        print(f"  time_grid diffs: {torch.diff(time_grid)}")
         masking_config["time_grid"] = time_grid
 
         # UNet expects normalization parameters
@@ -801,7 +613,4 @@ class FlowMatching(RegularGridModel):
                             step_size=self.step_size,
                             return_intermediates=self.return_intermediates
         )  # [T B C Nlat Nlon]
-        print("\nDEBUG inference_forward:")
-        print(f"  trajectory has NaN: {torch.isnan(trajectory).any()}")
-        print(f"  trajectory[-1] stats: min={trajectory[-1].min()}, max={trajectory[-1].max()}")
         return trajectory

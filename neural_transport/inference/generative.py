@@ -513,7 +513,6 @@ def iterative_generate_oco2(
         # Masking
         if masking:
             target_var = target_vars_2d[0]
-            ### DEBUG: test synthetic masking
             obs_mask, obs_values = create_oco2_mask_test(batch_gen, target_var=target_var, pattern="diagonal", nlat=nlat, nlon=nlon)
             # obs_mask, obs_values = create_oco2_mask(batch_gen, target_var=target_var)
             batch_gen["obs_mask_original"] = obs_mask.clone()
