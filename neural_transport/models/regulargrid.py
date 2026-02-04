@@ -148,7 +148,10 @@ class RegularGridModel(nn.Module):
     def normalize_observations(self, obs_values, batch, target_var, targshift=None):
         mean = batch[f"{target_var}_offset"]
         std = batch[f"{target_var}_scale"]
-
+        print("\nDEBUG normalize_observations")
+        print(f"  mean: {mean.flatten()[0]:.6f}, std: {std.flatten()[0]:.6f}")
+        print(f"  target_var: {target_var}")
+        
         obs_mask = batch["obs_mask"]
         mask = obs_mask.bool()
 
@@ -158,12 +161,22 @@ class RegularGridModel(nn.Module):
             obs_values,
         )
 
+        if mask.any():
+            print(f"  obs_norm stats before targshift: min={obs_norm[mask].min().item():.6f}, max={obs_norm[mask].max().item():.6f}, mean={obs_norm[mask].mean().item():.6f}, std={obs_norm[mask].std().item():.6f}")
+        else:
+            print("  obs_norm: mask is all False, no observations to normalize")
+
         ### Implement targshift with observations stats from larger set, e.g. 16-day window
         if targshift is None:
             targshift = self.targshift
         if targshift:
             mean = torch.nanmean((batch[target_var] - mean) / std, dim=(1, 2), keepdim=True)
             obs_norm = torch.where(mask, obs_norm - mean, obs_norm)
+            print(f"  mean used for targshift: {mean.flatten()[0]:.6f}")
+            if mask.any():
+                print(f"  obs_norm stats after targshift: min={obs_norm[mask].min().item():.6f}, max={obs_norm[mask].max().item():.6f}, mean={obs_norm[mask].mean().item():.6f}, std={obs_norm[mask].std().item():.6f}")
+            else:
+                print("  obs_norm: mask is all False after targshift")
 
         return obs_norm
 

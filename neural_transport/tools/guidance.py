@@ -4,11 +4,11 @@ import torch.nn as nn
 
 class XCO2Guidance(nn.Module):
     """Guidance function for column-averaged XCO2 observations.
-    
+
     Computes gradients that steer the 3D CO2 profile toward matching
     sparse column-averaged observations from OCO-2.
     """
-    
+
     def __init__(
         self,
         obs_mask,           # [B, 1, Nlat, Nlon] - where we have observations
@@ -23,21 +23,21 @@ class XCO2Guidance(nn.Module):
         self.ak = averaging_kernel
         self.guidance_scale = guidance_scale
         self.loss_type = loss_type
-    
+
     def compute_xco2(self, x):
         """Compute column-averaged XCO2 from 3D profile.
-        
+
         Args:
             x: [B, C, Nlat, Nlon] - 3D CO2 field
-            
+  
         Returns:
             xco2: [B, 1, Nlat, Nlon] - column average
         """
         # Sum over vertical levels weighted by averaging kernel
         xco2 = (self.ak * x).sum(dim=1, keepdim=True)  # [B, 1, Nlat, Nlon]
         return xco2
-    
-    def compute_loss(self, x_pred, x_denoised):
+
+    def compute_loss(self, x_denoised):
         """Compute observation loss.
 
         Args:
@@ -66,7 +66,7 @@ class XCO2Guidance(nn.Module):
 
     def get_gradient(self, x_current, x_denoised, retain_graph=False):
         """Compute guidance gradient.
-        
+
         Args:
             x_current: [B, C, Nlat, Nlon] - current noisy state (requires_grad=True)
             x_denoised: [B, C, Nlat, Nlon] - denoised prediction
@@ -75,8 +75,8 @@ class XCO2Guidance(nn.Module):
         Returns:
             grad: [B, C, Nlat, Nlon] - gradient for guidance
         """
-        loss = self.compute_loss(x_current, x_denoised)
-        
+        loss = self.compute_loss(x_denoised)
+
         # Compute gradient w.r.t. x_current
         grad = torch.autograd.grad(
             outputs=loss,
@@ -84,5 +84,5 @@ class XCO2Guidance(nn.Module):
             retain_graph=retain_graph,
             create_graph=False
         )[0]
-        
+
         return self.guidance_scale * grad
