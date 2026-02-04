@@ -13,6 +13,7 @@ from flow_matching.solver import ODESolver
 # neural_transport
 from neural_transport.models import MODELS
 from neural_transport.models.regulargrid import RegularGridModel
+from neural_transport.tools.guidance import XCO2Guidance
 
 
 class VelocityWrapper(nn.Module):
@@ -403,6 +404,64 @@ class MaskedVelocityWrapper(VelocityWrapper):
             x
         )
         return x_masked
+
+
+class GuidedVelocityWrapper(VelocityWrapper):
+    """Velocity wrapper with DPS guidance for flow matching."""
+    
+    def __init__(
+        self,
+        submodel: nn.Module,
+        guidance: XCO2Guidance,
+        nlev: int = 1,
+        static_inputs: Optional[torch.Tensor] = None,
+        guidance_start_t: float = 0.0,  # Start applying guidance at this t
+        guidance_end_t: float = 1.0,    # Stop applying guidance at this t
+    ):
+        # Pass arguments to parent VelocityWrapper
+        super().__init__(submodel=submodel, nlev=nlev, static_inputs=static_inputs)
+        # Add guidance-specific attributes
+        self.guidance = guidance
+        self.guidance_start_t = guidance_start_t
+        self.guidance_end_t = guidance_end_t
+    
+    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """Compute velocity with guidance.
+        
+        Args:
+            x: [B, C, Nlat, Nlon] - current state
+            t: scalar - flow time
+            
+        Returns:
+            v: [B, C, Nlat, Nlon] - velocity with guidance
+        """
+
+        # Get base velocity from model
+        v_base = super().forward(x, t)  # [B, C, Nlat, Nlon]
+
+        # Apply guidance if within time range
+        t_val = t.item()
+        if self.guidance_start_t <= t_val <= self.guidance_end_t:
+            # Enable gradients for x
+            x_guided = x.detach().clone()
+            x_guided.requires_grad_(True)
+
+            v_guided = super().forward(x_guided, t)[:, :self.nlev, :, :]
+
+            # Compute denoised prediction: x_denoised ≈ x + (1-t) * v
+            # For flow matching: x(t) = t*x_1 + (1-t)*x_0, so x_1 ≈ x + (1-t)*v
+            x_denoised = x_guided + (1 - t_val) * v_guided
+
+            # Get guidance gradient
+            grad = self.guidance.get_gradient(x_guided, x_denoised, retain_graph=False)
+
+            # Apply guidance: v = v_base - (1-t) * grad
+            # The (1-t) factor scales guidance strength with time
+            v = v_base - (1 - t_val) * grad.detach()
+        else:
+            v = v_base
+
+        return v
 
 
 class FlowMatching(RegularGridModel):
