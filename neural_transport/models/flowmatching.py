@@ -64,6 +64,26 @@ class MaskedVelocityWrapper(VelocityWrapper):
         self.masking_time = generate_kwargs.get("masking_time", None)
         self.t_threshold = generate_kwargs.get("t_threshold", 0.9)
         self.masking_method = generate_kwargs.get("masking_method", "interpolate")
+        
+        # DPS guidance parameters
+        self.use_dps_guidance = generate_kwargs.get("use_dps_guidance", False)
+        self.guidance_scale = generate_kwargs.get("guidance_scale", 1.0)
+        self.guidance_start_t = generate_kwargs.get("guidance_start_t", 0.0)
+        self.guidance_end_t = generate_kwargs.get("guidance_end_t", 1.0)
+        self.guidance_loss_type = generate_kwargs.get("loss_type", "mse")
+        
+        # Initialize guidance if requested
+        if self.use_dps_guidance:
+            self.guidance = XCO2Guidance(
+                obs_mask=self.obs_mask,
+                obs_values=self.obs_values,
+                averaging_kernel=self.ak,
+                guidance_scale=self.guidance_scale,
+                loss_type=self.guidance_loss_type,
+            )
+            print("\nDEBUG DPS guidance enabled")
+        else:
+            self.guidance = None
 
         print("\nDEBUG MaskedVelocityWrapper init")
         obs_valid = self.obs_values[~torch.isnan(self.obs_values)]
@@ -73,6 +93,10 @@ class MaskedVelocityWrapper(VelocityWrapper):
         print(f"  obs_std: {self.obs_std.flatten()[0]:.6f}")
         print(f"  target_mean: {self.target_mean.flatten()[0]:.6f}")
         print(f"  target_std: {self.target_std.flatten()[0]:.6f}")
+        if self.use_dps_guidance:
+            print(f"  DPS guidance_scale: {self.guidance_scale}")
+            print(f"  DPS guidance_start_t: {self.guidance_start_t}")
+            print(f"  DPS guidance_end_t: {self.guidance_end_t}")
 
     def forward(self, x, t):
         if torch.isnan(x).any():
@@ -90,8 +114,18 @@ class MaskedVelocityWrapper(VelocityWrapper):
         print(f"  t={t.item()}")
         print(f"  dt={dt}")
         
+        # f(x,t) base velocity
+        v_base = super().forward(x_effective, t)
+        
+        if self.use_dps_guidance:
+            v_base = self.apply_dps_guidance(
+                x=x_effective,
+                t=t,
+                v=v_base,
+            )
+        
         # dxt = (x_effective - x)/dt + f(x_effective, t)
-        dtx = (x_effective - x) / dt + super().forward(x_effective, t)
+        dtx = (x_effective - x) / dt + v_base
         import matplotlib.pyplot as plt
         plt.figure()
         plt.subplot(1,2,1)
@@ -153,6 +187,27 @@ class MaskedVelocityWrapper(VelocityWrapper):
         else:
             dt = 0.1  # fallback
         return dt
+
+    def apply_dps_guidance(self, x, t, v):
+        t_val = t.item()
+        if self.guidance_start_t <= t_val <= self.guidance_end_t:
+            # Create fresh copy for gradient computation
+            x_guided = x.detach().clone()
+            x_guided.requires_grad_(True)
+
+            # Recompute velocity with gradients
+            v_guided = super().forward(x_guided, t)
+            
+            # Estimate denoised prediction: x(1) ≈ x(t) + (1-t)*v(x,t)
+            x_denoised = x_guided + (1 - t_val) * v_guided
+            
+            # Get guidance gradient
+            grad = self.guidance.get_gradient(x_guided, x_denoised, retain_graph=False)
+            
+            # Apply guidance: steer velocity toward observations
+            v_base = v - (1 - t_val) * grad.detach()
+            print(f"\nDEBUG  DPS guidance applied: grad_norm={grad.norm().item():.6f}")
+        return v_base
 
     def masking_simple(self, x):
         x_masked = torch.where(self.obs_mask, self.obs_values.detach(), x)
