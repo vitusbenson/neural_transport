@@ -24,7 +24,7 @@ def download_obspack(data_dir):
     data_dir = Path(data_dir)
 
     #fp = "http://gml.noaa.gov/ccgg/obspack/tmp/obspack_nbVFeb/obspack_co2_1_GLOBALVIEWplus_v9.1_2023-12-08.nc.tar.gz"
-    fp = "https://gml.noaa.gov/ccgg/obspack/tmp/obspack_9gchvin7apkpcrLKSez/obspack_co2_1_GLOBALVIEWplus_v10.1_2024-11-13.nc.tar.gz"
+    fp = "https://gml.noaa.gov/ccgg/obspack/tmp/obspack_74ik3vmr3isjcSNGTJN/obspack_co2_1_GLOBALVIEWplus_v11.0_2026-01-12.nc.tar.gz"
     # New working link needs to be downloaded again here, since tmp files expire quickly: https://gml.noaa.gov/ccgg/obspack/data.php
 
     outpath = data_dir / "Obspack" / (fp.split("/")[-1])
