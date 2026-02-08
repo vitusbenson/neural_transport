@@ -390,8 +390,6 @@ def regrid_spatial(ds: xr.Dataset,
             out_vars[var] = out
 
     ds_spatial = xr.merge(list(out_vars.values()))
-    # ds_spatial = ds_spatial.assign_coords(lon=((ds_spatial["lon"] + 180) % 360) - 180)
-    # ds_spatial = ds_spatial.sortby("lon")
 
     ds_spatial.attrs.update({
         "title": f"OCO-2 regridded to {gridname}",
@@ -528,10 +526,6 @@ def regrid_spatiotemporal(
 
     ds_regrid = xr.merge(list(out_vars.values()))
     ds_regrid = ds_regrid.assign_coords(time=time_labels, lat=lat_centers, lon=lon_centers)
-
-    # sort lon back to [-180,180) if desired (optional)
-    # ds_regrid = ds_regrid.assign_coords(lon=((ds_regrid["lon"] + 180) % 360) - 180)
-    # ds_regrid = ds_regrid.sortby("lon")
 
     ds_regrid.attrs.update(
         {
@@ -682,24 +676,6 @@ def regrid_mip_oco2(
 
     ds = reconstruct_pressure_levels(ds_oco2)
     ds = ds.rename({"latitude": "lat", "longitude": "lon", "levels": "level"})
-
-    # --- Define regridding operation ---
-
-    # print(f"Regridding temporally OCO-2 to {freq} frequency")
-    # ds_temporal = regrid_temporal(
-    #     ds,
-    #     variables=["xco2_raw", "xco2_apriori", "xco2_2019_scale", "co2_profile_retrieved", "pressure_levels"],
-    #     freq=freq,
-    #     weights=None
-    # )
-
-    # print(f"Regridding Spatially OCO-2 to {gridname}")
-    # ds_spatiotemporal = regrid_spatial(
-    #     ds_temporal,
-    #     variables=["xco2_raw", "xco2_apriori", "xco2_2019_scale", "co2_profile_retrieved", "pressure_levels"],
-    #     gridname=gridname,
-    #     weights=None
-    # )
 
     print(f"Regridding spatiotemporally OCO-2 to {gridname}_{vertical_levels}_{freq}")
     ds_spatiotemporal = regrid_spatiotemporal(

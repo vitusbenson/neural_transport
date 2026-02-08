@@ -29,7 +29,7 @@ def one_to_rule_them_all(args):
     # --- Load predictions and ground truth ---
     path = Path(args.samples_path)
     samples = xr.open_zarr(path) if path.suffix == ".zarr" else xr.open_dataset(path)
-    co2tests = load_carbontracker_tests()
+    co2tests = load_carbontracker_tests(data_path=args.data_path)
 
     # --- Colormaps ---
     cmaps = get_cmap_list(args.use_ipcc, args.use_ipcc_one, args.use_selected, n_samples=args.n_samples)
@@ -141,6 +141,7 @@ def one_to_rule_them_all(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Master plotting script for CO₂ samples and trajectories.")
     parser.add_argument("--samples_path", type=str, required=True)
+    parser.add_argument("--data_path", type=str, required=True, help="Path to CarbonTracker data directory.")
     parser.add_argument("--out_dir", type=str, required=True)
     parser.add_argument("--n_samples", type=int, default=2)
     parser.add_argument("--level_idx", type=int, default=0)

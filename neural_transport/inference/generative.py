@@ -227,23 +227,12 @@ def create_oco2_mask(batch, target_var="xco2_2019_scale"):
     """
     obs_mask = ~torch.isnan(batch[target_var])
     obs_values = batch[target_var].clone()
-    # obs_values = torch.where(obs_mask, obs_values, torch.zeros_like(obs_values))
     obs_values = molemix_to_massmix(obs_values)
     batch[f"{target_var}_offset"] = molemix_to_massmix(batch[f"{target_var}_offset"])
     batch[f"{target_var}_scale"] = molemix_to_massmix(batch[f"{target_var}_scale"])
 
     # Handle xco2_averaging_kernel
     ak = batch["xco2_averaging_kernel"].clone()  # [B, T, N, C=10]
-    # ### DEBUG: Zero out the top level (C=9) as the values are skewed in this level
-    # print("DEBUG: Zeroing out top level of xco2_averaging_kernel")
-    # ak_9 = ak[..., 9]
-    # print(f"  mean ak level 9 = {ak_9.nanmean().item():.6f}")
-    # for i in range(ak.shape[-1]):
-    #     if i == 0:
-    #         print(f"  only level {i} non-zero values")
-    #         continue
-    #     ak[..., i] = 0.0
-    # ### End DEBUG
     n_levels = ak.shape[-1]
     ak_mask = obs_mask.expand(-1, -1, -1, n_levels)  # [B, T, N, C=10]
     valid_ak = ak[ak_mask]
@@ -283,11 +272,8 @@ def create_oco2_mask_test(
 
     B, T, N, C = batch[target_var].shape
     device = batch[target_var].device
-    # value = torch.nanmean(batch[target_var], dim=2).item()
     value = batch[f"{target_var}_offset"]
     value = molemix_to_massmix(value)
-    # value = 615.927185  # set to fixed value for testing as something with normalization is wrong
-    print(f"Creating synthetic OCO-2 mask with pattern '{pattern}', value={value:.6f}")
 
     assert nlat * nlon == N, "nlat * nlon must equal N"
 
@@ -469,6 +455,8 @@ def iterative_generate_oco2(
 ):
     n_samples = generate_kwargs.get("n_samples", 10)
     masking = generate_kwargs.get("masking", True)
+    mask_source = generate_kwargs.get("mask_source", "real")  # "real" or "test"
+    mask_pattern = generate_kwargs.get("mask_pattern", "diagonal")
     analyze_masking = generate_kwargs.get("analyze_masking", False)
     noise_pattern = generate_kwargs.get("noise_pattern", None)
     analyze_noise = generate_kwargs.get("analyze_noise", False)
@@ -493,7 +481,6 @@ def iterative_generate_oco2(
     dss = []
     obss = []
     T = len(dataset_gen)
-    T = 5 # for testing (T = len(dataset) and then take overlap, only for testing is dataset necessary)
     offset = align_time(dataset.ds.time.values, dataset_gen.ds.time.values)
     print(f"Time alignment offset: {offset} timesteps")
     window_steps = max(1, window_hours // freq_int)
@@ -513,8 +500,10 @@ def iterative_generate_oco2(
         # Masking
         if masking:
             target_var = target_vars_2d[0]
-            obs_mask, obs_values = create_oco2_mask_test(batch_gen, target_var=target_var, pattern="diagonal", nlat=nlat, nlon=nlon)
-            # obs_mask, obs_values = create_oco2_mask(batch_gen, target_var=target_var)
+            if mask_source == "test":
+                obs_mask, obs_values = create_oco2_mask_test(batch_gen, target_var=target_var, pattern=mask_pattern, nlat=nlat, nlon=nlon)
+            else:
+                obs_mask, obs_values = create_oco2_mask(batch_gen, target_var=target_var)
             batch_gen["obs_mask_original"] = obs_mask.clone()
             batch_gen["obs_mask"] = obs_mask
             obs_values_normed = model.model.normalize_observations(obs_values, batch_gen, target_var=target_var, targshift=False)
@@ -582,11 +571,6 @@ def iterative_generate_oco2(
 
     ds_all.to_zarr(zarrpath, mode="w")
 
-    # ### DEBUG: no masking
-    # masking = True
-    # batch["obs_mask"] = torch.zeros_like(batch["co2massmix"], dtype=torch.bool)
-    # batch["obs_values"] = torch.full_like(batch["co2massmix"], float('nan'), device=device)
-    # ### End DEBUG
     if analyze_masking and masking:
         plot_masking_diagnostics(batch, ds_all,
                                  str(outpath).replace("preds", "plots"),
@@ -658,14 +642,6 @@ def iterative_generate(
         base_batch["obs_values"] = obs_values_normed
 
     for i in range(n_samples):
-        # base_batch = {k: v.unsqueeze(0).to(device) for k, v in dataset[i].items()} # condition on different timesteps
-
-        # if masking:
-        #     target_var = target_vars_3d[0]
-        #     obs_mask, obs_values = create_mask(base_batch, target_var=target_var, obs_fraction=obs_fraction, pattern=pattern, nlat=nlat, nlon=nlon)
-        #     base_batch["obs_mask"] = obs_mask
-        #     obs_values_normed = model.model.normalize_observations(obs_values, base_batch, target_var=target_var)
-        #     base_batch["obs_values"] = obs_values_normed
         batch = {k: v.clone() for k, v in base_batch.items()}
         batch["noise"] = noise_list[i].to(device)
 
@@ -695,8 +671,7 @@ def iterative_generate(
             time=("time", prototype_zarr.time[:traj.shape[1]].values if traj.ndim > 0 else [0]),
             sample=("sample", [i]),
         )
-        print(ds.dims)
-        
+
         if remap:
             ds = remap_with_cdo(dataset, prototype_zarr.isel(time=0), ds)
 

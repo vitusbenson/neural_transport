@@ -116,11 +116,19 @@ def normalize_minmax(arr):
     return normalized
 
 
-def load_carbontracker_tests() -> torch.Tensor:
-    """Load and return CarbonTracker CO₂ ground truth tensor."""
+def load_carbontracker_tests(data_path=None) -> torch.Tensor:
+    """Load and return CarbonTracker CO₂ ground truth tensor.
+
+    Args:
+        data_path: Path to CarbonTracker data directory. Must be provided.
+    """
+    if data_path is None:
+        raise ValueError(
+            "data_path must be provided. Pass the path to the CarbonTracker data directory."
+        )
 
     data_kwargs = dict(
-        data_path="/Net/Groups/BGI/tscratch/vbenson/graph_tm/data/Carbontracker",
+        data_path=data_path,
         dataset="carbontracker",
         grid="latlon5.625",
         vertical_levels="l10",

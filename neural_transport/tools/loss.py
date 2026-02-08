@@ -45,13 +45,14 @@ class MAE(nn.Module):
         return loss, losses
 
 class FlowMatchingMSE(nn.Module):
-    def __init__(self):
+    def __init__(self, target_var="co2massmix"):
         super().__init__()
-    
+        self.target_var = target_var
+
     def forward(self, preds, batch):
         loss = 0
         losses = {}
-        se = (preds["co2massmix"] - preds["dx_t"])**2
+        se = (preds[self.target_var] - preds["dx_t"])**2
         mse = torch.mean(se)
 
         loss += mse

@@ -1,4 +1,3 @@
-import time as pytime
 from pathlib import Path
 
 import numpy as np
@@ -9,9 +8,15 @@ import xskillscore
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 from neural_transport.tools.conversion import (
+    M_CO2,
+    M_C,
     density_to_massmix,
     massmix_to_molemix,
 )
+
+# Ratio of CO2 molecular mass to carbon atomic mass (~3.664)
+M_CO2_OVER_M_C = M_CO2 / M_C
+
 from neural_transport.tools.metrics import (
     crps,
     compute_error_maps,
@@ -77,8 +82,6 @@ def compute_score_df(targs, preds, freq="QS"):
     preds["lat"] = targs["lat"]
     preds["lon"] = targs["lon"]
     preds["level"] = targs["level"]
-    start = pytime.time()
-
     molemix_targ = (
         massmix_to_molemix(targs.co2massmix)
         .persist()
@@ -98,8 +101,6 @@ def compute_score_df(targs, preds, freq="QS"):
     # Remove the time dimension from weights
     weights = weights.isel(time=0)
 
-    print(f"Data Loading {pytime.time() - start}")
-
     metrics = {}
 
     ### Metrics
@@ -109,18 +110,15 @@ def compute_score_df(targs, preds, freq="QS"):
     # 3D, per layer, per grid cell, per voxel (in time)
     # num steps before R^2 < 0.8
     # For Taylor Plot: RMSE, sigma_pred, sigma_targ, pearson corr coef
-    start = pytime.time()
-
     targ_mass = (targs.co2massmix * targs.airmass) / 1e6
     pred_mass = (preds.co2massmix * targs.airmass) / 1e6
 
-    targ_mass_sum = targ_mass.sum(["lat", "lon", "level"]).compute() / 3.664
-    pred_mass_sum = pred_mass.sum(["lat", "lon", "level"]).compute() / 3.664
+    targ_mass_sum = targ_mass.sum(["lat", "lon", "level"]).compute() / M_CO2_OVER_M_C
+    pred_mass_sum = pred_mass.sum(["lat", "lon", "level"]).compute() / M_CO2_OVER_M_C
 
     metrics["Mass_RMSE"] = (
         (targ_mass_sum - pred_mass_sum) ** 2
     ).mean().compute().item() ** 0.5
-    print(f"Mass RMSE {pytime.time() - start}")
 
     metrics["RelMass_RMSE"] = (
         ((targ_mass_sum - pred_mass_sum) / targ_mass_sum) ** 2
@@ -142,28 +140,21 @@ def compute_score_df(targs, preds, freq="QS"):
     for conc, targ, pred in [
         ("co2molemix", molemix_targ, molemix_pred),
     ]:
-        start = pytime.time()
         mse = xskillscore.mse(
             targ.chunk({"lat": -1, "lon": -1, "level": -1}),
             pred.chunk({"lat": -1, "lon": -1, "level": -1}),
             dim=["lat", "lon", "level"],
             weights=weights,
-        ).compute()  # ((pred - targ) ** 2).mean().compute().item()
+        ).compute()
         metrics[f"RMSE_4D_{conc}"] = mse.mean().item() ** 0.5
-        print(f"RMSE 4D {pytime.time() - start}")
-        print(metrics)
 
-        start = pytime.time()
         metrics[f"StdDev_Targ_4D_{conc}"] = (
             targ.weighted(np.cos(np.deg2rad(targ.lat))).std().compute().item()
         )
         metrics[f"StdDev_Pred_4D_{conc}"] = (
             pred.weighted(np.cos(np.deg2rad(targ.lat))).std().compute().item()
         )
-        print(f"Std Devs 4D {pytime.time() - start}")
-        print(metrics)
 
-        start = pytime.time()
         r = xskillscore.pearson_r(
             targ.chunk({"lat": -1, "lon": -1, "level": -1}),
             pred.chunk({"lat": -1, "lon": -1, "level": -1}),
@@ -171,10 +162,8 @@ def compute_score_df(targs, preds, freq="QS"):
             weights=weights,
         ).compute()
         metrics[f"PearsonCorrCoef_3D_{conc}"] = r.mean().item()
-        print(f"PearsonCorrCoef_3D_ {pytime.time() - start}")
 
         metrics[f"R2_3D_{conc}"] = (r**2).mean().item()
-        print(metrics)
 
         r2f = freq_mean(r**2, freq="QS")
         rmsef = freq_mean(mse, freq="QS") ** 0.5
@@ -184,7 +173,6 @@ def compute_score_df(targs, preds, freq="QS"):
             )
             metrics[f"RMSE_3D_{days}d_{conc}"] = rmsef.isel(time=days * 4).mean().item()
 
-        start = pytime.time()
         metrics[f"NSE_3D_{conc}"] = (
             xskillscore.r2(
                 targ.chunk({"lat": -1, "lon": -1, "level": -1}),
@@ -195,19 +183,11 @@ def compute_score_df(targs, preds, freq="QS"):
             .compute()
             .median()
             .item()
-        )  # 1 - mse / (metrics[f"StdDev_Targ_3D_{conc}"]**2 + 1e-12)
-        print(f"NSE_3D_ {pytime.time() - start}")
-
-        start = pytime.time()
+        )
 
         targ_mean = targ.weighted(np.cos(np.deg2rad(targ.lat))).mean().compute().item()
 
         metrics[f"RelRMSE_3D_{conc}"] = (mse.mean().item() ** 0.5) / (targ_mean + 1e-12)
-
-        print(f"RelRMSE_3D_ {pytime.time() - start}")
-
-        start = pytime.time()
-        # try:
 
         metrics[f"Days_R2>0.8_{conc}"] = get_first_idx_below_threshold(
             r**2, threshold=0.8, freq=freq
@@ -231,17 +211,12 @@ def compute_score_df(targs, preds, freq="QS"):
         )
         metrics[f"Days_minR2>0.8_{conc}"] = get_first_idx_below_threshold(
             r2m, threshold=0.8, freq=freq
-        )  # This Takes first Min(Level), then Freq_mean --> in plot_results is done other way around
-        # except:
-        #     metrics[f"Days_R2>0.8_{conc}"] = 92
+        )
         metrics[f"Days_minR2>0.9_{conc}"] = get_first_idx_below_threshold(
             r2m, threshold=0.9, freq=freq
         )
-        print(f"Days_R2 {pytime.time() - start}")
-        print(metrics)
 
-        for dim in ["lat", "lon", "level"]:  # , "time"]:
-            start = pytime.time()
+        for dim in ["lat", "lon", "level"]:
             mse = (
                 ((pred - targ) ** 2)
                 .weighted(np.cos(np.deg2rad(targ.lat)))
@@ -256,9 +231,7 @@ def compute_score_df(targs, preds, freq="QS"):
             metrics[f"RelRMSE_{dim}_{conc}"] = (
                 ((mse**0.5) / (targ_mean + 1e-12)).mean().item()
             )
-            print(f"RMSE RelRMSE {dim} {pytime.time() - start}")
 
-            start = pytime.time()
             r2 = (
                 xskillscore.pearson_r(
                     targ.chunk({dim: -1}),
@@ -272,10 +245,7 @@ def compute_score_df(targs, preds, freq="QS"):
                 r2.mean().item()
                 if dim == "lat"
                 else (r2).weighted(np.cos(np.deg2rad(targ.lat))).mean().item()
-            )  # (xr.corr(targ, pred, dim = dim)**2).mean().compute().item()
-            print(f"R2 {dim} {conc} {pytime.time() - start}")
-
-            start = pytime.time()
+            )
 
             nse = xskillscore.r2(
                 targ.chunk({dim: -1}),
@@ -283,23 +253,12 @@ def compute_score_df(targs, preds, freq="QS"):
                 dim=dim,
                 weights=weights.isel(lon=0, level=0) if dim == "lat" else None,
             ).compute()
-            metrics[f"NSE_{dim}_{conc}"] = (
-                nse.median().item()
-            )  # if dim == "lat" else (nse).weighted(np.cos(np.deg2rad(targ.lat))).median().item() # (1 - mse / (targ.var([dim]) + 1e-12)).compute().median().item()
-            print(f"NSE {dim} {conc} {pytime.time() - start}")
+            metrics[f"NSE_{dim}_{conc}"] = nse.median().item()
 
-            start = pytime.time()
             metrics[f"AbsBias_{dim}_{conc}"] = (absbias).mean().item()
             metrics[f"RelAbsBias_{dim}_{conc}"] = (
                 (absbias / (targ_mean + 1e-12)).mean().item()
             )
-            print(f"AbsBias RelAbsBias {dim} {conc} {pytime.time() - start}")
-            print(metrics)
-
-        # start = pytime.time()
-        # metrics[f"PearsonCorrCoef_4D_{conc}"] = (xskillscore.pearson_r(targ.compute(), pred.compute(), dim = ["lat", "lon", "level", "time"]).compute()).item()
-        # print(f"PearsonCorrCoef_4D_ {pytime.time() - start}")
-        # print(metrics)
 
     df = pd.Series(metrics)
 
@@ -320,8 +279,6 @@ def compute_score_df_generate(targs, preds, target_var="co2massmix", **generate_
     if "time" in preds.dims:
         preds = preds.isel(time=-1)
 
-    # start = pytime.time()
-
     # Convert to mole fraction
     molemix_targ = massmix_to_molemix(targs[target_var]).transpose("level", "lat", "lon")
     molemix_pred = massmix_to_molemix(preds[target_var]).transpose("sample", "level", "lat", "lon")
@@ -330,17 +287,12 @@ def compute_score_df_generate(targs, preds, target_var="co2massmix", **generate_
     weights = np.cos(np.deg2rad(targs.lat))
     _, weights = xr.broadcast(targs[target_var], weights)
 
-    # print(f"Data Loading {pytime.time() - start}")
-
     results = []
 
     for i in range(preds.sizes["sample"]):
         pred_i = molemix_pred.isel(sample=i)
 
         metrics = {}
-
-        ### Metrics
-        # start = pytime.time()
 
         # Mass balance metrics
         if "airmass" in targs and "airmass" in preds:
@@ -350,18 +302,14 @@ def compute_score_df_generate(targs, preds, target_var="co2massmix", **generate_
             targ_mass = targs[target_var]
             pred_mass = preds[target_var].isel(sample=i)
 
-        targ_mass_sum = targ_mass.sum(["lat", "lon", "level"]).compute() / 3.664
-        pred_mass_sum = pred_mass.sum(["lat", "lon", "level"]).compute() / 3.664
+        targ_mass_sum = targ_mass.sum(["lat", "lon", "level"]).compute() / M_CO2_OVER_M_C
+        pred_mass_sum = pred_mass.sum(["lat", "lon", "level"]).compute() / M_CO2_OVER_M_C
 
         metrics["Mass_RMSE"] = ((targ_mass_sum - pred_mass_sum) ** 2).mean().item() ** 0.5
-        # print(f"Mass RMSE {pytime.time() - start}")
-        # start = pytime.time()
 
         metrics["RelMass_RMSE"] = (
             ((targ_mass_sum - pred_mass_sum) / (targ_mass_sum + 1e-12)) ** 2
         ).mean().item() ** 0.5
-        # print(f"RelMass_RMSE {pytime.time() - start}")
-        # start = pytime.time()
 
         ### RMSE / R² across lat, lon, level
         mse = xskillscore.mse(
@@ -372,8 +320,6 @@ def compute_score_df_generate(targs, preds, target_var="co2massmix", **generate_
         ).compute()
 
         metrics["RMSE_3D_co2molemix"] = mse.item() ** 0.5
-        # print(f"RMSE_3D_co2molemix {pytime.time() - start}")
-        # start = pytime.time()
 
         r = xskillscore.pearson_r(
             molemix_targ.chunk({"lat": -1, "lon": -1, "level": -1}),
@@ -381,19 +327,13 @@ def compute_score_df_generate(targs, preds, target_var="co2massmix", **generate_
             dim=["lat", "lon", "level"],
             weights=weights,
         ).compute()
-        # print(f"Pearson_R {pytime.time() - start}")
-        # start = pytime.time()
 
         metrics["PearsonCorrCoef_3D_co2molemix"] = r.item()
         metrics["R2_3D_co2molemix"] = (r**2).item()
-        # print(f"R2_3D_co2molemix {pytime.time() - start}")
-        # start = pytime.time()
 
         # Relative RMSE
         targ_mean = molemix_targ.weighted(weights).mean().compute().item()
         metrics["RelRMSE_3D_co2molemix"] = (mse.item() ** 0.5) / (targ_mean + 1e-12)
-        # print(f"RelRMSE_3D_co2molemix {pytime.time() - start}")
-        # start = pytime.time()
 
         # Per-dimension metrics (lat, lon, level)
         for dim in ["lat", "lon", "level"]:
@@ -405,9 +345,6 @@ def compute_score_df_generate(targs, preds, target_var="co2massmix", **generate_
             )
             metrics[f"RMSE_{dim}_co2molemix"] = float(mse_dim.mean()**0.5)
 
-            # print(f"RMSE_{dim}_co2molemix {pytime.time() - start}")
-            # start = pytime.time()
-        
         results.append(metrics)
     
     df = pd.DataFrame(results)
@@ -486,7 +423,6 @@ def compute_score_df_generate(targs, preds, target_var="co2massmix", **generate_
         },
     )
 
-    # print(f"Metrics {results} {pytime.time() - start}")
     return df, df_global_scalars, maps
 
 

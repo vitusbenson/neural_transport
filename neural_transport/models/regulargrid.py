@@ -125,9 +125,6 @@ class RegularGridModel(nn.Module):
                 mode=self.horizontal_interpolation,
             )
 
-        # if not x_in.isfinite().all():
-        #     print("x_in not finite", x_in.min(), x_in.mean(), x_in.max())
-
         return x_in
 
     def normalize_batch_target_vars(self, batch):
@@ -197,14 +194,12 @@ class RegularGridModel(nn.Module):
             dim=-1,
         )
 
-        # if not x_out.isfinite().all():
-        #     print("x_out not finite", x_out.min(), x_out.mean(), x_out.max())
-
         if self.predict_delta:
             x_out_resc = x_out * x_grid_delta_scale + x_grid_delta_offset
             x_out_next = x_out_prev + x_out_resc
         else:
-            if self.targshift:
+            has_next_keys = all(f"{v}_next" in batch for v in self.target_vars)
+            if self.targshift and has_next_keys:
                 x_out_next = torch.cat(
                     [batch[f"{v}_next"] for v in self.target_vars],
                     dim=-1,
@@ -215,13 +210,6 @@ class RegularGridModel(nn.Module):
             else:
                 x_out_next = x_out * x_grid_scale + x_grid_offset
 
-        # if not x_out_next.isfinite().all():
-        #     print(
-        #         "x_out_next not finite",
-        #         x_out_next.min(),
-        #         x_out_next.mean(),
-        #         x_out_next.max(),
-        #     )
         return x_out_next
 
     def postprocess_outputs(self, x_out, batch, denormalize=True):
@@ -252,10 +240,6 @@ class RegularGridModel(nn.Module):
             i += C
 
         for molecule in self.molecules:
-
-            # mass_pred_pre_fixer = (
-            #     (preds[f"{molecule}massmix"] / 1e6) * batch["airmass_next"]
-            # ).sum((1, 2), keepdim=True)
 
             if self.massfixer and (not self.training):
 
@@ -297,10 +281,6 @@ class RegularGridModel(nn.Module):
                         )
                     ) / batch["airmass_next"]
 
-            # mass_pred_after_fixer = (
-            #     (preds[f"{molecule}massmix"] / 1e6) * batch["airmass_next"]
-            # ).sum((1, 2), keepdim=True)
-
             if self.add_surfflux:
 
                 surfflux_as_massmixsource_prev = (
@@ -320,40 +300,5 @@ class RegularGridModel(nn.Module):
                     preds[f"{molecule}massmix"][..., :1]
                     + surfflux_as_massmixsource_prev
                 )
-
-            ### NOTE: Roughly 0.5% Mass Error remains !!!
-            ### THIS IS IN THE DATA ALREADY :/ don't know why.
-
-            # virtual_pred = batch[f"{molecule}massmix"].clone()
-            # virtual_pred = virtual_pred * batch["airmass"] / batch["airmass_next"]
-            # virtual_pred[..., :1] = (
-            #     virtual_pred[..., :1] + surfflux_as_massmixsource_prev
-            # )
-
-            # mass_pred = (
-            #     (preds[f"{molecule}massmix"] / 1e6) * batch["airmass_next"]
-            # ).sum((1, 2), keepdim=True)
-            # mass_virtual = ((virtual_pred / 1e6) * batch["airmass_next"]).sum(
-            #     (1, 2), keepdim=True
-            # )
-            # mass_targ = (
-            #     (batch[f"{molecule}massmix_next"] / 1e6) * batch["airmass_next"]
-            # ).sum((1, 2), keepdim=True)
-            # mass_old = ((batch[f"{molecule}massmix"] / 1e6) * batch["airmass"]).sum(
-            #     (1, 2), keepdim=True
-            # )
-
-            # rmse_mass = ((mass_targ - mass_pred) ** 2).mean() ** 0.5
-            # rmse_pre = ((mass_targ - mass_pred_pre_fixer) ** 2).mean() ** 0.5
-            # rmse_zero = ((mass_old - mass_pred_after_fixer) ** 2).mean() ** 0.5
-            # rmse_post = ((mass_targ - mass_pred_after_fixer) ** 2).mean() ** 0.5
-            # rmse_virtual = ((mass_targ - mass_virtual) ** 2).mean() ** 0.5
-
-            # rmse_delta = ((mass_targ - mass_old) ** 2).mean() ** 0.5
-
-            # print(
-            #     f"RMSE in {molecule} mass: {rmse_mass:.5f}, RMSE Delta: {rmse_delta:.5f}, RMSE PreFixer: {rmse_pre:.5f}, RMSE PostFixer: {rmse_post:.5f}, RMSE Virtual {rmse_virtual:.5f}, RMSE Zero {rmse_zero:.5f}"
-            # )
-            # breakpoint()
 
         return preds

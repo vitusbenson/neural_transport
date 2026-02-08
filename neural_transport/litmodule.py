@@ -5,7 +5,7 @@ import pytorch_lightning as pl
 import torch
 
 from neural_transport.models import MODELS
-from neural_transport.models.wrappers_registry import MODELWRAPPERS
+from neural_transport.models.flowmatching import FlowMatching
 from neural_transport.tools.loss import LOSSES
 from neural_transport.tools.metrics import ManyMetrics
 from neural_transport.tools.plot import plots_val_step
@@ -41,8 +41,6 @@ class NeuralTransport(pl.LightningModule):
         self.save_hyperparameters()
         if model in MODELS:
             self.model = MODELS[model](**model_kwargs)
-        elif model in MODELWRAPPERS:
-            self.model = MODELWRAPPERS[model](**model_kwargs)
         else:
             self.model = model
         if pretrained_ckptpath is not None:
@@ -57,24 +55,6 @@ class NeuralTransport(pl.LightningModule):
                 "multiscale_decoder.position_feats",
             ]:
                 model_state_dict.pop(key, None)
-
-            # if model == "sfno":
-            #     for i, block in enumerate(self.model.sfnonet.blocks):
-            #         old_weight = model_state_dict[
-            #             f"sfnonet.blocks.{i}.filter.filter.weight"
-            #         ]
-            #         # new_weight = torch.ones_like(block.filter.filter.weight)
-            #         C_out, C_in = block.filter.filter.weight.shape[:2]
-            #         new_weight = torch.eye(
-            #             C_out,
-            #             C_in,
-            #             dtype=block.filter.filter.weight.dtype,
-            #             device=block.filter.filter.weight.device,
-            #         )[:, :, None, None].expand_as(block.filter.filter.weight).clone()
-            #         new_weight[:, :, : old_weight.shape[2], :] = old_weight
-            #         model_state_dict[f"sfnonet.blocks.{i}.filter.filter.weight"] = (
-            #             new_weight
-            #         )
 
             self.model.load_state_dict(model_state_dict, strict=False)
 
@@ -137,12 +117,12 @@ class NeuralTransport(pl.LightningModule):
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         dataloader_name = self.hparams.val_dataloader_names[dataloader_idx]
 
-        if type(self.model).__name__ == "FlowMatching":
+        if isinstance(self.model, FlowMatching):
             self.model.train()
 
         loss, losses, preds = self.common_step(batch)
 
-        if type(self.model).__name__ == "FlowMatching":
+        if isinstance(self.model, FlowMatching):
             for v in preds:
                 if v != "dx_t":
                     preds[v] = preds[v] * batch[f"{v}_scale"] + batch[f"{v}_offset"]

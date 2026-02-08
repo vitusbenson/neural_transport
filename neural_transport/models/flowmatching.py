@@ -11,7 +11,6 @@ from flow_matching.path import AffineProbPath
 from flow_matching.solver import ODESolver
 
 # neural_transport
-from neural_transport.models import MODELS
 from neural_transport.models.regulargrid import RegularGridModel
 
 
@@ -70,10 +69,7 @@ class MaskedVelocityWrapper(VelocityWrapper):
 
         dt = self.compute_dt(t)
 
-        # dxt = (x_effective - x)/dt + f(x_effective, t)
         dtx = (x_effective - x) / dt + super().forward(x_effective, t)
-        # dxt = f(x,t)
-        # dxt = torch.where(self.obs_mask, self.obs_values - x, super().forward(x, t))
 
         return dtx
 
@@ -418,6 +414,7 @@ class FlowMatching(RegularGridModel):
             generate_kwargs=None,
             ):
         
+        from neural_transport.models import MODELS
         self.submodel = MODELS[submodel](**model_kwargs)
         self.return_intermediates = return_intermediates
         self.generating = generating

@@ -208,7 +208,6 @@ class CarbonDataset(Dataset):
             step_idx = t % n_samples_per_startdate
             if step_idx + 1 >= len(self.ds.step):
                 print("oh", step_idx, t, n_samples_per_startdate, len(self.ds.step))
-            slice(startdate_idx, startdate_idx + 1)
             step_slice = slice(
                 step_idx * self.n_timesteps, (step_idx + 1) * self.n_timesteps + 1
             )

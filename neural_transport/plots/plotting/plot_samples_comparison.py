@@ -148,6 +148,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Compare predicted vs. ground truth CO₂ samples.")
     parser.add_argument("--samples_path", type=str, required=True,
                         help="Path to .zarr or .nc file containing trajectory predictions.")
+    parser.add_argument("--data_path", type=str, required=True,
+                        help="Path to CarbonTracker data directory.")
     parser.add_argument("--out_dir", type=str, required=True,
                         help="Output directory for saved plots.")
     parser.add_argument("--projections", nargs="*", default=["Robinson"],
@@ -163,7 +165,7 @@ if __name__ == "__main__":
 
     path = Path(args.samples_path)
     samples = xr.open_zarr(path) if path.suffix == ".zarr" else xr.open_dataset(path)
-    co2tests = load_carbontracker_tests()
+    co2tests = load_carbontracker_tests(data_path=args.data_path)
 
     cmaps = get_cmap_list(args.use_ipcc, args.use_selected)
     cmaps = cmaps[:args.n_samples]
