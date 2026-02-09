@@ -33,6 +33,9 @@ class XCO2Guidance(nn.Module):
         Returns:
             xco2: [B, 1, Nlat, Nlon] - column average
         """
+        if self.ak is None:
+            self.ak = torch.ones(x.shape, dtype=x.dtype, device=x.device, requires_grad=False)
+        
         # Sum over vertical levels weighted by averaging kernel
         xco2 = (self.ak * x).sum(dim=1, keepdim=True)  # [B, 1, Nlat, Nlon]
         return xco2

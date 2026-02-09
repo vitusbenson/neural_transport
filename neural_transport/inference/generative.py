@@ -508,6 +508,7 @@ def iterative_generate_oco2(
             else:
                 obs_mask, obs_values = create_oco2_mask_test(batch_gen, target_var=target_var, mask_pattern=mask_pattern, nlat=nlat, nlon=nlon)
             batch_gen["obs_mask_original"] = obs_mask.clone()
+            ### End DEBUG
             batch_gen["obs_mask"] = obs_mask
             obs_values_normed = model.model.normalize_observations(obs_values, batch_gen, target_var=target_var, targshift=False)
             for k in target_vars_2d + generate_kwargs["generate_data_kwargs"]["forcing_vars"] + ["obs_mask", "obs_mask_original"]:
