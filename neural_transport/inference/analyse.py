@@ -14,14 +14,14 @@ from neural_transport.tools.conversion import (
     massmix_to_molemix,
 )
 
-# Ratio of CO2 molecular mass to carbon atomic mass (~3.664)
-M_CO2_OVER_M_C = M_CO2 / M_C
-
 from neural_transport.tools.metrics import (
     crps,
     compute_error_maps,
     compute_error_scalars,
 )
+
+# Ratio of CO2 molecular mass to carbon atomic mass (~3.664)
+M_CO2_OVER_M_C = M_CO2 / M_C
 
 
 def freq_mean(data, freq="QS", average_time=False):
@@ -145,7 +145,7 @@ def compute_score_df(targs, preds, freq="QS"):
             pred.chunk({"lat": -1, "lon": -1, "level": -1}),
             dim=["lat", "lon", "level"],
             weights=weights,
-        ).compute()
+        ).compute() # ((pred - targ) ** 2).mean().compute().item()
         metrics[f"RMSE_4D_{conc}"] = mse.mean().item() ** 0.5
 
         metrics[f"StdDev_Targ_4D_{conc}"] = (
@@ -183,7 +183,7 @@ def compute_score_df(targs, preds, freq="QS"):
             .compute()
             .median()
             .item()
-        )
+        ) # 1 - mse / (metrics[f"StdDev_Targ_3D_{conc}"]**2 + 1e-12)
 
         targ_mean = targ.weighted(np.cos(np.deg2rad(targ.lat))).mean().compute().item()
 
@@ -211,7 +211,9 @@ def compute_score_df(targs, preds, freq="QS"):
         )
         metrics[f"Days_minR2>0.8_{conc}"] = get_first_idx_below_threshold(
             r2m, threshold=0.8, freq=freq
-        )
+        ) # This Takes first Min(Level), then Freq_mean --> in plot_results is done other way around
+        # except:
+        #     metrics[f"Days_R2>0.8_{conc}"] = 92
         metrics[f"Days_minR2>0.9_{conc}"] = get_first_idx_below_threshold(
             r2m, threshold=0.9, freq=freq
         )
@@ -245,7 +247,7 @@ def compute_score_df(targs, preds, freq="QS"):
                 r2.mean().item()
                 if dim == "lat"
                 else (r2).weighted(np.cos(np.deg2rad(targ.lat))).mean().item()
-            )
+            ) # (xr.corr(targ, pred, dim = dim)**2).mean().compute().item()
 
             nse = xskillscore.r2(
                 targ.chunk({dim: -1}),
@@ -253,13 +255,13 @@ def compute_score_df(targs, preds, freq="QS"):
                 dim=dim,
                 weights=weights.isel(lon=0, level=0) if dim == "lat" else None,
             ).compute()
-            metrics[f"NSE_{dim}_{conc}"] = nse.median().item()
+            metrics[f"NSE_{dim}_{conc}"] = nse.median().item() # if dim == "lat" else (nse).weighted(np.cos(np.deg2rad(targ.lat))).median().item() # (1 - mse / (targ.var([dim]) + 1e-12)).compute().median().item()
 
             metrics[f"AbsBias_{dim}_{conc}"] = (absbias).mean().item()
             metrics[f"RelAbsBias_{dim}_{conc}"] = (
                 (absbias / (targ_mean + 1e-12)).mean().item()
             )
-
+    print("Computed metrics:", metrics)
     df = pd.Series(metrics)
 
     return df
@@ -423,6 +425,7 @@ def compute_score_df_generate(targs, preds, target_var="co2massmix", **generate_
         },
     )
 
+    print(f"Computed metrics: {results}")
     return df, df_global_scalars, maps
 
 

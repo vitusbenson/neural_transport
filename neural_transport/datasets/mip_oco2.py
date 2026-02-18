@@ -288,7 +288,8 @@ def regrid_temporal(
 def regrid_spatial(ds: xr.Dataset,
                    variables: list[str] | None = None,
                    gridname: str = "latlon2x3",
-                   weights: np.ndarray | None = None) -> xr.Dataset:
+                   weights: np.ndarray | None = None,
+                   lon_180: bool = False) -> xr.Dataset:
     """
     Spatially regrid OCO-2 soundings to a regular lat-lon grid.
 
@@ -302,6 +303,8 @@ def regrid_spatial(ds: xr.Dataset,
         Name of the target grid (must exist in LATLON_PROTOTYPE_COORDS).
     weights : array-like, optional
         Optional weights for computing weighted means.
+    lon_180 : bool, optional
+        If True, convert longitude from [0, 360) to [-180, 180) range.
 
     Returns
     -------
@@ -390,6 +393,9 @@ def regrid_spatial(ds: xr.Dataset,
             out_vars[var] = out
 
     ds_spatial = xr.merge(list(out_vars.values()))
+    if lon_180:
+        ds_spatial = ds_spatial.assign_coords(lon=((ds_spatial["lon"] + 180) % 360) - 180)
+        ds_spatial = ds_spatial.sortby("lon")
 
     ds_spatial.attrs.update({
         "title": f"OCO-2 regridded to {gridname}",
@@ -442,6 +448,7 @@ def regrid_spatiotemporal(
     vertical_levels: str | None = "l34",
     freq: str = "3h",
     weights_var: str | None = None,
+    lon_180: bool = False,
 ) -> xr.Dataset:
     """
     Joint spatio-temporal regridding: aggregate OCO-2 soundings into bins
@@ -460,6 +467,8 @@ def regrid_spatiotemporal(
     weights_var : str | None
         Name of per-sounding weights variable (e.g. 1/uncertainty^2). If None,
         plain mean is used.
+    lon_180 : bool, optional
+        If True, convert longitude from [0, 360) to [-180, 180) range.
 
     Returns
     -------
@@ -526,6 +535,10 @@ def regrid_spatiotemporal(
 
     ds_regrid = xr.merge(list(out_vars.values()))
     ds_regrid = ds_regrid.assign_coords(time=time_labels, lat=lat_centers, lon=lon_centers)
+
+    if lon_180:
+        ds_regrid = ds_regrid.assign_coords(lon=((ds_regrid["lon"] + 180) % 360) - 180)
+        ds_regrid = ds_regrid.sortby("lon")
 
     ds_regrid.attrs.update(
         {
@@ -676,6 +689,25 @@ def regrid_mip_oco2(
 
     ds = reconstruct_pressure_levels(ds_oco2)
     ds = ds.rename({"latitude": "lat", "longitude": "lon", "levels": "level"})
+
+    # --- Regridding operation ---
+
+    # print(f"Regridding temporally OCO-2 to {freq} frequency")
+    # ds_temporal = regrid_temporal(
+    #     ds,
+    #     variables=["xco2_raw", "xco2_apriori", "xco2_2019_scale", "co2_profile_retrieved", "pressure_levels"],
+    #     freq=freq,
+    #     weights=None,
+    # )
+
+    # print(f"Regridding Spatially OCO-2 to {gridname}")
+    # ds_spatiotemporal = regrid_spatial(
+    #     ds_temporal,
+    #     variables=["xco2_raw", "xco2_apriori", "xco2_2019_scale", "co2_profile_retrieved", "pressure_levels"],
+    #     gridname=gridname,
+    #     weights=None,
+    #     lon_180=False,
+    # )
 
     print(f"Regridding spatiotemporally OCO-2 to {gridname}_{vertical_levels}_{freq}")
     ds_spatiotemporal = regrid_spatiotemporal(

@@ -480,13 +480,16 @@ def iterative_generate_oco2(
 
     dss = []
     obss = []
-    T = len(dataset_gen)
+    if mask_source == "real":
+        T = len(dataset_gen)
+    else:
+        T = min(len(dataset), len(dataset_gen))
     offset = align_time(dataset.ds.time.values, dataset_gen.ds.time.values)
     print(f"Time alignment offset: {offset} timesteps")
     window_steps = max(1, window_hours // freq_int)
     print(f"Using observation window: {window_hours} hours = {window_steps} timesteps")
 
-    for t in tqdm(range(T), desc="Timestep") if verbose else range(T):
+    for t in tqdm(range(T), desc="Generating") if verbose else range(T):
         # batches: dict of tensors [B T N C]
         batch, batch_gen = get_batches(t, offset, dataset, dataset_gen, window_steps, device)
 
@@ -586,6 +589,7 @@ def iterative_generate(
     outpath,
     rollout=False,
     device="cuda",
+    verbose=False,
     zarr_filename=None,
     freq=None,
     zero_surfflux=False,
@@ -595,6 +599,7 @@ def iterative_generate(
     save_obs=True,
     **generate_kwargs,
 ):
+    condition_one_timestep = generate_kwargs.get("condition_one_timestep", True)
     n_samples = generate_kwargs.get("n_samples", 10)
     masking = generate_kwargs.get("masking", False)
     pattern = generate_kwargs.get("pattern", "vertical")
@@ -629,19 +634,27 @@ def iterative_generate(
                        analyze_noise=analyze_noise,
                        outpath=outpath)
 
-    base_batch = {k: v.unsqueeze(0).to(device) for k, v in dataset[0].items()} # condition on the first timestep
+    if condition_one_timestep:
+        base_batch = {k: v.unsqueeze(0).to(device) for k, v in dataset[0].items()} # condition on the first timestep
+        if masking:
+            target_var = target_vars_3d[0]
+            if pattern == "oco2":
+                obs_mask, obs_values = create_oco2_mask(base_batch, target_var=target_var)
+            else:
+                obs_mask, obs_values = create_mask(base_batch, target_var=target_var, obs_fraction=obs_fraction, pattern=pattern, nlat=nlat, nlon=nlon)
+            base_batch["obs_mask"] = obs_mask
+            obs_values_normed = model.model.normalize_observations(obs_values, base_batch, target_var=target_var)
+            base_batch["obs_values"] = obs_values_normed
 
-    if masking:
-        target_var = target_vars_3d[0]
-        if pattern == "oco2":
-            obs_mask, obs_values = create_oco2_mask(base_batch, target_var=target_var)
-        else:
-            obs_mask, obs_values = create_mask(base_batch, target_var=target_var, obs_fraction=obs_fraction, pattern=pattern, nlat=nlat, nlon=nlon)
-        base_batch["obs_mask"] = obs_mask
-        obs_values_normed = model.model.normalize_observations(obs_values, base_batch, target_var=target_var)
-        base_batch["obs_values"] = obs_values_normed
-
-    for i in range(n_samples):
+    for i in tqdm(range(n_samples), desc="Generating samples") if verbose else range(n_samples):
+        if not condition_one_timestep:
+            base_batch = {k: v.unsqueeze(0).to(device) for k, v in dataset[i].items()} # condition on different timesteps
+            if masking:
+                target_var = target_vars_3d[0]
+                obs_mask, obs_values = create_mask(base_batch, target_var=target_var, obs_fraction=obs_fraction, pattern=pattern, nlat=nlat, nlon=nlon)
+                base_batch["obs_mask"] = obs_mask
+                obs_values_normed = model.model.normalize_observations(obs_values, base_batch, target_var=target_var)
+                base_batch["obs_values"] = obs_values_normed
         batch = {k: v.clone() for k, v in base_batch.items()}
         batch["noise"] = noise_list[i].to(device)
 

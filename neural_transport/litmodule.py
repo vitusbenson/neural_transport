@@ -5,7 +5,7 @@ import pytorch_lightning as pl
 import torch
 
 from neural_transport.models import MODELS
-from neural_transport.models.flowmatching import FlowMatching
+from neural_transport.models.wrappers_registry import MODELWRAPPERS
 from neural_transport.tools.loss import LOSSES
 from neural_transport.tools.metrics import ManyMetrics
 from neural_transport.tools.plot import plots_val_step
@@ -41,6 +41,8 @@ class NeuralTransport(pl.LightningModule):
         self.save_hyperparameters()
         if model in MODELS:
             self.model = MODELS[model](**model_kwargs)
+        elif model in MODELWRAPPERS:
+            self.model = MODELWRAPPERS[model](**model_kwargs)
         else:
             self.model = model
         if pretrained_ckptpath is not None:
@@ -117,12 +119,12 @@ class NeuralTransport(pl.LightningModule):
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         dataloader_name = self.hparams.val_dataloader_names[dataloader_idx]
 
-        if isinstance(self.model, FlowMatching):
+        if isinstance(self.model, MODELWRAPPERS["flowmatching"]):
             self.model.train()
 
         loss, losses, preds = self.common_step(batch)
 
-        if isinstance(self.model, FlowMatching):
+        if isinstance(self.model, MODELWRAPPERS["flowmatching"]):
             for v in preds:
                 if v != "dx_t":
                     preds[v] = preds[v] * batch[f"{v}_scale"] + batch[f"{v}_offset"]
