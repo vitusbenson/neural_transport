@@ -201,7 +201,7 @@ def predict(
         print(f"Generating {ckptpath} {ckpt} CKPT")
         model = NeuralTransport.load_from_checkpoint(ckptpath, **lit_module_kwargs)
         outpath.mkdir(parents=True, exist_ok=True)
-        if generate_kwargs["pattern"] == "oco2":
+        if generate_kwargs.get("mask_source") == "oco2":
             dataset_gen = load_dataset(generate_kwargs["data_path_generate"], generate_kwargs["generate_data_kwargs"])
             iterative_generate_oco2(
                 model,

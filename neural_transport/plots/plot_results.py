@@ -983,7 +983,7 @@ def plot_pairwise_cosine_similarity(noises, labels=None):
         labels = [str(i) for i in range(len(noises))]
 
     fig, ax = plt.subplots(figsize=(6, 5))
-    im = ax.imshow(cos_sim, cmap="coolwarm", vmin=-1, vmax=1)
+    im = ax.imshow(cos_sim, cmap="RdBu_r", vmin=-1, vmax=1)
     plt.colorbar(im, ax=ax, label="cosine similarity")
 
     ax.set_xticks(np.arange(len(labels)))
@@ -1354,7 +1354,7 @@ def plot_samples(
     """
     Wrapper for sample diagnostics plots
     """
-    noise = generate_kwargs.get("noise", None)
+    noise_pattern = generate_kwargs.get("noise_pattern", None)
     avg_over_levels = generate_kwargs.get("avg_over_levels", True)
 
     out_dir = Path(out_dir)
@@ -1385,7 +1385,7 @@ def plot_samples(
                         center_to_test_mean=True,
                         imgformats=imgformats,)
 
-        if noise:
+        if noise_pattern is not None:
             plot_pairwise_sample_distances(preds_var, out_dir,
                                         varname=varname,
                                         avg_over_levels=avg_over_levels,
@@ -1745,7 +1745,7 @@ def plot_error_locations(maps, out_dir,
 
         fig, axs = plt.subplots(1, 3, figsize=(15, 4), constrained_layout=True)
         titles = ["Bias [ppm]", "RMSE [ppm]", "Ensemble spread ($\\sigma$) [ppm]"]
-        cmaps = ["coolwarm", "inferno", "cividis"]
+        cmaps = ["RdBu_r", "inferno", "cividis"]
         data = [bias, rmse, spread]
         vmins = [-vmax_bias, 0, 0]
         vmaxs = [vmax_bias, vmax_rmse, vmax_rmse]

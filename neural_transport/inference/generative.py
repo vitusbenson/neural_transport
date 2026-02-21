@@ -247,7 +247,7 @@ def create_oco2_mask(batch, target_var="xco2_2019_scale"):
 def create_oco2_mask_test(
     batch,
     target_var="xco2_2019_scale",
-    pattern="diagonal",
+    mask_pattern="diagonal",
     nlat=32,
     nlon=64,
 ):
@@ -257,7 +257,7 @@ def create_oco2_mask_test(
     Args:
         batch: dict of tensors [B, T, N, C]
         target_var: variable used to infer shape
-        pattern:
+        mask_pattern:
             - "diagonal"   : diagonal stripe (lat = lon)
             - "leftright"  : left half observed
             - "topbottom"  : top half observed
@@ -281,29 +281,29 @@ def create_oco2_mask_test(
 
     mask2d = torch.zeros((nlat, nlon), dtype=torch.bool, device=device)
 
-    if pattern == "diagonal":
+    if mask_pattern == "diagonal":
         for i in range(min(nlat, nlon)):
             mask2d[i, i] = True
 
-    elif pattern == "leftright":
+    elif mask_pattern == "leftright":
         mask2d[:, : nlon // 2] = True
 
-    elif pattern == "topbottom":
+    elif mask_pattern == "topbottom":
         mask2d[: nlat // 2, :] = True
 
-    elif pattern == "checkerboard":
+    elif mask_pattern == "checkerboard":
         mask2d = (
             (torch.arange(nlat, device=device)[:, None]
            + torch.arange(nlon, device=device)[None, :]) % 2 == 0
         )
 
-    elif pattern == "center_box":
+    elif mask_pattern == "center_box":
         lat0, lat1 = nlat // 4, 3 * nlat // 4
         lon0, lon1 = nlon // 4, 3 * nlon // 4
         mask2d[lat0:lat1, lon0:lon1] = True
 
     else:
-        raise ValueError(f"Unknown test pattern: {pattern}")
+        raise ValueError(f"Unknown test pattern: {mask_pattern}")
 
     obs_indices = grid[mask2d].reshape(-1)
 
@@ -328,14 +328,14 @@ def create_oco2_mask_test(
     return obs_mask, obs_values  # [B T N C] each
 
 
-def create_mask(batch, target_var="co2massmix", obs_fraction=0.1, pattern="random", nlat=32, nlon=64):
+def create_mask(batch, target_var="co2massmix", obs_fraction=0.1, mask_pattern="random", nlat=32, nlon=64):
     """
     Create a random observation mask for the input batch.
     Args:
         batch: dict of tensors, each of shape [B T N C]
         target_var: the variable to create the mask for
         obs_fraction: fraction of points to keep as observations
-        pattern: "random", "vertical", "horizontal", "checkerboard", "satellite"
+        mask_pattern: "random", "vertical", "horizontal", "checkerboard", "satellite"
     """
     device = batch[target_var].device
     B, T, N, C = batch[target_var].shape
@@ -344,31 +344,31 @@ def create_mask(batch, target_var="co2massmix", obs_fraction=0.1, pattern="rando
     obs_values = torch.full_like(batch[target_var], float('nan'), device=device)
 
     for t in range(T):
-        if pattern == "random":
+        if mask_pattern == "random":
             num_obs = int(obs_fraction * N)
             obs_indices = torch.randperm(N, device=device)[:num_obs]
 
-        elif pattern == "vertical":
+        elif mask_pattern == "vertical":
             # keep a fixed fraction of longitude columns
             num_cols = max(1, int(obs_fraction * nlon))
             cols = torch.arange(0, nlon, nlon // num_cols, device=device)
             grid = torch.arange(N, device=device).reshape(nlat, nlon)
             obs_indices = grid[:, cols].reshape(-1)
 
-        elif pattern == "horizontal":
+        elif mask_pattern == "horizontal":
             # keep a fixed fraction of latitude rows
             num_rows = max(1, int(obs_fraction * nlat))
             rows = torch.arange(0, nlat, nlat // num_rows, device=device)
             grid = torch.arange(N, device=device).reshape(nlat, nlon)
             obs_indices = grid[rows, :].reshape(-1)
 
-        elif pattern == "checkerboard":
+        elif mask_pattern == "checkerboard":
             grid = torch.arange(N, device=device).reshape(nlat, nlon)
             mask2d = (torch.arange(nlat, device=device)[:, None] +
                       torch.arange(nlon, device=device)[None, :]) % 2 == 0
             obs_indices = grid[mask2d].reshape(-1)
 
-        elif pattern == "satellite":
+        elif mask_pattern == "satellite":
             # grid = [nlat, nlon]
             grid = torch.arange(N, device=device).reshape(nlat, nlon)
             # choose swath width (fraction of nlon)
@@ -389,7 +389,7 @@ def create_mask(batch, target_var="co2massmix", obs_fraction=0.1, pattern="rando
             obs_indices = grid[torch.arange(nlat).unsqueeze(0), cols].reshape(-1)
 
         else:
-            raise ValueError(f"Unknown mask pattern: {pattern}")
+            raise ValueError(f"Unknown mask pattern: {mask_pattern}")
 
         # fill mask + values
         obs_mask[:, t, obs_indices, :] = True
@@ -455,8 +455,7 @@ def iterative_generate_oco2(
 ):
     n_samples = generate_kwargs.get("n_samples", 10)
     masking = generate_kwargs.get("masking", True)
-    mask_source = generate_kwargs.get("mask_source", "real")  # "real" or "test"
-    mask_pattern = generate_kwargs.get("mask_pattern", "diagonal")
+    mask_pattern = generate_kwargs.get("mask_pattern", None)
     analyze_masking = generate_kwargs.get("analyze_masking", False)
     noise_pattern = generate_kwargs.get("noise_pattern", None)
     analyze_noise = generate_kwargs.get("analyze_noise", False)
@@ -480,8 +479,9 @@ def iterative_generate_oco2(
 
     dss = []
     obss = []
-    if mask_source == "real":
-        T = len(dataset_gen)
+    if mask_pattern is None:
+        T = 50
+        # T = len(dataset_gen)
     else:
         T = min(len(dataset), len(dataset_gen))
     offset = align_time(dataset.ds.time.values, dataset_gen.ds.time.values)
@@ -503,10 +503,10 @@ def iterative_generate_oco2(
         # Masking
         if masking:
             target_var = target_vars_2d[0]
-            if mask_source == "test":
-                obs_mask, obs_values = create_oco2_mask_test(batch_gen, target_var=target_var, pattern=mask_pattern, nlat=nlat, nlon=nlon)
-            else:
+            if mask_pattern is None:
                 obs_mask, obs_values = create_oco2_mask(batch_gen, target_var=target_var)
+            else:
+                obs_mask, obs_values = create_oco2_mask_test(batch_gen, target_var=target_var, mask_pattern=mask_pattern, nlat=nlat, nlon=nlon)
             batch_gen["obs_mask_original"] = obs_mask.clone()
             batch_gen["obs_mask"] = obs_mask
             obs_values_normed = model.model.normalize_observations(obs_values, batch_gen, target_var=target_var, targshift=False)
@@ -602,7 +602,7 @@ def iterative_generate(
     condition_one_timestep = generate_kwargs.get("condition_one_timestep", True)
     n_samples = generate_kwargs.get("n_samples", 10)
     masking = generate_kwargs.get("masking", False)
-    pattern = generate_kwargs.get("pattern", "vertical")
+    mask_pattern = generate_kwargs.get("mask_pattern", "vertical")
     analyze_masking = generate_kwargs.get("analyze_masking", False)
     obs_fraction = generate_kwargs.get("obs_fraction", 0.2)
     noise_pattern = generate_kwargs.get("noise_pattern", None)
@@ -638,10 +638,10 @@ def iterative_generate(
         base_batch = {k: v.unsqueeze(0).to(device) for k, v in dataset[0].items()} # condition on the first timestep
         if masking:
             target_var = target_vars_3d[0]
-            if pattern == "oco2":
+            if mask_pattern is None:
                 obs_mask, obs_values = create_oco2_mask(base_batch, target_var=target_var)
             else:
-                obs_mask, obs_values = create_mask(base_batch, target_var=target_var, obs_fraction=obs_fraction, pattern=pattern, nlat=nlat, nlon=nlon)
+                obs_mask, obs_values = create_mask(base_batch, target_var=target_var, obs_fraction=obs_fraction, mask_pattern=mask_pattern, nlat=nlat, nlon=nlon)
             base_batch["obs_mask"] = obs_mask
             obs_values_normed = model.model.normalize_observations(obs_values, base_batch, target_var=target_var)
             base_batch["obs_values"] = obs_values_normed
@@ -651,7 +651,7 @@ def iterative_generate(
             base_batch = {k: v.unsqueeze(0).to(device) for k, v in dataset[i].items()} # condition on different timesteps
             if masking:
                 target_var = target_vars_3d[0]
-                obs_mask, obs_values = create_mask(base_batch, target_var=target_var, obs_fraction=obs_fraction, pattern=pattern, nlat=nlat, nlon=nlon)
+                obs_mask, obs_values = create_mask(base_batch, target_var=target_var, obs_fraction=obs_fraction, mask_pattern=mask_pattern, nlat=nlat, nlon=nlon)
                 base_batch["obs_mask"] = obs_mask
                 obs_values_normed = model.model.normalize_observations(obs_values, base_batch, target_var=target_var)
                 base_batch["obs_values"] = obs_values_normed
