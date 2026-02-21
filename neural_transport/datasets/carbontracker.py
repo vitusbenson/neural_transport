@@ -191,7 +191,7 @@ def regrid_carbontracker(save_dir, gridname="latlon2x3", vertical_levels="l34"):
         / "CT2022_regrid"
         / f"CT2022_regrid_{gridname}_{vertical_levels}.zarr"
     )
-    if out_path.is_dir():
+    if out_path.is_dir() and (out_path / ".zmetadata").exists():
         print(f"Skipping Regridding, {out_path} exists")
         return
 

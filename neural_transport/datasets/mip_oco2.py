@@ -100,12 +100,11 @@ def filter_mip_oco2(save_dir: str) -> xr.Dataset:
     oco2_dir = save_dir / "OCO2MIP_OCO2"
     oco2_file = oco2_dir / "OCO2_b11.2_10sec_GOOD_r2.nc4"
     zarr_file = oco2_dir / "OCO2_b11.2_10sec_GOOD_r2.zarr"
-    filtered_file = oco2_dir / "oco2_assimilate.zarr"
+    filtered_dir = oco2_dir / "oco2_assimilate.zarr"
 
-    if filtered_file.exists():
-        print(f"Skipping filtering — {filtered_file} already exists.")
-        return xr.open_zarr(filtered_file)
-
+    if filtered_dir.is_dir() and (filtered_dir / ".zmetadata").exists():
+        print(f"Skipping filtering — {filtered_dir} already exists.")
+        return xr.open_zarr(filtered_dir)
     print(f"Opening {oco2_file}")
     ds = xr.open_dataset(oco2_file, chunks="auto")
 
@@ -123,8 +122,8 @@ def filter_mip_oco2(save_dir: str) -> xr.Dataset:
     ]
     ds_filtered = ds_filtered.drop_vars([v for v in drop_vars if v in ds_filtered])
 
-    print(f"Writing filtered dataset to {filtered_file}")
-    ds_filtered.to_zarr(filtered_file, mode="w")
+    print(f"Writing filtered dataset to {filtered_dir}")
+    ds_filtered.to_zarr(filtered_dir, mode="w")
     print("MIP OCO-2 filtering complete!")
     return ds_filtered
 
@@ -288,8 +287,7 @@ def regrid_temporal(
 def regrid_spatial(ds: xr.Dataset,
                    variables: list[str] | None = None,
                    gridname: str = "latlon2x3",
-                   weights: np.ndarray | None = None,
-                   lon_180: bool = False) -> xr.Dataset:
+                   weights: np.ndarray | None = None) -> xr.Dataset:
     """
     Spatially regrid OCO-2 soundings to a regular lat-lon grid.
 
@@ -303,8 +301,6 @@ def regrid_spatial(ds: xr.Dataset,
         Name of the target grid (must exist in LATLON_PROTOTYPE_COORDS).
     weights : array-like, optional
         Optional weights for computing weighted means.
-    lon_180 : bool, optional
-        If True, convert longitude from [0, 360) to [-180, 180) range.
 
     Returns
     -------
@@ -393,9 +389,8 @@ def regrid_spatial(ds: xr.Dataset,
             out_vars[var] = out
 
     ds_spatial = xr.merge(list(out_vars.values()))
-    if lon_180:
-        ds_spatial = ds_spatial.assign_coords(lon=((ds_spatial["lon"] + 180) % 360) - 180)
-        ds_spatial = ds_spatial.sortby("lon")
+    # ds_spatial = ds_spatial.assign_coords(lon=((ds_spatial["lon"] + 180) % 360) - 180)
+    # ds_spatial = ds_spatial.sortby("lon")
 
     ds_spatial.attrs.update({
         "title": f"OCO-2 regridded to {gridname}",
@@ -448,7 +443,6 @@ def regrid_spatiotemporal(
     vertical_levels: str | None = "l34",
     freq: str = "3h",
     weights_var: str | None = None,
-    lon_180: bool = False,
 ) -> xr.Dataset:
     """
     Joint spatio-temporal regridding: aggregate OCO-2 soundings into bins
@@ -467,8 +461,6 @@ def regrid_spatiotemporal(
     weights_var : str | None
         Name of per-sounding weights variable (e.g. 1/uncertainty^2). If None,
         plain mean is used.
-    lon_180 : bool, optional
-        If True, convert longitude from [0, 360) to [-180, 180) range.
 
     Returns
     -------
@@ -536,9 +528,9 @@ def regrid_spatiotemporal(
     ds_regrid = xr.merge(list(out_vars.values()))
     ds_regrid = ds_regrid.assign_coords(time=time_labels, lat=lat_centers, lon=lon_centers)
 
-    if lon_180:
-        ds_regrid = ds_regrid.assign_coords(lon=((ds_regrid["lon"] + 180) % 360) - 180)
-        ds_regrid = ds_regrid.sortby("lon")
+    # sort lon back to [-180,180) if desired (optional)
+    # ds_regrid = ds_regrid.assign_coords(lon=((ds_regrid["lon"] + 180) % 360) - 180)
+    # ds_regrid = ds_regrid.sortby("lon")
 
     ds_regrid.attrs.update(
         {
@@ -675,12 +667,11 @@ def regrid_mip_oco2(
     save_dir = Path(save_dir)
     oco2_dir = save_dir / "OCO2MIP_OCO2"
     out_dir = oco2_dir / "OCO2_regrid"
-    regridded_file = out_dir / f"OCO2_regrid_{gridname}_{vertical_levels}_{freq}.zarr"
+    regridded_dir = out_dir / f"OCO2_regrid_{gridname}_{vertical_levels}_{freq}.zarr"
 
-    if regridded_file.exists():
-        print(f"Skipping regridding — {regridded_file} already exists.")
-        return xr.open_zarr(regridded_file)
-
+    if regridded_dir.is_dir() and (regridded_dir / ".zmetadata").exists():
+        print(f"Skipping regridding — {regridded_dir} already exists.")
+        return xr.open_zarr(regridded_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     oco2_file = oco2_dir / "oco2_assimilate.zarr"  # Input file
 
@@ -690,14 +681,14 @@ def regrid_mip_oco2(
     ds = reconstruct_pressure_levels(ds_oco2)
     ds = ds.rename({"latitude": "lat", "longitude": "lon", "levels": "level"})
 
-    # --- Regridding operation ---
+    # --- Define regridding operation ---
 
     # print(f"Regridding temporally OCO-2 to {freq} frequency")
     # ds_temporal = regrid_temporal(
     #     ds,
     #     variables=["xco2_raw", "xco2_apriori", "xco2_2019_scale", "co2_profile_retrieved", "pressure_levels"],
     #     freq=freq,
-    #     weights=None,
+    #     weights=None
     # )
 
     # print(f"Regridding Spatially OCO-2 to {gridname}")
@@ -705,8 +696,7 @@ def regrid_mip_oco2(
     #     ds_temporal,
     #     variables=["xco2_raw", "xco2_apriori", "xco2_2019_scale", "co2_profile_retrieved", "pressure_levels"],
     #     gridname=gridname,
-    #     weights=None,
-    #     lon_180=False,
+    #     weights=None
     # )
 
     print(f"Regridding spatiotemporally OCO-2 to {gridname}_{vertical_levels}_{freq}")
@@ -734,9 +724,9 @@ def regrid_mip_oco2(
         level=ds_full_regrid["level"],
     )
     ds_full_regrid = ds_full_regrid.chunk(dict(time=-1, lat=-1, lon=-1, level=-1))
-    print(f"Writing regridded dataset to {regridded_file}")
+    print(f"Writing regridded dataset to {regridded_dir}")
     with ProgressBar():
-        ds_full_regrid.to_zarr(regridded_file, mode="w")
+        ds_full_regrid.to_zarr(regridded_dir, mode="w")
     print("MIP OCO-2 regridding complete!")
     return ds_full_regrid
 
