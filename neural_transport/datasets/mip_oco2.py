@@ -624,7 +624,11 @@ def vertical_aggregation_oco2(ds: xr.Dataset, levels: list[list[int]]) -> xr.Dat
             pw_out = pressure_weights.sum("level")
         else:
             ds_aggregated = vertical_ds.isel(level=lvl).assign_coords(dict(level=[i]))
-            pw_out = pressure_weights.assign_coords(dict(level=[i]))
+            pw_out = pressure_weights
+        if "level" not in pw_out.dims:
+            pw_out = pw_out.expand_dims("level")
+        pw_out = pw_out.assign_coords(dict(level=[i]))
+
         aggregated_list.append(ds_aggregated)
         aggregated_weights.append(pw_out)
 
