@@ -1,7 +1,7 @@
+import numpy as np
 
 
-
-
+R_EARTH = 6.371e3  # km
 
 M_CO2 = 44.009e-3
 M_air = 28.9652e-3
@@ -44,3 +44,54 @@ def density_to_mass(density, V, eps = 1e-12):
 
 def mass_to_density(mass, V, eps = 1e-12):
     return mass / (V + eps)
+
+def zonal_wavenumber_to_wavelength(k, lat=0.0):
+    """
+    Convert zonal wavenumber to wavelength in km for a given latitude.
+
+    Parameters
+    ----------
+    k : array-like or float
+        Zonal wavenumber (1 = one wave around a full circle)
+    lat : float
+        Latitude in degrees. Determines the effective circumference.
+
+    Returns
+    -------
+    wavelength : array-like or float
+        Corresponding wavelength in km.
+    """
+    lat_rad = np.deg2rad(lat)
+    circumference = 2 * np.pi * R_EARTH * np.cos(lat_rad)
+    k = np.maximum(np.array(k, dtype=float), 1e-6)  # avoid division by zero
+    return circumference / k
+
+def wavelength_to_zonal_wavenumber(wavelength_km, lat=0.0):
+    """
+    Convert wavelength (in km) to zonal wavenumber for a given latitude.
+
+    Parameters
+    ----------
+    wavelength_km : array-like or float
+        Wavelength in km.
+    lat : float
+        Latitude in degrees. Determines the effective circumference.
+
+    Returns
+    -------
+    k : array-like or float
+        Corresponding zonal wavenumber.
+    """
+    lat_rad = np.deg2rad(lat)
+    circumference = 2 * np.pi * R_EARTH * np.cos(lat_rad)
+    wavelength_km = np.maximum(np.array(wavelength_km, dtype=float), 1e-6)
+    return circumference / wavelength_km
+
+def km_per_gridcell(batch):
+    lat = batch["lat"].values
+    lon = batch["lon"].values
+
+    lat_mean = float(np.mean(lat))
+    circ_at_lat = 2 * np.pi * R_EARTH * np.cos(np.deg2rad(lat_mean))
+    dx = circ_at_lat / len(lon)
+    return dx, circ_at_lat

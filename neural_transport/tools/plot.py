@@ -85,8 +85,8 @@ def plot_atmospheric_layer_icon(ds, sample_idx, layer_idx, vari_idx=0, time_idx=
             2, 2, figsize=(11, 5), subplot_kw=dict(projection=ccrs.Robinson())
         )
 
-        vmin = ds.targ_t1.quantile(0.05)  # (ds.targ_t1.min()//5)*5-5
-        vmax = ds.targ_t1.quantile(0.95)  # (ds.targ_t1.max()//5)*5+5
+        vmin = ds.targ_t1.quantile(0.05).values  # (ds.targ_t1.min()//5)*5-5
+        vmax = ds.targ_t1.quantile(0.95).values  # (ds.targ_t1.max()//5)*5+5
         if vmax <= vmin:
             vmax = vmin + 0.01
         nstep = 51
@@ -144,7 +144,7 @@ def plot_atmospheric_layer_icon(ds, sample_idx, layer_idx, vari_idx=0, time_idx=
             cnf, ax=axs[0, :], shrink=0.9
         )  # , orientation='horizontal')
 
-        max_delta = abs(ds.targ_t1 - ds.targ_t).max()
+        max_delta = abs(ds.targ_t1 - ds.targ_t).max().values
         max_delta = min(
             (max_delta * 1.1 if max_delta < 1 else (max_delta // 1) + 1), 10
         )
@@ -228,8 +228,8 @@ def plot_atmospheric_layer(ds, sample_idx, layer_idx, vari_idx=0, time_idx=0):
             2, 2, dpi=300, subplot_kw=dict(projection=ccrs.Robinson()), figsize=(8, 5)
         )
 
-        vmin = ds.targ_t1.quantile(0.05)  # (ds.targ_t1.min()//5)*5-5
-        vmax = ds.targ_t1.quantile(0.95)  # (ds.targ_t1.max()//5)*5+5
+        vmin = ds.targ_t1.quantile(0.05).values  # (ds.targ_t1.min()//5)*5-5
+        vmax = ds.targ_t1.quantile(0.95).values  # (ds.targ_t1.max()//5)*5+5
         if vmax <= vmin:
             vmax = vmin + 0.01
         nstep = 51
@@ -259,7 +259,7 @@ def plot_atmospheric_layer(ds, sample_idx, layer_idx, vari_idx=0, time_idx=0):
 
         cbar_conc = plt.colorbar(cnf, ax=axs[0, :], shrink=0.9)
 
-        max_delta = abs(ds.targ_t1 - ds.targ_t).max()
+        max_delta = abs(ds.targ_t1 - ds.targ_t).max().values
         max_delta = min(
             (max_delta * 1.1 if max_delta < 1 else (max_delta // 1) + 1), 10
         )
@@ -331,7 +331,7 @@ def plot_zonal_mean(ds, sample_idx, vari_idx=0, time_idx=0):
         ds.pred_t1.mean("lon").plot(ax=axs[0, 1], **targ_kwargs)
         axs[0, 1].set_title("Prediction")
 
-        max_delta = abs((ds.targ_t1 - ds.targ_t).mean("lon")).max()
+        max_delta = abs((ds.targ_t1 - ds.targ_t).mean("lon")).max().values
         max_delta = min(
             (max_delta * 1.1 if max_delta < 1 else (max_delta // 1) + 1), 10
         )

@@ -1,16 +1,36 @@
-import time as pytime
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from scipy.stats import linregress
 import xarray as xr
 import xskillscore
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
-from neural_transport.tools.conversion import *
+from neural_transport.tools.conversion import (
+    M_CO2,
+    M_C,
+    density_to_massmix,
+    massmix_to_molemix,
+)
+
+from neural_transport.tools.metrics import (
+    crps,
+    compute_error_maps,
+    compute_error_scalars,
+)
+
+# Ratio of CO2 molecular mass to carbon atomic mass (~3.664)
+M_CO2_OVER_M_C = M_CO2 / M_C
 
 
-def freq_mean(data, freq="QS"):
+def freq_mean(data, freq="QS", average_time=False):
+    if "sample" in data.dims:
+        data = data.mean("sample")
+
+    if "time" not in data.dims:
+        return data
+    
     if freq:
         dates = pd.date_range(
             data.time[0].values, data.time[-1].values, freq=freq, inclusive="left"
@@ -34,8 +54,12 @@ def freq_mean(data, freq="QS"):
         dataf["time"] = dataf.time / (
             pd.Timedelta(days=1) / data.time.diff("time").values[0]
         ).astype("timedelta64[D]")
-    except:
+    except Exception as e:
         dataf["time"] = dataf.time / 4
+        print(f"Could not convert time bins to days properly, defaulting to 4 steps per day: {e}")
+
+    if average_time:
+        dataf = dataf.mean("time")
 
     return dataf
 
@@ -58,8 +82,6 @@ def compute_score_df(targs, preds, freq="QS"):
     preds["lat"] = targs["lat"]
     preds["lon"] = targs["lon"]
     preds["level"] = targs["level"]
-    start = pytime.time()
-
     molemix_targ = (
         massmix_to_molemix(targs.co2massmix)
         .persist()
@@ -79,8 +101,6 @@ def compute_score_df(targs, preds, freq="QS"):
     # Remove the time dimension from weights
     weights = weights.isel(time=0)
 
-    print(f"Data Loading {pytime.time() - start}")
-
     metrics = {}
 
     ### Metrics
@@ -90,18 +110,15 @@ def compute_score_df(targs, preds, freq="QS"):
     # 3D, per layer, per grid cell, per voxel (in time)
     # num steps before R^2 < 0.8
     # For Taylor Plot: RMSE, sigma_pred, sigma_targ, pearson corr coef
-    start = pytime.time()
-
     targ_mass = (targs.co2massmix * targs.airmass) / 1e6
     pred_mass = (preds.co2massmix * targs.airmass) / 1e6
 
-    targ_mass_sum = targ_mass.sum(["lat", "lon", "level"]).compute() / 3.664
-    pred_mass_sum = pred_mass.sum(["lat", "lon", "level"]).compute() / 3.664
+    targ_mass_sum = targ_mass.sum(["lat", "lon", "level"]).compute() / M_CO2_OVER_M_C
+    pred_mass_sum = pred_mass.sum(["lat", "lon", "level"]).compute() / M_CO2_OVER_M_C
 
     metrics["Mass_RMSE"] = (
         (targ_mass_sum - pred_mass_sum) ** 2
     ).mean().compute().item() ** 0.5
-    print(f"Mass RMSE {pytime.time() - start}")
 
     metrics["RelMass_RMSE"] = (
         ((targ_mass_sum - pred_mass_sum) / targ_mass_sum) ** 2
@@ -123,28 +140,21 @@ def compute_score_df(targs, preds, freq="QS"):
     for conc, targ, pred in [
         ("co2molemix", molemix_targ, molemix_pred),
     ]:
-        start = pytime.time()
         mse = xskillscore.mse(
             targ.chunk({"lat": -1, "lon": -1, "level": -1}),
             pred.chunk({"lat": -1, "lon": -1, "level": -1}),
             dim=["lat", "lon", "level"],
             weights=weights,
-        ).compute()  # ((pred - targ) ** 2).mean().compute().item()
+        ).compute() # ((pred - targ) ** 2).mean().compute().item()
         metrics[f"RMSE_4D_{conc}"] = mse.mean().item() ** 0.5
-        print(f"RMSE 4D {pytime.time() - start}")
-        print(metrics)
 
-        start = pytime.time()
         metrics[f"StdDev_Targ_4D_{conc}"] = (
             targ.weighted(np.cos(np.deg2rad(targ.lat))).std().compute().item()
         )
         metrics[f"StdDev_Pred_4D_{conc}"] = (
             pred.weighted(np.cos(np.deg2rad(targ.lat))).std().compute().item()
         )
-        print(f"Std Devs 4D {pytime.time() - start}")
-        print(metrics)
 
-        start = pytime.time()
         r = xskillscore.pearson_r(
             targ.chunk({"lat": -1, "lon": -1, "level": -1}),
             pred.chunk({"lat": -1, "lon": -1, "level": -1}),
@@ -152,10 +162,8 @@ def compute_score_df(targs, preds, freq="QS"):
             weights=weights,
         ).compute()
         metrics[f"PearsonCorrCoef_3D_{conc}"] = r.mean().item()
-        print(f"PearsonCorrCoef_3D_ {pytime.time() - start}")
 
         metrics[f"R2_3D_{conc}"] = (r**2).mean().item()
-        print(metrics)
 
         r2f = freq_mean(r**2, freq="QS")
         rmsef = freq_mean(mse, freq="QS") ** 0.5
@@ -165,7 +173,6 @@ def compute_score_df(targs, preds, freq="QS"):
             )
             metrics[f"RMSE_3D_{days}d_{conc}"] = rmsef.isel(time=days * 4).mean().item()
 
-        start = pytime.time()
         metrics[f"NSE_3D_{conc}"] = (
             xskillscore.r2(
                 targ.chunk({"lat": -1, "lon": -1, "level": -1}),
@@ -176,19 +183,11 @@ def compute_score_df(targs, preds, freq="QS"):
             .compute()
             .median()
             .item()
-        )  # 1 - mse / (metrics[f"StdDev_Targ_3D_{conc}"]**2 + 1e-12)
-        print(f"NSE_3D_ {pytime.time() - start}")
-
-        start = pytime.time()
+        ) # 1 - mse / (metrics[f"StdDev_Targ_3D_{conc}"]**2 + 1e-12)
 
         targ_mean = targ.weighted(np.cos(np.deg2rad(targ.lat))).mean().compute().item()
 
         metrics[f"RelRMSE_3D_{conc}"] = (mse.mean().item() ** 0.5) / (targ_mean + 1e-12)
-
-        print(f"RelRMSE_3D_ {pytime.time() - start}")
-
-        start = pytime.time()
-        # try:
 
         metrics[f"Days_R2>0.8_{conc}"] = get_first_idx_below_threshold(
             r**2, threshold=0.8, freq=freq
@@ -212,17 +211,14 @@ def compute_score_df(targs, preds, freq="QS"):
         )
         metrics[f"Days_minR2>0.8_{conc}"] = get_first_idx_below_threshold(
             r2m, threshold=0.8, freq=freq
-        )  # This Takes first Min(Level), then Freq_mean --> in plot_results is done other way around
+        ) # This Takes first Min(Level), then Freq_mean --> in plot_results is done other way around
         # except:
         #     metrics[f"Days_R2>0.8_{conc}"] = 92
         metrics[f"Days_minR2>0.9_{conc}"] = get_first_idx_below_threshold(
             r2m, threshold=0.9, freq=freq
         )
-        print(f"Days_R2 {pytime.time() - start}")
-        print(metrics)
 
-        for dim in ["lat", "lon", "level"]:  # , "time"]:
-            start = pytime.time()
+        for dim in ["lat", "lon", "level"]:
             mse = (
                 ((pred - targ) ** 2)
                 .weighted(np.cos(np.deg2rad(targ.lat)))
@@ -237,9 +233,7 @@ def compute_score_df(targs, preds, freq="QS"):
             metrics[f"RelRMSE_{dim}_{conc}"] = (
                 ((mse**0.5) / (targ_mean + 1e-12)).mean().item()
             )
-            print(f"RMSE RelRMSE {dim} {pytime.time() - start}")
 
-            start = pytime.time()
             r2 = (
                 xskillscore.pearson_r(
                     targ.chunk({dim: -1}),
@@ -253,10 +247,7 @@ def compute_score_df(targs, preds, freq="QS"):
                 r2.mean().item()
                 if dim == "lat"
                 else (r2).weighted(np.cos(np.deg2rad(targ.lat))).mean().item()
-            )  # (xr.corr(targ, pred, dim = dim)**2).mean().compute().item()
-            print(f"R2 {dim} {conc} {pytime.time() - start}")
-
-            start = pytime.time()
+            ) # (xr.corr(targ, pred, dim = dim)**2).mean().compute().item()
 
             nse = xskillscore.r2(
                 targ.chunk({dim: -1}),
@@ -264,27 +255,178 @@ def compute_score_df(targs, preds, freq="QS"):
                 dim=dim,
                 weights=weights.isel(lon=0, level=0) if dim == "lat" else None,
             ).compute()
-            metrics[f"NSE_{dim}_{conc}"] = (
-                nse.median().item()
-            )  # if dim == "lat" else (nse).weighted(np.cos(np.deg2rad(targ.lat))).median().item() # (1 - mse / (targ.var([dim]) + 1e-12)).compute().median().item()
-            print(f"NSE {dim} {conc} {pytime.time() - start}")
+            metrics[f"NSE_{dim}_{conc}"] = nse.median().item() # if dim == "lat" else (nse).weighted(np.cos(np.deg2rad(targ.lat))).median().item() # (1 - mse / (targ.var([dim]) + 1e-12)).compute().median().item()
 
-            start = pytime.time()
             metrics[f"AbsBias_{dim}_{conc}"] = (absbias).mean().item()
             metrics[f"RelAbsBias_{dim}_{conc}"] = (
                 (absbias / (targ_mean + 1e-12)).mean().item()
             )
-            print(f"AbsBias RelAbsBias {dim} {conc} {pytime.time() - start}")
-            print(metrics)
-
-        # start = pytime.time()
-        # metrics[f"PearsonCorrCoef_4D_{conc}"] = (xskillscore.pearson_r(targ.compute(), pred.compute(), dim = ["lat", "lon", "level", "time"]).compute()).item()
-        # print(f"PearsonCorrCoef_4D_ {pytime.time() - start}")
-        # print(metrics)
-
+    print("Computed metrics:", metrics)
     df = pd.Series(metrics)
 
     return df
+
+def compute_score_df_generate(targs, preds, target_var="co2massmix", **generate_kwargs):
+    """
+    Compute metrics for generated samples where:
+      - targs : xr.Dataset, [time, level, lat, lon]
+      - preds : xr.Dataset, [sample, level, lat, lon] (or [sample, (flow)time, level, lat, lon] if trajectory)
+    """
+
+    preds["lat"] = targs["lat"]
+    preds["lon"] = targs["lon"]
+    preds["level"] = targs["level"]
+    
+    targs = targs.isel(time=-1)
+    if "time" in preds.dims:
+        preds = preds.isel(time=-1)
+
+    # Convert to mole fraction
+    molemix_targ = massmix_to_molemix(targs[target_var]).transpose("level", "lat", "lon")
+    molemix_pred = massmix_to_molemix(preds[target_var]).transpose("sample", "level", "lat", "lon")
+
+    # Weights (cos(lat)) – no time dependence, just lat dimension
+    weights = np.cos(np.deg2rad(targs.lat))
+    _, weights = xr.broadcast(targs[target_var], weights)
+
+    results = []
+
+    for i in range(preds.sizes["sample"]):
+        pred_i = molemix_pred.isel(sample=i)
+
+        metrics = {}
+
+        # Mass balance metrics
+        if "airmass" in targs and "airmass" in preds:
+            targ_mass = (targs[target_var] * targs.airmass) / 1e6
+            pred_mass = (preds[target_var].isel(sample=i) * targs.airmass) / 1e6
+        else:
+            targ_mass = targs[target_var]
+            pred_mass = preds[target_var].isel(sample=i)
+
+        targ_mass_sum = targ_mass.sum(["lat", "lon", "level"]).compute() / M_CO2_OVER_M_C
+        pred_mass_sum = pred_mass.sum(["lat", "lon", "level"]).compute() / M_CO2_OVER_M_C
+
+        metrics["Mass_RMSE"] = ((targ_mass_sum - pred_mass_sum) ** 2).mean().item() ** 0.5
+
+        metrics["RelMass_RMSE"] = (
+            ((targ_mass_sum - pred_mass_sum) / (targ_mass_sum + 1e-12)) ** 2
+        ).mean().item() ** 0.5
+
+        ### RMSE / R² across lat, lon, level
+        mse = xskillscore.mse(
+            molemix_targ.chunk({"lat": -1, "lon": -1, "level": -1}),
+            pred_i.chunk({"lat": -1, "lon": -1, "level": -1}),
+            dim=["lat", "lon", "level"],
+            weights=weights,
+        ).compute()
+
+        metrics["RMSE_3D_co2molemix"] = mse.item() ** 0.5
+
+        r = xskillscore.pearson_r(
+            molemix_targ.chunk({"lat": -1, "lon": -1, "level": -1}),
+            pred_i.chunk({"lat": -1, "lon": -1, "level": -1}),
+            dim=["lat", "lon", "level"],
+            weights=weights,
+        ).compute()
+
+        metrics["PearsonCorrCoef_3D_co2molemix"] = r.item()
+        metrics["R2_3D_co2molemix"] = (r**2).item()
+
+        # Relative RMSE
+        targ_mean = molemix_targ.weighted(weights).mean().compute().item()
+        metrics["RelRMSE_3D_co2molemix"] = (mse.item() ** 0.5) / (targ_mean + 1e-12)
+
+        # Per-dimension metrics (lat, lon, level)
+        for dim in ["lat", "lon", "level"]:
+            mse_dim = (
+                ((pred_i - molemix_targ) ** 2)
+                .weighted(weights)
+                .mean(dim)
+                .compute()
+            )
+            metrics[f"RMSE_{dim}_co2molemix"] = float(mse_dim.mean()**0.5)
+
+        results.append(metrics)
+    
+    df = pd.DataFrame(results)
+    df.loc["mean"] = df.mean()
+    df.loc["std"] = df.std()
+
+    molemix_pred = molemix_pred.transpose("sample", "lat", "lon", "level")
+    avg_over_levels = generate_kwargs.get("avg_over_levels", True)
+
+    global_scalars = {}
+    maps = {}
+    if not avg_over_levels:
+        for i, lvl in enumerate(molemix_targ.level.values):
+            molemix_pred_lvl = molemix_pred.isel(level=i)
+            molemix_targ_lvl = molemix_targ.isel(level=i)
+            
+            crps_map_level, crps_mean_level = crps(molemix_pred_lvl, molemix_targ_lvl)
+            maps[f"CRPS_map_co2molemix_level{lvl:.0f}"] = (("lat", "lon"), crps_map_level.data)
+            global_scalars[f"CRPS_ensemble_mean_level{lvl:.0f}"] = float(crps_mean_level)
+
+            bias_map, rmse_map, mean_map, spread_map = compute_error_maps(molemix_pred_lvl, molemix_targ_lvl)
+            maps[f"Bias_map_co2molemix_level{lvl:.0f}"] = (("lat", "lon"), bias_map)
+            maps[f"RMSE_map_co2molemix_level{lvl:.0f}"] = (("lat", "lon"), rmse_map)
+            maps[f"Mean_map_co2molemix_level{lvl:.0f}"] = (("lat", "lon"), mean_map)
+            maps[f"Spread_map_co2molemix_level{lvl:.0f}"] = (("lat", "lon"), spread_map)
+
+            slope, intercept, r_value, p_value, std_err = linregress(molemix_targ_lvl.values.flatten(), mean_map.flatten())
+            global_scalars[f"LinReg_Slope_level{lvl:.0f}"] = float(slope)
+            global_scalars[f"LinReg_Intercept_level{lvl:.0f}"] = float(intercept)
+            global_scalars[f"LinReg_R_value_level{lvl:.0f}"] = float(r_value)
+            global_scalars[f"LinReg_PValue_level{lvl:.0f}"] = float(p_value)
+            global_scalars[f"LinReg_StdErr_level{lvl:.0f}"] = float(std_err)
+
+            bias_scalar, rmse_scalar, mean_scalar, spread_scalar = compute_error_scalars(bias_map, rmse_map, mean_map, spread_map, weights=weights.isel(level=i).values)
+            global_scalars[f"Bias_scalar_level{lvl:.0f}"] = float(bias_scalar)
+            global_scalars[f"RMSE_scalar_level{lvl:.0f}"] = float(rmse_scalar)
+            global_scalars[f"Mean_scalar_level{lvl:.0f}"] = float(mean_scalar)
+            global_scalars[f"Spread_scalar_level{lvl:.0f}"] = float(spread_scalar)
+
+    molemix_pred_mean = molemix_pred.mean(dim="level")  # shape: [sample, lat, lon]
+    molemix_targ_mean = molemix_targ.mean(dim="level")  # shape: [lat, lon]
+
+    crps_map, crps_mean = crps(molemix_pred_mean, molemix_targ_mean)
+    maps["CRPS_map_co2molemix"] = (("lat", "lon"), crps_map.data)
+    global_scalars["CRPS_ensemble_mean"] = float(crps_mean)
+
+    bias_map, rmse_map, mean_map, spread_map = compute_error_maps(molemix_pred_mean, molemix_targ_mean)
+    maps["Bias_map_co2molemix"] = (("lat", "lon"), bias_map)
+    maps["RMSE_map_co2molemix"] = (("lat", "lon"), rmse_map)
+    maps["Mean_map_co2molemix"] = (("lat", "lon"), mean_map)
+    maps["Spread_map_co2molemix"] = (("lat", "lon"), spread_map)
+
+    slope, intercept, r_value, p_value, std_err = linregress(molemix_targ_mean.values.flatten(), mean_map.flatten())
+    global_scalars["LinReg_Slope"] = float(slope)
+    global_scalars["LinReg_Intercept"] = float(intercept)
+    global_scalars["LinReg_R_value"] = float(r_value)
+    global_scalars["LinReg_PValue"] = float(p_value)
+    global_scalars["LinReg_StdErr"] = float(std_err)
+
+    bias_scalar, rmse_scalar, mean_scalar, spread_scalar = compute_error_scalars(bias_map, rmse_map, mean_map, spread_map, weights=weights.isel(level=0).values)
+    global_scalars["Bias_scalar"] = float(bias_scalar)
+    global_scalars["RMSE_scalar"] = float(rmse_scalar)
+    global_scalars["Mean_scalar"] = float(mean_scalar)
+    global_scalars["Spread_scalar"] = float(spread_scalar)
+
+    df_global_scalars = pd.DataFrame(
+        {k: [v] for k, v in global_scalars.items()}
+    )
+
+    maps = xr.Dataset(
+        data_vars={k: (dims, data) for k, (dims, data) in maps.items()},
+        coords={
+            "lat": molemix_targ.lat,
+            "lon": molemix_targ.lon,
+            "level": molemix_targ.level,
+        },
+    )
+
+    print(f"Computed metrics: {results}")
+    return df, df_global_scalars, maps
 
 
 def compute_local_scores(obs_preds, freq="QS"):

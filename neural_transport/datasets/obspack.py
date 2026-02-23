@@ -11,6 +11,11 @@ from tqdm.contrib.concurrent import process_map
 FREQ = "3h"
 
 
+def set_freq(freq):
+    global FREQ
+    FREQ = freq
+
+
 def download_obspack(data_dir):
     """
     Download Data from https://gml.noaa.gov/ccgg/obspack/data.php
@@ -18,7 +23,9 @@ def download_obspack(data_dir):
 
     data_dir = Path(data_dir)
 
-    fp = "http://gml.noaa.gov/ccgg/obspack/tmp/obspack_nbVFeb/obspack_co2_1_GLOBALVIEWplus_v9.1_2023-12-08.nc.tar.gz"
+    #fp = "http://gml.noaa.gov/ccgg/obspack/tmp/obspack_nbVFeb/obspack_co2_1_GLOBALVIEWplus_v9.1_2023-12-08.nc.tar.gz"
+    fp = "https://gml.noaa.gov/ccgg/obspack/tmp/obspack_9gchvin7apkpcrLKSez/obspack_co2_1_GLOBALVIEWplus_v10.1_2024-11-13.nc.tar.gz"
+    # New working link needs to be downloaded again here, since tmp files expire quickly: https://gml.noaa.gov/ccgg/obspack/data.php
 
     outpath = data_dir / "Obspack" / (fp.split("/")[-1])
 
@@ -56,8 +63,8 @@ def open_one_obspack(obspack_path):
         obspack_obs["time"] = obspack_obs.get_index("time") + offset
 
         return {obspack_path.stem: obspack_obs.to_array("vari")}
-    except:
-        print(f"Error with {obspack_path}")
+    except Exception as e:
+        print(f"Error with {obspack_path}: {e}")
         return None
 
 

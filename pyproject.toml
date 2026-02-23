@@ -12,7 +12,7 @@ license = {file = "LICENSE"}
 description = "Neural Transport - A Python library to train neural network emulators of atmospheric transport models."
 keywords = ["AI", "neural network", "transport model", "carbon", "co2", "emulator", "pytorch"]
 requires-python = ">=3.10"
-version = "0.0.2"
+version = "0.1.0"
 dependencies = [
     "numpy",
     "xarray",

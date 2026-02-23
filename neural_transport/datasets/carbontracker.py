@@ -18,7 +18,7 @@ from neural_transport.datasets.grids import VERTICAL_LAYERS_PROTOTYPE_COORDS
 from neural_transport.datasets.solar_radiation import (
     get_toa_incident_solar_radiation_for_xarray,
 )
-from neural_transport.tools.conversion import *
+from neural_transport.tools.conversion import molemix_to_massmix, M_CO2
 from neural_transport.tools.obspack_helper import extract_obspack_locs_from_xarray
 
 dask.config.set(scheduler="threads")
@@ -46,8 +46,8 @@ def download_data(save_dir):
         if not outpath.is_file():
             try:
                 urllib.request.urlretrieve(url, str(outpath))
-            except:
-                print(f"Error downloading {url}")
+            except Exception as e:
+                print(f"Error downloading {url}: {e}")
 
         fluxes_filename = f"CT2022.flux1x1.{date.item().strftime('%Y%m%d')}.nc"
 
@@ -60,8 +60,8 @@ def download_data(save_dir):
         if not outpath.is_file():
             try:
                 urllib.request.urlretrieve(url, str(outpath))
-            except:
-                print(f"Error downloading {url}")
+            except Exception as e:
+                print(f"Error downloading {url}: {e}")
 
     print("Done!")
 
@@ -166,16 +166,16 @@ def load_and_regrid(
 CARBONTRACKER_LEVEL_AGG = dict(
     l34=[[i] for i in range(34)],
     l10=[
-        [0],
-        [1],
-        [2],
-        [3],
-        [4, 5],
-        [6, 7, 8],
-        [9, 10, 11, 12],
-        [13, 14, 15, 16, 17, 18],
-        [19, 20, 21, 22, 23, 24, 25, 26],
-        [27, 28, 29, 30, 31, 32, 33],
+        [0],                                # 1013 hPa
+        [1],                                # 1005
+        [2],                                # 995
+        [3],                                # 971
+        [4, 5],                             # 943-894
+        [6, 7, 8],                          # 843-703
+        [9, 10, 11, 12],                    # 642-478
+        [13, 14, 15, 16, 17, 18],           # 441-278
+        [19, 20, 21, 22, 23, 24, 25, 26],   # 243-86
+        [27, 28, 29, 30, 31, 32, 33],       # 73-1
     ],
     l20=[[i] for i in range(6)] + [[i, i + 1] for i in range(6, 34, 2)],
     l3=[[0], [1, 2, 3, 4, 5], list(range(6, 34, 1))],
@@ -191,7 +191,7 @@ def regrid_carbontracker(save_dir, gridname="latlon2x3", vertical_levels="l34"):
         / "CT2022_regrid"
         / f"CT2022_regrid_{gridname}_{vertical_levels}.zarr"
     )
-    if out_path.is_dir():
+    if out_path.is_dir() and (out_path / ".zmetadata").exists():
         print(f"Skipping Regridding, {out_path} exists")
         return
 

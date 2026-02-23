@@ -1,6 +1,6 @@
 ![#](https://raw.githubusercontent.com/vitusbenson/neural_transport/main/logo.png)
 
-*A Python library to train neural network emulators of atmospheric transport models.*
+*A Python library to train neural network emulators of atmospheric transport models, extended with a data assimilation and sampling framework based on Flow Matching.*
 
 <a href='https://pypi.python.org/pypi/neural-transport'>
     <img src='https://img.shields.io/pypi/v/neural-transport.svg' alt='PyPI' />

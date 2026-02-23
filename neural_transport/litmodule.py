@@ -5,6 +5,7 @@ import pytorch_lightning as pl
 import torch
 
 from neural_transport.models import MODELS
+from neural_transport.models.wrappers_registry import MODELWRAPPERS
 from neural_transport.tools.loss import LOSSES
 from neural_transport.tools.metrics import ManyMetrics
 from neural_transport.tools.plot import plots_val_step
@@ -38,7 +39,12 @@ class NeuralTransport(pl.LightningModule):
     ):
         super().__init__()
         self.save_hyperparameters()
-        self.model = MODELS[model](**model_kwargs)
+        if model in MODELS:
+            self.model = MODELS[model](**model_kwargs)
+        elif model in MODELWRAPPERS:
+            self.model = MODELWRAPPERS[model](**model_kwargs)
+        else:
+            self.model = model
         if pretrained_ckptpath is not None:
             ckpt = torch.load(pretrained_ckptpath, map_location="cpu")
             model_state_dict = {
@@ -52,30 +58,13 @@ class NeuralTransport(pl.LightningModule):
             ]:
                 model_state_dict.pop(key, None)
 
-            # if model == "sfno":
-            #     for i, block in enumerate(self.model.sfnonet.blocks):
-            #         old_weight = model_state_dict[
-            #             f"sfnonet.blocks.{i}.filter.filter.weight"
-            #         ]
-            #         # new_weight = torch.ones_like(block.filter.filter.weight)
-            #         C_out, C_in = block.filter.filter.weight.shape[:2]
-            #         new_weight = torch.eye(
-            #             C_out,
-            #             C_in,
-            #             dtype=block.filter.filter.weight.dtype,
-            #             device=block.filter.filter.weight.device,
-            #         )[:, :, None, None].expand_as(block.filter.filter.weight).clone()
-            #         new_weight[:, :, : old_weight.shape[2], :] = old_weight
-            #         model_state_dict[f"sfnonet.blocks.{i}.filter.filter.weight"] = (
-            #             new_weight
-            #         )
-
             self.model.load_state_dict(model_state_dict, strict=False)
 
         self.loss = LOSSES[loss](**loss_kwargs)
         self.metrics = ManyMetrics(metrics)
 
     def forward(self, batch):
+
         T = max(batch[v].shape[1] for v in batch if isinstance(batch[v], torch.Tensor))
 
         for t in range(T):
@@ -95,14 +84,16 @@ class NeuralTransport(pl.LightningModule):
                     curr_preds = self.model(curr_data)
             else:
                 curr_preds = self.model(curr_data)
-
             if t == 0:
-                preds = {k: torch.empty_like(batch[k]) for k in curr_preds}
+                preds = {k : torch.empty((curr_preds[k].shape[0], T, *curr_preds[k].shape[1:]), device=curr_preds[k].device) for k in curr_preds}
 
             for v in preds:
                 preds[v][:, t] = curr_preds[v]
-
-        return preds
+                
+        if T == 1 and "trajectory" in preds:
+            preds["trajectory"] = preds["trajectory"].squeeze(1) # [T_Flow T B N C] -> [T_Flow B N C]
+            preds["trajectory"] = preds["trajectory"].permute(1, 0, 2, 3)
+        return preds # [B, T, Nlat*Nlon, C]
 
     def no_grad_shedule(self, global_step, t):
         return (
@@ -128,7 +119,15 @@ class NeuralTransport(pl.LightningModule):
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         dataloader_name = self.hparams.val_dataloader_names[dataloader_idx]
 
+        if isinstance(self.model, MODELWRAPPERS["flowmatching"]):
+            self.model.train()
+
         loss, losses, preds = self.common_step(batch)
+
+        if isinstance(self.model, MODELWRAPPERS["flowmatching"]):
+            for v in preds:
+                if v != "dx_t":
+                    preds[v] = preds[v] * batch[f"{v}_scale"] + batch[f"{v}_offset"]
 
         self.log(
             f"Loss/Val_{dataloader_name}",

@@ -12,10 +12,12 @@ import zarr
 # from numcodecs import blosc
 from torch.utils.data import Dataset
 
-from neural_transport.datasets.grids import *
+from neural_transport.datasets.grids import (
+    LATLON_PROTOTYPE_COORDS, VERTICAL_LAYERS_PROTOTYPE_COORDS,
+)
 from neural_transport.datasets.vars import *
 from neural_transport.models.gnn.mesh import get_gridnc_from_grid
-from neural_transport.tools.conversion import *
+from neural_transport.tools.conversion import density_to_massmix, massmix_to_density
 from neural_transport.tools.obspack_helper import extract_obspack_locs_from_xarray
 from neural_transport.tools.xarray_helper import tensor_to_xarray
 
@@ -169,13 +171,15 @@ class CarbonDataset(Dataset):
 
         if load_obspack:
 
-            self.obspack_ds = (
-                xr.open_zarr(
-                    self.data_path.parent.parent / "Obspack" / f"obspack_{freq}.zarr"
-                )
-                .sel(time=ds.time, method="nearest")
-                .compute()
+            obspack_ds = xr.open_zarr(
+                self.data_path.parent.parent / "Obspack" / f"obspack_{freq}.zarr"
             )
+            obspack_time_min = obspack_ds.time.min().values
+            obspack_time_max = obspack_ds.time.max().values
+            ds_filtered = ds.sel(time=slice(obspack_time_min, obspack_time_max))
+            self.obspack_ds = obspack_ds.sel(
+                time=ds_filtered.time, method="nearest"
+            ).compute()
 
             self.obspack_ds["lat"] = self.obspack_ds.lat.interpolate_na(
                 dim="time", method="nearest", fill_value="extrapolate"
@@ -204,7 +208,6 @@ class CarbonDataset(Dataset):
             step_idx = t % n_samples_per_startdate
             if step_idx + 1 >= len(self.ds.step):
                 print("oh", step_idx, t, n_samples_per_startdate, len(self.ds.step))
-            startdate_slice = slice(startdate_idx, startdate_idx + 1)
             step_slice = slice(
                 step_idx * self.n_timesteps, (step_idx + 1) * self.n_timesteps + 1
             )

@@ -20,7 +20,7 @@ def iterative_benchmark(
     batch = {k: v.unsqueeze(0).to(device) for k, v in dataset[0].items()}
 
     temp_dir = tempfile.TemporaryDirectory()
-    torch.save(batch, Path(temp_dir.name) / f"batch.pt")
+    torch.save(batch, Path(temp_dir.name) / "batch.pt")
 
     times = []
 
@@ -35,7 +35,7 @@ def iterative_benchmark(
             for i in range(n_steps):
 
                 if read_on_step:
-                    batch = torch.load(Path(temp_dir.name) / f"batch.pt")
+                    batch = torch.load(Path(temp_dir.name) / "batch.pt")
                     # batch = {
                     #     k: v.unsqueeze(0).to(device) for k, v in dataset[i].items()
                     # }
@@ -44,7 +44,7 @@ def iterative_benchmark(
                     preds = model(batch)
 
                 if write_on_step:
-                    torch.save(preds, Path(temp_dir.name) / f"out.pt")
+                    torch.save(preds, Path(temp_dir.name) / "out.pt")
 
             end = time.process_time()
 
@@ -65,7 +65,7 @@ def iterative_benchmark(
         out_path = Path(out_path)
         out_path.mkdir(exist_ok=True, parents=True)
 
-        df.to_csv(out_path / f"benchmark_times.csv")
+        df.to_csv(out_path / "benchmark_times.csv")
 
     temp_dir.cleanup()
 

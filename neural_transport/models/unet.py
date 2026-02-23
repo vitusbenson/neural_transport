@@ -34,7 +34,6 @@ class PeriodicPadding(nn.Module):
 
         return x
 
-
 class ResBlock(nn.Module):
 
     def __init__(
