@@ -1690,13 +1690,11 @@ def plot_sample_cdf(preds_var, out_dir, tests=None,
 
     if not avg_over_levels:
         levels = preds_var.level.values
-        cmap = plt.get_cmap("cividis")
-        norm = mpl.colors.Normalize(vmin=levels.min(), vmax=levels.max())
-        sm = mpl.cm.ScalarMappable(cmap=cmap, norm=norm)
-        sm.set_array([])
+        level_handles = []
+        colors = sns.color_palette("crest", len(levels))
 
-        for lvl in levels:
-            color = cmap(norm(lvl))
+        for i, lvl in enumerate(levels):
+            color = colors[i]
 
             # Prediction CDF
             level_pred = pred_mean.sel(level=lvl).values
@@ -1714,14 +1712,31 @@ def plot_sample_cdf(preds_var, out_dir, tests=None,
                 x_test = np.sort(level_test)
                 y_test = np.arange(1, len(level_test)+1) / len(level_test)
                 ax.plot(x_test, y_test, marker="o", alpha=0.7, color=color)
+            
+            level_handles.append(
+                Line2D([0], [0], color=color, lw=2, label=f"{lvl:.0f}")
+            )
 
         marker_handles = [Line2D([0], [0], marker="x", color="black", linestyle="None", label="Predictions"),]
         if not center_to_test_mean and test_mean is not None:
             marker_handles.append(Line2D([0], [0], marker="o", color="black", linestyle="None", label="Tests"))
-        legend1 = ax.legend(handles=marker_handles, title="Dataset", loc='center left', bbox_to_anchor=(1, 0.5), fontsize=8)
+        legend1 = ax.legend(
+            handles=marker_handles,
+            title="Dataset",
+            loc='upper left',
+            bbox_to_anchor=(1.02, 1),
+            fontsize=8
+        )
         ax.add_artist(legend1)
-        cbar = fig.colorbar(sm, ax=ax)
-        cbar.set_label("Vertical Level (hPa)")
+        legend2 = ax.legend(
+            handles=level_handles,
+            title="Level",
+            loc='center left',
+            bbox_to_anchor=(1.02, 0.5),
+            fontsize=8
+        )
+        ax.add_artist(legend2)
+
     else:
         pred_mean_vals = pred_mean.values
         pred_mean_vals = normalize_array(pred_mean_vals, normalize)
@@ -1749,7 +1764,7 @@ def plot_sample_cdf(preds_var, out_dir, tests=None,
     ax.set_ylabel("CDF")
     ax.set_title(title)
     ax.grid(True)
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0, 0.75, 1])
 
     for fmt in imgformats:
         fig.savefig(out_dir / f"cdf{'_centered' if center_to_test_mean else ''}_{varname}.{fmt}", dpi=300, bbox_inches='tight')

@@ -126,16 +126,16 @@ class MaskedVelocityWrapper(VelocityWrapper):
         
         # dxt = (x_effective - x)/dt + f(x_effective, t)
         dtx = (x_effective - x) / dt + v_base
-        import matplotlib.pyplot as plt
-        plt.figure()
-        plt.subplot(1,2,1)
-        plt.imshow(dtx[0].mean(dim=0).detach().cpu().numpy())
-        plt.subplot(1,2,2)
-        plt.imshow(((x_effective - x) / dt)[0].mean(dim=0).detach().cpu().numpy())
-        plt.colorbar()
-        plt.title(f"dtx at t={t}")
-        plt.savefig(f"dtx_t{int(t.item()*100)}.png")
-        plt.close()
+        # import matplotlib.pyplot as plt
+        # plt.figure()
+        # plt.subplot(1,2,1)
+        # plt.imshow(dtx[0].mean(dim=0).detach().cpu().numpy())
+        # plt.subplot(1,2,2)
+        # plt.imshow(((x_effective - x) / dt)[0].mean(dim=0).detach().cpu().numpy())
+        # plt.colorbar()
+        # plt.title(f"dtx at t={t}")
+        # plt.savefig(f"dtx_t{int(t.item()*100)}.png")
+        # plt.close()
         # dxt = f(x,t)
         # dxt = torch.where(self.obs_mask, self.obs_values - x, super().forward(x, t))
         if torch.isnan(dtx).any():
