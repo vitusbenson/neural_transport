@@ -1,7 +1,9 @@
 from pathlib import Path
 
 import cartopy.crs as ccrs
+from matplotlib import gridspec
 import matplotlib as mpl
+from matplotlib.lines import Line2D
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -925,7 +927,7 @@ def plot_analyze_noise_path(noises, angles, label="$\\theta$"):
     figs = []
 
     # Norm vs θ
-    fig1, ax1 = plt.subplots(figsize=(6, 3))
+    fig1, ax1 = plt.subplots(figsize=(6, 3), constrained_layout=True)
     ax1.plot(xvals, norms, marker="o")
     ax1.set_ylabel("Norm of noise vector")
     ax1.set_xlabel(label)
@@ -937,7 +939,7 @@ def plot_analyze_noise_path(noises, angles, label="$\\theta$"):
     figs.append(fig1)
 
     # Cosine similarity vs θ
-    fig2, ax2 = plt.subplots(figsize=(6, 3))
+    fig2, ax2 = plt.subplots(figsize=(6, 3), constrained_layout=True)
     ax2.plot(xvals, cosine_sims, marker="o")
     ax2.set_ylabel("Cosine similarity with start")
     ax2.set_xlabel(label)
@@ -953,7 +955,7 @@ def plot_analyze_noise_path(noises, angles, label="$\\theta$"):
     pca = PCA(n_components=2)
     X_pca = pca.fit_transform(X)
 
-    fig3, ax3 = plt.subplots(figsize=(5, 5))
+    fig3, ax3 = plt.subplots(figsize=(5, 5), constrained_layout=True)
     ax3.plot(X_pca[:, 0], X_pca[:, 1], marker="o")
     for i, a in enumerate(angles):
         if i % 10 == 0 or i == len(angles) - 1 or len(angles) <= 10:
@@ -982,7 +984,7 @@ def plot_pairwise_cosine_similarity(noises, labels=None):
     if labels is None:
         labels = [str(i) for i in range(len(noises))]
 
-    fig, ax = plt.subplots(figsize=(6, 5))
+    fig, ax = plt.subplots(figsize=(6, 5), constrained_layout=True)
     im = ax.imshow(cos_sim, cmap="RdBu_r", vmin=-1, vmax=1)
     plt.colorbar(im, ax=ax, label="cosine similarity")
 
@@ -1390,6 +1392,33 @@ def plot_samples(
                                         varname=varname,
                                         avg_over_levels=avg_over_levels,
                                         imgformats=imgformats)
+            nsamples = preds_var.sizes["sample"]
+
+            if noise_pattern in ["spiral_noise", "spiral_outward_noise"]:
+                angles = torch.linspace(0, 4*np.pi, nsamples)
+                param_name = r"$\theta$"
+            elif noise_pattern in ["geodesic_noise", "linear_noise"]:
+                angles = torch.linspace(0, 1, nsamples)
+                param_name = r"$\alpha$"
+            elif noise_pattern == "antipodal_orthogonal_noise":
+                labels = []
+                for i in range(nsamples // 2):
+                    labels += [f"{i+1}a", f"{i+1}b"]
+                if nsamples % 2 == 1:
+                    labels.append(f"{(nsamples // 2) + 1}a")
+                angles = labels
+                param_name = "Index pair"
+            else:
+                angles = torch.arange(nsamples)
+                param_name = "Index"
+            
+            plot_noise_path_samples(preds_var, out_dir,
+                                    varname=varname,
+                                    noise_pattern=noise_pattern,
+                                    angles=angles,
+                                    param_name=param_name,
+                                    level_idx=0,
+                                    imgformats=imgformats)
 
         if tests is not None and varname not in tests:
             raise KeyError(f"{varname} not found in tests")
@@ -1484,19 +1513,147 @@ def plot_pairwise_sample_distances(preds_var, out_dir,
         data_flat = data.reshape(data.shape[0], -1)
         dist_matrix = np.linalg.norm(data_flat[:, None, :] - data_flat[None, :, :], axis=-1)
 
-        fig, ax = plt.subplots(figsize=(5, 4))
-        im = ax.imshow(dist_matrix, cmap="cividis")
-        fig.colorbar(im, ax=ax, label="L2 distance between samples")
-        ax.set_title(f"Pairwise distances ({varname}" + (f", level={level}" if level is not None else "") + ")")
-        ax.set_xlabel("Sample index")
-        ax.set_ylabel("Sample index")
+        with plt.rc_context({
+            "font.size": 9,
+            "axes.titlesize": 10,
+            "axes.labelsize": 9,
+            "xtick.labelsize": 8,
+            "ytick.labelsize": 8,
+        }):
+            fig, ax = plt.subplots(figsize=(5, 4))
+            im = ax.imshow(dist_matrix, cmap="cividis")
+            ax.set_aspect("equal")
+            fig.colorbar(im, ax=ax, label="L2 distance between samples")
+            ax.set_title(f"Pairwise distances ({varname})" + (f" at level {level:.0f}" if level is not None else ""))
+            ax.set_xlabel("Sample index")
+            ax.set_ylabel("Sample index")
 
-        for fmt in imgformats:
-            filename = f"pairwise_distances_{varname}" + (f"_level{level}" if level is not None else "") + f".{fmt}"
-            fig.savefig(out_dir / filename, dpi=300)
+            n_samples = data.shape[0]
+            ax.set_xticks(np.arange(0, n_samples, 2))
+            ax.set_yticks(np.arange(0, n_samples, 2))
+
+            fig.tight_layout()
+            for fmt in imgformats:
+                filename = f"pairwise_distances_{varname}" + (f"_level{level}" if level is not None else "") + f".{fmt}"
+                fig.savefig(out_dir / filename, dpi=300)
+
+            plt.close(fig)
 
 
-        plt.close(fig)
+def plot_noise_path_samples(
+    preds_var: xr.DataArray,
+    out_dir,
+    varname="co2molemix",
+    noise_pattern: str = "random",
+    angles=None,
+    param_name: str = "Index",
+    level_idx: int = 0,
+    projection=None,
+    cmap="bone_r",
+    imgformats=["svg", "png", "pdf"],
+):
+    """
+    Plot the CO₂ samples along their noise trajectory.
+
+    preds_var dims expected:
+        (sample, lat, lon, level)
+    """
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if projection is None:
+        projection = ccrs.PlateCarree()
+
+    samples = preds_var
+
+    if "level" in samples.dims:
+        samples = samples.isel(level=level_idx)
+
+    nsamples = samples.sizes["sample"]
+    lat = samples.sizes["lat"]
+    lon = samples.sizes["lon"]
+
+    nrows = 2
+    max_cols = 5
+    max_panels = nrows * max_cols
+    indices = np.linspace(0, nsamples - 1, min(nsamples, max_panels), dtype=int)
+    ncols = int(np.ceil(len(indices) / nrows))
+
+    panel_width = 3
+    panel_height = panel_width * lat / lon
+    figsize = (panel_width * ncols, panel_height * nrows)
+
+    fig = plt.figure(figsize=figsize)
+    gs = gridspec.GridSpec(nrows, ncols, figure=fig, wspace=0.05, hspace=0.15)
+
+    data = samples.values
+    vmin = np.nanmin(data)
+    vmax = np.nanmax(data)
+
+    axes = []
+
+    for plot_idx, i in enumerate(indices):
+
+        row = plot_idx // ncols
+        col = plot_idx % ncols
+
+        ax = fig.add_subplot(gs[row, col], projection=projection)
+        axes.append(ax)
+
+        map_data = samples.isel(sample=i).values
+
+        im = ax.pcolormesh(
+            samples["lon"],
+            samples["lat"],
+            map_data,
+            vmin=vmin,
+            vmax=vmax,
+            cmap=cmap,
+            transform=ccrs.PlateCarree(),
+            rasterized=True,
+        )
+
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+
+        angle = angles[i] if angles is not None else i
+        if isinstance(angle, (float, np.floating, torch.Tensor)):
+            label = f"{param_name}={float(angle):.2f}"
+        else:
+            label = f"{param_name}={angle}"
+        ax.text(
+            0.05,
+            0.95,
+            label,
+            transform=ax.transAxes,
+            fontsize=9,
+            fontweight="bold",
+            color="white",
+            bbox=dict(boxstyle="round,pad=0.2", facecolor="black", alpha=0.7),
+        )
+
+    for i in range(nsamples, nrows * ncols):
+        axes.append(fig.add_subplot(gs[i]))
+        axes[-1].set_visible(False)
+
+    cbar_ax = fig.add_axes([0.2, 0.05, 0.6, 0.05])
+    fig.colorbar(im, cax=cbar_ax, orientation="horizontal")
+    cbar_ax.set_xlabel("CO₂ [ppm]")
+
+    level_text = "surface level" if level_idx == 0 else f"level {level_idx}"
+    fig.suptitle(
+        f"Sampled CO₂ at {level_text} from {noise_pattern} path",
+        fontsize=12, fontweight="bold",
+    )
+
+    for fmt in imgformats:
+        fig.savefig(out_dir / f"{noise_pattern}_path_samples_{varname}.{fmt}", dpi=300, bbox_inches="tight")
+
+    plt.close(fig)
 
 
 def normalize_array(arr, normalize):
@@ -1532,9 +1689,15 @@ def plot_sample_cdf(preds_var, out_dir, tests=None,
     fig, ax = plt.subplots(figsize=(8, 5))
 
     if not avg_over_levels:
-        cmap = plt.get_cmap("tab20")
-        for i, lvl in enumerate(preds_var.level.values):
-            color = cmap(i % 20)
+        levels = preds_var.level.values
+        cmap = plt.get_cmap("cividis")
+        norm = mpl.colors.Normalize(vmin=levels.min(), vmax=levels.max())
+        sm = mpl.cm.ScalarMappable(cmap=cmap, norm=norm)
+        sm.set_array([])
+
+        for lvl in levels:
+            color = cmap(norm(lvl))
+
             # Prediction CDF
             level_pred = pred_mean.sel(level=lvl).values
             level_pred = normalize_array(level_pred, normalize)
@@ -1542,7 +1705,7 @@ def plot_sample_cdf(preds_var, out_dir, tests=None,
                 level_pred -= test_mean.sel(level=lvl).mean().values
             x_pred = np.sort(level_pred)
             y_pred = np.arange(1, len(level_pred)+1) / len(level_pred)
-            ax.plot(x_pred, y_pred, label=f"Predictions (level={lvl:.0f})", marker="x", alpha=0.7, color=color)
+            ax.plot(x_pred, y_pred, marker="x", alpha=0.7, color=color)
 
             # Test CDF
             if not center_to_test_mean and test_mean is not None:
@@ -1550,7 +1713,15 @@ def plot_sample_cdf(preds_var, out_dir, tests=None,
                 level_test = normalize_array(level_test, normalize)
                 x_test = np.sort(level_test)
                 y_test = np.arange(1, len(level_test)+1) / len(level_test)
-                ax.plot(x_test, y_test, label=f"Tests (level={lvl:.0f})", marker="o", alpha=0.7, color=color)
+                ax.plot(x_test, y_test, marker="o", alpha=0.7, color=color)
+
+        marker_handles = [Line2D([0], [0], marker="x", color="black", linestyle="None", label="Predictions"),]
+        if not center_to_test_mean and test_mean is not None:
+            marker_handles.append(Line2D([0], [0], marker="o", color="black", linestyle="None", label="Tests"))
+        legend1 = ax.legend(handles=marker_handles, title="Dataset", loc='center left', bbox_to_anchor=(1, 0.5), fontsize=8)
+        ax.add_artist(legend1)
+        cbar = fig.colorbar(sm, ax=ax)
+        cbar.set_label("Vertical Level (hPa)")
     else:
         pred_mean_vals = pred_mean.values
         pred_mean_vals = normalize_array(pred_mean_vals, normalize)
@@ -1566,6 +1737,7 @@ def plot_sample_cdf(preds_var, out_dir, tests=None,
             x_test = np.sort(test_mean_vals)
             y_test = np.arange(1, len(test_mean_vals)+1) / len(test_mean_vals)
             ax.plot(x_test, y_test, label="Tests", marker="o")
+        ax.legend(title="Dataset", loc='center left', bbox_to_anchor=(1, 0.5), fontsize=8)
 
     xlabel = f"{'Normalized ' if normalize else ''}Mean {varname} {'[ppm]' if not normalize else ''}"
     title = f"CDF of {'Normalized ' if normalize else ''}Mean {varname} per Sample"
@@ -1576,12 +1748,11 @@ def plot_sample_cdf(preds_var, out_dir, tests=None,
     ax.set_xlabel(xlabel)
     ax.set_ylabel("CDF")
     ax.set_title(title)
-    ax.legend(loc='center left', bbox_to_anchor=(1, 0.5), fontsize=8)
     ax.grid(True)
     fig.tight_layout()
 
     for fmt in imgformats:
-        fig.savefig(out_dir / f"cdf{'_centered' if center_to_test_mean else ''}_{varname}.{fmt}", dpi=300)
+        fig.savefig(out_dir / f"cdf{'_centered' if center_to_test_mean else ''}_{varname}.{fmt}", dpi=300, bbox_inches='tight')
 
     plt.close(fig)
 
