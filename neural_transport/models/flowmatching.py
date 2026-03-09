@@ -861,7 +861,7 @@ class FlowMatching(RegularGridModel):
         if generate_kwargs is None:
             generate_kwargs = getattr(self, 'generate_kwargs', {})
 
-        if obs_mask is not None and obs_values is not None:
+        if False: #obs_mask is not None and obs_values is not None:
             return MaskedVelocityWrapper(
                 submodel=submodel,
                 masking_config=masking_config,
@@ -912,11 +912,35 @@ class FlowMatching(RegularGridModel):
 
         # solve the ODE to get the trajectory
         solver = ODESolver(velocity_model=velocity_model)
-        trajectory = solver.sample(time_grid=time_grid,
-                            x_init=x_init, method=self.method,
-                            step_size=self.step_size,
-                            return_intermediates=self.return_intermediates
-        )  # [T B C Nlat Nlon]
+        x_0 = torch.nn.Parameter(x_init, requires_grad=True)  # [B C Nlat Nlon]
+        optimizer_x_0 = torch.optim.Adam([x_0], lr=1e-3)
+        with torch.enable_grad():
+            for i in range(100):
+                optimizer_x_0.zero_grad()
+                trajectory = solver.sample(time_grid=time_grid,
+                                            x_init=x_0,
+                                            method=self.method,
+                                            step_size=self.step_size,
+                                            return_intermediates=self.return_intermediates,
+                                            enable_grad=True,
+                )  # [T B C Nlat Nlon]
+                x_final = trajectory[-1,...]  # [B C Nlat Nlon]
+                print(f"\nDEBUG refinement step {i}:")
+                print(f"  ak type, shape: {type(masking_config['ak'])}, {masking_config['ak'].shape}")
+                print(f"  ak requires grad: {masking_config['ak'].requires_grad}")
+                print(f"  x_final requires grad: {x_final.requires_grad}")
+                x_final = torch.sum(torch.mul(x_final, masking_config["ak"]), dim=1, keepdim=True)
+                print(f"  x_final requires grad after summation: {x_final.requires_grad}")
+                x_final *= masking_config["obs_mask"]
+                x_target = torch.where(masking_config["obs_mask"], masking_config["obs_values"], 0)
+                print(f"  x_final requires grad after masking: {x_final.requires_grad}")
+                print(f"  x_target requires grad: {x_target.requires_grad}")
+                loss = torch.nn.functional.mse_loss(x_final, x_target)
+                print(f"  loss requires grad: {loss.requires_grad}")
+                loss.backward()
+                optimizer_x_0.step()
+                if i % 10 == 0:
+                    print(f"Refinement step {i}, loss: {loss.item():.6f}")
         print("\nDEBUG inference_forward:")
         print(f"  trajectory has NaN: {torch.isnan(trajectory).any()}")
         print(f"  trajectory[-1] stats: min={trajectory[-1].min()}, max={trajectory[-1].max()}")

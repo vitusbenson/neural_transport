@@ -480,7 +480,7 @@ def iterative_generate_oco2(
     dss = []
     obss = []
     if mask_pattern is None:
-        T = 50
+        T = 5
         # T = len(dataset_gen)
     else:
         T = min(len(dataset), len(dataset_gen))
@@ -572,6 +572,9 @@ def iterative_generate_oco2(
 
         dss.append(ds)
 
+        if t == 0 and analyze_masking and masking:
+            batch_analyze = batch
+
     ### !!! Caution: need to fix this properly!!!
     good_dss = []
     for i, ds in enumerate(dss):
@@ -591,7 +594,7 @@ def iterative_generate_oco2(
     ds_all.to_zarr(zarrpath, mode="w")
 
     if analyze_masking and masking:
-        plot_masking_diagnostics(batch, ds_all,
+        plot_masking_diagnostics(batch_analyze, ds_all,
                                  str(outpath).replace("preds", "plots"),
                                  varnames=target_vars_3d, nlat=nlat, nlon=nlon,
                                  imgformats=["png"])

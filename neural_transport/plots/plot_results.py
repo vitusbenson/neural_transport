@@ -1286,7 +1286,7 @@ def plot_mask_pattern_on_samples(
 
     # Shared colorbar
     cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
-    fig.colorbar(im, cax=cbar_ax, orientation="vertical", label="CO₂ [ppm]")
+    fig.colorbar(im, cax=cbar_ax, orientation="vertical", label="XCO₂ [ppm]")
 
     fig.suptitle("Generated Samples with Mask Pattern Overlay (red contour)", fontsize=14)
     plt.tight_layout(rect=[0, 0, 0.9, 1])
@@ -1324,7 +1324,7 @@ def plot_masking_diagnostics(
             )
 
         for fmt in imgformats:
-            fig.savefig(out_dir / f"masking_{varname}.{fmt}", dpi=300)
+            fig.savefig(out_dir / f"masking_{varname}.{fmt}", dpi=300, bbox_inches="tight")
         plt.close(fig)
 
         # Plot mask pattern overlay on generated samples
@@ -1337,7 +1337,7 @@ def plot_masking_diagnostics(
                 max_samples=6,
             )
             for fmt in imgformats:
-                fig_mask.savefig(out_dir / f"masking_{varname}_mask_overlay.{fmt}", dpi=300)
+                fig_mask.savefig(out_dir / f"masking_{varname}_mask_overlay.{fmt}", dpi=300, bbox_inches="tight")
             plt.close(fig_mask)
 
     return
@@ -1370,6 +1370,22 @@ def plot_samples(
             raise KeyError(f"{varname} not found in preds")
 
         preds_var = preds[varname]  # shape: [sample=100, lat=32, lon=64, level=10]
+
+        plot_sample_mean_cdf(preds_var, out_dir,
+                        tests=tests,
+                        varname=varname,
+                        avg_over_levels=avg_over_levels,
+                        normalize=normalize,
+                        center_to_test_mean=False,
+                        imgformats=imgformats,)
+
+        plot_sample_mean_cdf(preds_var, out_dir,
+                        tests=tests,
+                        varname=varname,
+                        avg_over_levels=avg_over_levels,
+                        normalize=normalize,
+                        center_to_test_mean=True,
+                        imgformats=imgformats,)
 
         plot_sample_cdf(preds_var, out_dir,
                         tests=tests,
@@ -1660,7 +1676,7 @@ def normalize_array(arr, normalize):
     return (arr - arr.mean()) / arr.std() if normalize else arr
 
 
-def plot_sample_cdf(preds_var, out_dir, tests=None,
+def plot_sample_mean_cdf(preds_var, out_dir, tests=None,
                     varname="co2molemix", avg_over_levels=True,
                     normalize=False,
                     center_to_test_mean=False,
@@ -1672,10 +1688,9 @@ def plot_sample_cdf(preds_var, out_dir, tests=None,
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if avg_over_levels:
-        preds_var = preds_var.mean(dim="level")  # shape: [sample, lat, lon]
+        preds_var = preds_var.mean(dim="level")  # shape: [(time,) sample, lat, lon]
 
-    pred_mean = preds_var.mean(dim=["lat", "lon"])  # shape: [sample, (level)]
-
+    pred_mean = preds_var.mean(dim=["lat", "lon"])  # shape: [(time,) sample, (level)]
     test_mean = None
     if tests is not None:
         tests_var = tests[varname]  # shape: [time, level, lat, lon]
@@ -1690,52 +1705,50 @@ def plot_sample_cdf(preds_var, out_dir, tests=None,
 
     if not avg_over_levels:
         levels = preds_var.level.values
-        level_handles = []
         colors = sns.color_palette("crest", len(levels))
+        levels_plot = levels[::-1]
 
-        for i, lvl in enumerate(levels):
+        for i, lvl in enumerate(levels_plot):
             color = colors[i]
 
             # Prediction CDF
-            level_pred = pred_mean.sel(level=lvl).values
+            level_pred = pred_mean.sel(level=lvl).values.flatten()
             level_pred = normalize_array(level_pred, normalize)
             if center_to_test_mean and test_mean is not None:
                 level_pred -= test_mean.sel(level=lvl).mean().values
             x_pred = np.sort(level_pred)
             y_pred = np.arange(1, len(level_pred)+1) / len(level_pred)
-            ax.plot(x_pred, y_pred, marker="x", alpha=0.7, color=color)
+            ax.plot(x_pred, y_pred, marker="x", linestyle="-", alpha=0.7, color=color)
 
             # Test CDF
             if not center_to_test_mean and test_mean is not None:
-                level_test = test_mean.sel(level=lvl).values
+                level_test = test_mean.sel(level=lvl).values.flatten()
                 level_test = normalize_array(level_test, normalize)
                 x_test = np.sort(level_test)
                 y_test = np.arange(1, len(level_test)+1) / len(level_test)
-                ax.plot(x_test, y_test, marker="o", alpha=0.7, color=color)
-            
-            level_handles.append(
-                Line2D([0], [0], color=color, lw=2, label=f"{lvl:.0f}")
-            )
+                ax.plot(x_test, y_test, marker="o", linestyle="-", alpha=0.7, color=color)
 
-        marker_handles = [Line2D([0], [0], marker="x", color="black", linestyle="None", label="Predictions"),]
+        legend_handles = []
+        legend_handles.append(Line2D([], [], linestyle="none", label="Dataset"))
+        legend_handles.append(Line2D([0], [0], marker="x", color="black", linestyle="None", label="  Predictions"))
         if not center_to_test_mean and test_mean is not None:
-            marker_handles.append(Line2D([0], [0], marker="o", color="black", linestyle="None", label="Tests"))
-        legend1 = ax.legend(
-            handles=marker_handles,
-            title="Dataset",
-            loc='upper left',
-            bbox_to_anchor=(1.02, 1),
-            fontsize=8
-        )
-        ax.add_artist(legend1)
-        legend2 = ax.legend(
-            handles=level_handles,
-            title="Level",
-            loc='center left',
+            legend_handles.append(Line2D([0], [0], marker="o", color="black", linestyle="None", label="  Tests"))
+        legend_handles.append(Line2D([], [], linestyle="none", label=""))
+        legend_handles.append(Line2D([], [], linestyle="none", label="Level [hPa]"))
+        for color, lvl in zip(colors, levels_plot):
+            legend_handles.append(
+                Line2D([0], [0], color=color, lw=2, label=f"  {lvl:.0f}")
+            )
+        legend = ax.legend(
+            handles=legend_handles,
+            loc="center left",
             bbox_to_anchor=(1.02, 0.5),
-            fontsize=8
+            fontsize=8,
+            frameon=True
         )
-        ax.add_artist(legend2)
+        for text in legend.get_texts():
+            if text.get_text().strip() in ["Dataset", "Level [hPa]"]:
+                text.set_weight("bold")
 
     else:
         pred_mean_vals = pred_mean.values
@@ -1744,14 +1757,14 @@ def plot_sample_cdf(preds_var, out_dir, tests=None,
             pred_mean_vals -= test_mean.mean().values
         x_pred = np.sort(pred_mean_vals)
         y_pred = np.arange(1, len(pred_mean_vals)+1) / len(pred_mean_vals)
-        ax.plot(x_pred, y_pred, label="Predictions", marker="x")
+        ax.plot(x_pred, y_pred, label="Predictions", marker="x", linestyle="-")
 
         if not center_to_test_mean and test_mean is not None:
             test_mean_vals = test_mean.values
             test_mean_vals = normalize_array(test_mean_vals, normalize)
             x_test = np.sort(test_mean_vals)
             y_test = np.arange(1, len(test_mean_vals)+1) / len(test_mean_vals)
-            ax.plot(x_test, y_test, label="Tests", marker="o")
+            ax.plot(x_test, y_test, label="Tests", marker="o", linestyle="-")
         ax.legend(title="Dataset", loc='center left', bbox_to_anchor=(1, 0.5), fontsize=8)
 
     xlabel = f"{'Normalized ' if normalize else ''}Mean {varname} {'[ppm]' if not normalize else ''}"
@@ -1768,6 +1781,115 @@ def plot_sample_cdf(preds_var, out_dir, tests=None,
 
     for fmt in imgformats:
         fig.savefig(out_dir / f"cdf{'_centered' if center_to_test_mean else ''}_{varname}.{fmt}", dpi=300, bbox_inches='tight')
+
+    plt.close(fig)
+
+
+def plot_sample_cdf(preds_var, out_dir, tests=None,
+                    varname="co2molemix", avg_over_levels=True,
+                    normalize=False,
+                    center_to_test_mean=False,
+                    imgformats=["svg", "png", "pdf"]):
+    """
+    Plot cumulative distribution functions (CDFs) of normalized values per sample for one or multiple variables. Optionally compare to test data.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if avg_over_levels:
+        preds_var = preds_var.mean(dim="level")  # shape: [(time,) sample, lat, lon]
+
+    pred_mean = preds_var  # shape: [(time,) sample, lat, lon, (level)]
+    test_mean = None
+    if tests is not None:
+        tests_var = tests[varname]  # shape: [time, level, lat, lon]
+        # !!!Caution!!! this is a dirty fix especially for long time series.
+        tests_var = tests_var.rename({"time": "sample"})
+        if avg_over_levels:
+            tests_var = tests_var.mean(dim="level")  # shape: [sample, lat, lon]
+        test_mean = tests_var  # shape: [sample, (level), lat, lon]
+
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    if not avg_over_levels:
+        levels = preds_var.level.values
+        colors = sns.color_palette("crest", len(levels))
+        levels_plot = levels[::-1]
+
+        for i, lvl in enumerate(levels_plot):
+            color = colors[i]
+
+            # Prediction CDF
+            level_pred = pred_mean.sel(level=lvl).values.flatten()
+            level_pred = normalize_array(level_pred, normalize)
+            if center_to_test_mean and test_mean is not None:
+                level_pred -= test_mean.sel(level=lvl).mean().values
+            x_pred = np.sort(level_pred)
+            y_pred = np.arange(1, len(level_pred)+1) / len(level_pred)
+            ax.plot(x_pred, y_pred, linestyle="--", alpha=0.7, color=color)
+
+            # Test CDF
+            if not center_to_test_mean and test_mean is not None:
+                level_test = test_mean.sel(level=lvl).values.flatten()
+                level_test = normalize_array(level_test, normalize)
+                x_test = np.sort(level_test)
+                y_test = np.arange(1, len(level_test)+1) / len(level_test)
+                ax.plot(x_test, y_test, linestyle="-", alpha=0.7, color=color)
+
+        legend_handles = []
+        legend_handles.append(Line2D([], [], linestyle="none", label="Dataset"))
+        legend_handles.append(Line2D([0], [0], color="black", linestyle="--", label="  Predictions"))
+        if not center_to_test_mean and test_mean is not None:
+            legend_handles.append(Line2D([0], [0], color="black", linestyle="-", label="  Tests"))
+        legend_handles.append(Line2D([], [], linestyle="none", label=""))
+        legend_handles.append(Line2D([], [], linestyle="none", label="Level [hPa]"))
+        for color, lvl in zip(colors, levels_plot):
+            legend_handles.append(
+                Line2D([0], [0], color=color, lw=2, label=f"  {lvl:.0f}")
+            )
+        legend = ax.legend(
+            handles=legend_handles,
+            loc="center left",
+            bbox_to_anchor=(1.02, 0.5),
+            fontsize=8,
+            frameon=True
+        )
+        for text in legend.get_texts():
+            if text.get_text().strip() in ["Dataset", "Level [hPa]"]:
+                text.set_weight("bold")
+
+    else:
+        pred_mean_vals = pred_mean.values
+        pred_mean_vals = normalize_array(pred_mean_vals, normalize)
+        if center_to_test_mean and test_mean is not None:
+            pred_mean_vals -= test_mean.mean().values
+        x_pred = np.sort(pred_mean_vals)
+        y_pred = np.arange(1, len(pred_mean_vals)+1) / len(pred_mean_vals)
+        ax.plot(x_pred, y_pred, label="Predictions", linestyle="--")
+
+        if not center_to_test_mean and test_mean is not None:
+            test_mean_vals = test_mean.values
+            test_mean_vals = normalize_array(test_mean_vals, normalize)
+            x_test = np.sort(test_mean_vals)
+            y_test = np.arange(1, len(test_mean_vals)+1) / len(test_mean_vals)
+            ax.plot(x_test, y_test, label="Tests", linestyle="-")
+        ax.legend(title="Dataset", loc='center left', bbox_to_anchor=(1, 0.5), fontsize=8)
+
+    xlabel = f"{'Normalized ' if normalize else ''} {varname} {'[ppm]' if not normalize else ''}"
+    title = f"CDF of {'Normalized ' if normalize else ''} {varname} per Sample"
+    if center_to_test_mean:
+        xlabel = f"Deviation from Test {varname} {'[ppm]' if not normalize else ''}"
+        title = f"CDF of Predictions Relative to Test ({varname})"
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("CDF")
+    ax.set_title(title)
+    ax.grid(True)
+    fig.tight_layout(rect=[0, 0, 0.75, 1])
+
+    for fmt in imgformats:
+        fig.savefig(out_dir / f"cdf_global{'_centered' if center_to_test_mean else ''}_{varname}.{fmt}", dpi=300, bbox_inches='tight')
 
     plt.close(fig)
 
