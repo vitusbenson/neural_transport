@@ -179,7 +179,113 @@ CARBONTRACKER_LEVEL_AGG = dict(
     ],
     l20=[[i] for i in range(6)] + [[i, i + 1] for i in range(6, 34, 2)],
     l3=[[0], [1, 2, 3, 4, 5], list(range(6, 34, 1))],
+    l1=[list(range(34))],
 )
+
+
+def get_mean_oco2_ak_on_ct_levels(save_dir):
+    """Compute mean OCO-2 averaging kernel interpolated to CarbonTracker's 34 pressure levels.
+
+    The mean AK is computed from the filtered OCO-2 dataset (oco2_assimilate.zarr).
+    If the zarr is not available, falls back to a hardcoded mean AK profile.
+    """
+    from neural_transport.datasets.grids import CARBONTRACKER_HEIGHT
+
+    # Mean OCO-2 averaging kernel at 20 native pressure levels (MIP_OCO2_HEIGHT),
+    # precomputed from oco2_assimilate.zarr where assimilate_flag==1.
+    # Ordered from TOA (~0.1 hPa) to surface (~998 hPa).
+    MEAN_OCO2_AK_20 = np.array([
+        0.0026, 0.0524, 0.1047, 0.1610, 0.2376, 0.3059, 0.4088, 0.5164,
+        0.6083, 0.7002, 0.7622, 0.8527, 0.8935, 0.9190, 0.9547, 0.9646,
+        0.9812, 0.9896, 0.9961, 0.9995,
+    ])
+    MIP_OCO2_HEIGHT_LOCAL = [
+        0.0984, 52.6136, 105.2272, 156.4836, 210.4544, 256.2101, 312.9672,
+        370.0722, 420.9087, 472.6453, 512.4202, 578.6387, 625.9344, 663.7776,
+        740.1443, 770.1723, 841.8174, 884.8869, 945.2906, 997.8886,
+    ]
+
+    # Try to compute from actual data, fall back to hardcoded values
+    save_dir = Path(save_dir)
+    oco2_zarr = save_dir / "OCO2MIP_OCO2" / "oco2_assimilate.zarr"
+    if oco2_zarr.is_dir() and (oco2_zarr / ".zmetadata").exists():
+        try:
+            import xarray as xr
+            ds_oco2 = xr.open_zarr(oco2_zarr)
+            mean_ak_20 = ds_oco2["xco2_averaging_kernel"].mean("sounding_id").values
+            sigma = ds_oco2["sigma_levels"].values
+            mean_psurf = ds_oco2["psurf"].mean("sounding_id").values
+            oco2_pressures = sigma * mean_psurf
+        except Exception:
+            mean_ak_20 = MEAN_OCO2_AK_20
+            oco2_pressures = np.array(MIP_OCO2_HEIGHT_LOCAL)
+    else:
+        mean_ak_20 = MEAN_OCO2_AK_20
+        oco2_pressures = np.array(MIP_OCO2_HEIGHT_LOCAL)
+
+    # Interpolate from OCO-2's 20 pressure levels to CarbonTracker's 34 levels
+    ct_pressures = np.array(CARBONTRACKER_HEIGHT)
+    ak_on_ct = np.interp(ct_pressures, oco2_pressures, mean_ak_20)
+
+    return ak_on_ct
+
+
+def vertical_aggregation_xco2(ds, ak_weights_34):
+    """Vertically aggregate a 34-level CarbonTracker dataset to a single XCO2 level.
+
+    Uses the ACOS retrieval formula (without prior correction, since CarbonTracker
+    IS the true field, not a retrieval):
+
+        XCO2 = Σ_k h_k * a_k * x_k
+
+    where:
+        h_k = (p_bottom_k - p_top_k) / p_surface   (pressure weighting function)
+        a_k = averaging kernel at level k            (OCO-2 sensitivity, 0→1)
+        x_k = CO2 mixing ratio at level k
+
+    Note: h_k sums to 1 by construction (Σ dp_k = p_surface), so the result is
+    properly normalized without additional division.
+
+    For met variables (u, v, t, q): uses standard h_k weighting (no AK).
+    For airmass: sums over all levels.
+    For p_bottom/gph_bottom: takes surface (level 0).
+    For p_top/gph_top: takes TOA (level 33).
+    """
+    vertical_ds = ds[[v for v in ds if "level" in ds[v].dims]]
+
+    # h_k = dp_k / p_surface (ACOS pressure weighting function)
+    pressure_thickness = vertical_ds.p_bottom - vertical_ds.p_top
+    p_surface = vertical_ds.p_bottom.isel(level=0)
+    h_k = pressure_thickness / p_surface
+
+    # AK-weighted column average for co2massmix: XCO2 = Σ h_k * a_k * x_k
+    ak_da = xr.DataArray(ak_weights_34, dims="level")
+    ds_agg = xr.Dataset()
+    ds_agg["co2massmix"] = (vertical_ds.co2massmix * h_k * ak_da).sum("level")
+
+    # Standard pressure weighting for intensive met variables: Σ h_k * x_k
+    for var in ["u", "v", "t", "q"]:
+        if var in vertical_ds:
+            ds_agg[var] = (vertical_ds[var] * h_k).sum("level")
+
+    # Sum for extensive variable
+    ds_agg["airmass"] = vertical_ds.airmass.sum("level")
+
+    # Boundary variables
+    ds_agg["p_bottom"] = vertical_ds.p_bottom.isel(level=0)
+    ds_agg["p_top"] = vertical_ds.p_top.isel(level=-1)
+    ds_agg["gph_bottom"] = vertical_ds.gph_bottom.isel(level=0)
+    ds_agg["gph_top"] = vertical_ds.gph_top.isel(level=-1)
+
+    # Add level dimension of size 1
+    ds_agg = ds_agg.expand_dims("level").assign_coords(dict(level=[0]))
+
+    # Attach non-vertical variables
+    for v in ds:
+        if "level" not in ds[v].dims:
+            ds_agg[v] = ds[v]
+
+    return ds_agg
 
 
 def regrid_carbontracker(save_dir, gridname="latlon2x3", vertical_levels="l34"):
@@ -230,7 +336,11 @@ def regrid_carbontracker(save_dir, gridname="latlon2x3", vertical_levels="l34"):
             molefraction_path, fluxes_path, regridder_molefraction, regridder_fluxes
         )
 
-        ds = vertical_aggregation(ds, levels=CARBONTRACKER_LEVEL_AGG[vertical_levels])
+        if vertical_levels == "l1":
+            ak_weights_34 = get_mean_oco2_ak_on_ct_levels(save_dir)
+            ds = vertical_aggregation_xco2(ds, ak_weights_34)
+        else:
+            ds = vertical_aggregation(ds, levels=CARBONTRACKER_LEVEL_AGG[vertical_levels])
         ds["level"] = VERTICAL_LAYERS_PROTOTYPE_COORDS[vertical_levels]["level"]
 
         ds = ds.chunk(dict(time=-1, lat=-1, lon=-1, level=-1))
@@ -278,9 +388,10 @@ def resample_carbontracker(
 
 
 def write_carbontracker(
-    save_dir, gridname="latlon2x3", vertical_levels="l34", freq="6h"
+    save_dir, gridname="latlon2x3", vertical_levels="l34", freq="6h", output_dir=None
 ):
     save_dir = Path(save_dir)
+    output_dir = Path(output_dir) if output_dir is not None else save_dir
 
     ds = xr.open_zarr(
         save_dir
@@ -298,7 +409,7 @@ def write_carbontracker(
         ],
     ):
         print(f"Writing {split} to zarr")
-        out_dir = save_dir / "Carbontracker" / split
+        out_dir = output_dir / "Carbontracker" / split
         out_dir.mkdir(parents=True, exist_ok=True)
 
         ds_opt = optimize_zarr(ds.sel(time=timeslice))
@@ -311,12 +422,13 @@ def write_carbontracker(
 
 
 def stats_carbontracker(
-    save_dir, gridname="latlon2x3", vertical_levels="l34", freq="6h"
+    save_dir, gridname="latlon2x3", vertical_levels="l34", freq="6h", output_dir=None
 ):
     save_dir = Path(save_dir)
-    train_dir = save_dir / "Carbontracker" / "train"
-    val_dir = save_dir / "Carbontracker" / "val"
-    test_dir = save_dir / "Carbontracker" / "test"
+    output_dir = Path(output_dir) if output_dir is not None else save_dir
+    train_dir = output_dir / "Carbontracker" / "train"
+    val_dir = output_dir / "Carbontracker" / "val"
+    test_dir = output_dir / "Carbontracker" / "test"
 
     ds = xr.open_zarr(
         train_dir / f"carbontracker_{gridname}_{vertical_levels}_{freq}.zarr"
@@ -332,10 +444,11 @@ def stats_carbontracker(
 
 
 def obspack_carbontracker(
-    save_dir, gridname="latlon2x3", vertical_levels="l34", freq="6h"
+    save_dir, gridname="latlon2x3", vertical_levels="l34", freq="6h", output_dir=None
 ):
     save_dir = Path(save_dir)
-    test_dir = save_dir / "Carbontracker" / "test"
+    output_dir = Path(output_dir) if output_dir is not None else save_dir
+    test_dir = output_dir / "Carbontracker" / "test"
 
     ds = xr.open_zarr(
         test_dir / f"carbontracker_{gridname}_{vertical_levels}_{freq}.zarr"
@@ -386,6 +499,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--save_dir", type=str, required=True)
+    parser.add_argument("--output_dir", type=str, default=None,
+                        help="Output directory for write/stats/obspack steps. Defaults to save_dir.")
     parser.add_argument("--gridname", type=str, default="latlon2x3")
     parser.add_argument("--vertical_levels", type=str, default="l34")
     parser.add_argument("--freq", type=str, default="3h")
@@ -411,6 +526,7 @@ if __name__ == "__main__":
         gridname=args.gridname,
         vertical_levels=args.vertical_levels,
         freq=args.freq,
+        output_dir=args.output_dir,
     )
 
     stats_carbontracker(
@@ -418,6 +534,7 @@ if __name__ == "__main__":
         gridname=args.gridname,
         vertical_levels=args.vertical_levels,
         freq=args.freq,
+        output_dir=args.output_dir,
     )
 
     obspack_carbontracker(
@@ -425,4 +542,5 @@ if __name__ == "__main__":
         gridname=args.gridname,
         vertical_levels=args.vertical_levels,
         freq=args.freq,
+        output_dir=args.output_dir,
     )

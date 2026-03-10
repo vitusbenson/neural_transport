@@ -580,6 +580,7 @@ MIP_OCO2_LEVEL_AGG = dict(
         [16, 17, 18, 19],     # near-surface
     ][::-1],
     l3=[[19], list(range(10, 19)), list(range(9))][::-1],  # ordered such that averaging_kernel behaves linearly
+    l1=[list(range(20))],
 )
 
 
@@ -598,6 +599,7 @@ VERTICAL_LAYERS_OCO2MIP_COORDS = {
         np.mean([MIP_OCO2_HEIGHT[i] for i in range(10, 19)]),
         np.mean([MIP_OCO2_HEIGHT[i] for i in range(9)]),
     ]),
+    "l1": dict(level=[np.mean(MIP_OCO2_HEIGHT)]),
 }
 
 

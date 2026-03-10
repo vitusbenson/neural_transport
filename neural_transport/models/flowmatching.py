@@ -58,24 +58,151 @@ class MaskedVelocityWrapper(VelocityWrapper):
         self.ak = masking_config.get("ak", None)
         self.xco2_prior = masking_config.get("xco2_prior", None)
         self.co2_profile_prior = masking_config.get("co2_profile_prior", None)
+        self.pressure_weights = masking_config.get("pressure_weights", None)
+        self.targshift_mean = masking_config.get("targshift_mean", None)
         self.time_grid = masking_config.get("time_grid", None)
 
         self.masking_time = generate_kwargs.get("masking_time", None)
         self.t_threshold = generate_kwargs.get("t_threshold", 0.9)
         self.masking_method = generate_kwargs.get("masking_method", "interpolate")
+        self.conditioning_mode = generate_kwargs.get("conditioning_mode", "correction")
+        self.guidance_scale = generate_kwargs.get("guidance_scale", 1.0)
+
+    def compute_xco2(self, x):
+        """OCO-2 forward model: XCO2 = xco2_prior + sum(h * a * (x - x_prior)).
+
+        h = pressure_weights (h_k = dp_k / p_surface), a = averaging kernel.
+        Returns XCO2 in normalized observation space.
+        """
+        h = self.pressure_weights
+        if h is None:
+            h = 1.0 / x.shape[1]
+
+        if self.xco2_prior is not None and self.co2_profile_prior is not None:
+            # Correct for targshift: when targshift is active, x is shifted by
+            # the batch spatial mean, so x * std + mean doesn't recover physical values.
+            # We need to add back the targshift_mean to get the true normalized value.
+            x_corrected = x + self.targshift_mean if self.targshift_mean is not None else x
+            x_phys = x_corrected * self.target_std + self.target_mean
+            xco2 = self.xco2_prior + (h * self.ak * (x_phys - self.co2_profile_prior)).sum(dim=1, keepdim=True)
+            return (xco2 - self.obs_mean) / self.obs_std
+        else:
+            h_ak = h * self.ak
+            h_ak_sum = h_ak.sum(dim=1, keepdim=True).clamp(min=1e-12)
+            # XCO2 is a weighted sum, not a weighted average.
+            # When no prior is available, XCO2 = sum(h_k * a_k * x_k).
+            # For normalized x, we need to account for the target mean/std:
+            # XCO2 = sum(h_k * a_k * (x * std + mean)) = std * sum(h_k * a_k * x) + mean * h_ak_sum
+            # In normalized obs space (assuming obs_mean ~ target_mean * h_ak_sum, obs_std ~ target_std):
+            # We return the weighted sum plus a correction for the mean contribution.
+            return (h_ak * x).sum(dim=1, keepdim=True) + (self.target_mean / self.target_std) * (h_ak_sum - 1.0)
 
     def forward(self, x, t):
+        if self.conditioning_mode == "velocity_projection":
+            return self.forward_velocity_projection(x, t)
+        elif self.conditioning_mode == "guidance":
+            return self.forward_guidance(x, t)
+        elif self.conditioning_mode == "repaint":
+            return self.forward_repaint(x, t)
+        else:
+            return self.forward_correction(x, t)
+
+    def forward_correction(self, x, t):
+        """Original approach: modify state, compute correction term."""
         x_masked = self.apply_masking(x, t)
         x_effective = self.apply_temporal_weighting(x, x_masked, t)
 
         dt = self.compute_dt(t)
 
-        # dxt = (x_effective - x)/dt + f(x_effective, t)
-        dtx = (x_effective - x) / dt + super().forward(x_effective, t)
-        # dxt = f(x,t)
-        # dxt = torch.where(self.obs_mask, self.obs_values - x, super().forward(x, t))
+        # For column constraints (ak != None), feed uncorrected x to network.
+        # Column corrections shift noise uniformly which is out-of-distribution
+        # for the UNet and causes velocity explosion. Direct field corrections
+        # (ak=None) produce realistic intermediate states that the UNet handles.
+        x_for_network = x if self.ak is not None else x_effective
+        dtx = (x_effective - x) / dt + super().forward(x_for_network, t)
 
         return dtx
+
+    def forward_velocity_projection(self, x, t):
+        """Velocity projection: network sees unmodified state, velocity is
+        blended between learned velocity and target velocity at observed locations."""
+        v = super().forward(x, t)  # learned velocity on UNMODIFIED state
+
+        # Compute target state at observed locations
+        x_masked = self.apply_masking(x, t)
+
+        # Target velocity: what velocity would bring x to x_masked at t=1
+        remaining_time = (1.0 - t.view(-1, 1, 1, 1)).clamp(min=1e-3)
+        target_v = (x_masked - x) / remaining_time
+
+        # Temporal weighting
+        mask_weight = self._get_temporal_weight(t)
+
+        # Blend: at observed locations use weighted target velocity
+        v_obs = mask_weight * target_v + (1.0 - mask_weight) * v
+        v_projected = torch.where(self.obs_mask, v_obs, v)
+
+        return v_projected
+
+    def forward_guidance(self, x, t):
+        """Soft gradient guidance (DPS-style): add data-fidelity gradient to velocity."""
+        v = super().forward(x, t)  # learned velocity on UNMODIFIED state
+
+        if self.ak is not None:
+            h = self.pressure_weights if self.pressure_weights is not None else 1.0 / x.shape[1]
+            h_ak = h * self.ak
+            h_ak_sum = h_ak.sum(dim=1, keepdim=True).clamp(min=1e-12)
+            xco2 = self.compute_xco2(x)
+            # Use torch.where to avoid NaN from obs_values at unobserved locations
+            obs_safe = torch.where(self.obs_mask, self.obs_values.detach(), torch.zeros_like(xco2))
+            column_error = torch.where(self.obs_mask, xco2 - obs_safe, torch.zeros_like(xco2))
+            guidance = column_error / h_ak_sum
+        else:
+            obs_safe = torch.where(self.obs_mask, self.obs_values.detach(), torch.zeros_like(x))
+            guidance = torch.where(self.obs_mask, x - obs_safe, torch.zeros_like(x))
+
+        # TODO: investigate spatial smoothing of the guidance field for column conditioning.
+        # The point-wise column error creates spatially discontinuous gradients that may
+        # benefit from Gaussian smoothing before being applied to the 3D velocity field.
+        mask_weight = self._get_temporal_weight(t)
+        return v - self.guidance_scale * mask_weight * guidance
+
+    def forward_repaint(self, x, t):
+        """Repaint: hard replacement of velocity at observed locations."""
+        v = super().forward(x, t)
+
+        remaining_time = (1.0 - t.view(-1, 1, 1, 1)).clamp(min=1e-3)
+
+        if self.ak is not None:
+            h = self.pressure_weights if self.pressure_weights is not None else 1.0 / x.shape[1]
+            h_ak = h * self.ak
+            h_ak_sum = h_ak.sum(dim=1, keepdim=True).clamp(min=1e-12)
+            xco2_current = self.compute_xco2(x)
+            xco2_target_v = (self.obs_values - xco2_current) / remaining_time
+            # Apply uniform target velocity across all levels to correctly constrain column.
+            # Target velocity per level: xco2_target_v / h_ak_sum (broadcast across levels)
+            target_v = xco2_target_v / h_ak_sum
+        else:
+            target_v = (self.obs_values - x) / remaining_time
+
+        mask_weight = self._get_temporal_weight(t)
+        v_final = torch.where(self.obs_mask, mask_weight * target_v + (1 - mask_weight) * v, v)
+        return v_final
+
+    def _get_temporal_weight(self, t):
+        """Get scalar temporal weight for conditioning."""
+        masking_time = self.masking_time
+        t_threshold = self.t_threshold
+        if masking_time == "smooth_late_masking":
+            return torch.sigmoid((t - t_threshold) * 20.0).view(-1, 1, 1, 1)
+        elif masking_time == "step_late_masking":
+            return (t >= t_threshold).float().view(-1, 1, 1, 1)
+        elif masking_time == "smooth_early_masking":
+            return torch.sigmoid((t_threshold - t) * 20.0).view(-1, 1, 1, 1)
+        elif masking_time == "step_early_masking":
+            return (t < t_threshold).float().view(-1, 1, 1, 1)
+        else:
+            return 1.0
 
     def apply_masking(self, x, t):
         """Route to appropriate masking method."""
@@ -92,19 +219,7 @@ class MaskedVelocityWrapper(VelocityWrapper):
     
     def apply_temporal_weighting(self, x, x_masked, t):
         """Apply temporal weighting based on masking_time strategy."""
-        masking_time = self.masking_time
-        t_threshold = self.t_threshold
-        if masking_time == "smooth_late_masking":
-            mask_weight = torch.sigmoid((t - t_threshold) * 20.0).view(-1, 1, 1, 1)
-        elif masking_time == "step_late_masking":
-            mask_weight = (t >= t_threshold).float().view(-1, 1, 1, 1)
-        elif masking_time == "smooth_early_masking":
-            mask_weight = torch.sigmoid((t_threshold - t) * 20.0).view(-1, 1, 1, 1)
-        elif masking_time == "step_early_masking":
-            mask_weight = (t < t_threshold).float().view(-1, 1, 1, 1)
-        else:
-            mask_weight = 1.0
-        
+        mask_weight = self._get_temporal_weight(t)
         return mask_weight * x_masked + (1.0 - mask_weight) * x
     
     def compute_dt(self, t):
@@ -243,10 +358,11 @@ class MaskedVelocityWrapper(VelocityWrapper):
         """
         if self.ak is None:
             self.ak = torch.ones(x.shape, device=x.device)
+        h = self.pressure_weights if self.pressure_weights is not None else 1.0 / x.shape[1]
         x_physical = x * self.target_std + self.target_mean
-        x_averaged_physical = self.xco2_prior + (self.ak * (x_physical - self.co2_profile_prior)).sum(dim=1, keepdim=True)  # [B 1 Nlat Nlon]
+        x_averaged_physical = self.xco2_prior + (h * self.ak * (x_physical - self.co2_profile_prior)).sum(dim=1, keepdim=True)  # [B 1 Nlat Nlon]
         obs_physical = self.obs_values * self.obs_std + self.obs_mean
-    
+
         scale_factor = (obs_physical.detach() / x_averaged_physical.clamp(min=1e-12))  # [B 1 Nlat Nlon]
         x_scaled_physical = scale_factor * x_physical  # [B C Nlat Nlon]
         x_scaled = (x_scaled_physical - self.target_mean) / self.target_std
@@ -261,13 +377,15 @@ class MaskedVelocityWrapper(VelocityWrapper):
     def masking_total_column_average_test_basic(self, x):
         if self.ak is None:
             self.ak = torch.ones(x.shape, device=x.device)
-        
+
+        h = self.pressure_weights if self.pressure_weights is not None else 1.0 / x.shape[1]
+        h_ak = h * self.ak
         C = x.shape[1]
-        xco2 = self.obs_values.sum(dim=1, keepdim=True)  # [B 1 Nlat Nlon]
+        xco2 = self.compute_xco2(x)  # [B 1 Nlat Nlon]
 
-        correction = 1/C * (xco2 / C - self.ak * x).sum(dim=1, keepdim=True)  # [B 1 Nlat Nlon]
+        correction = (self.obs_values.detach() / C - h_ak * x).sum(dim=1, keepdim=True)  # [B 1 Nlat Nlon]
 
-        distributed_correction = 1/self.ak * correction  # [B C Nlat Nlon]
+        distributed_correction = (1 / h_ak.clamp(min=1e-12)) * correction  # [B C Nlat Nlon]
 
         x_masked = torch.where(
             self.obs_mask,
@@ -279,14 +397,23 @@ class MaskedVelocityWrapper(VelocityWrapper):
     def masking_total_column_average_simple(self, x):
         if self.ak is None:
             self.ak = torch.ones(x.shape, device=x.device)
-        
-        ak_sum = self.ak.sum(dim=1, keepdim=True).clamp(min=1e-12)
-        xco2 = (self.ak * x).sum(dim=1, keepdim=True) / ak_sum  # [B 1 Nlat Nlon]
-        
+
+        h = self.pressure_weights if self.pressure_weights is not None else 1.0 / x.shape[1]
+        h_ak = h * self.ak
+        h_ak_sum = h_ak.sum(dim=1, keepdim=True).clamp(min=1e-12)
+
+        xco2 = self.compute_xco2(x)  # [B 1 Nlat Nlon]
         column_error = self.obs_values.detach() - xco2  # [B 1 Nlat Nlon]
-        
-        ak_normalized = self.ak / ak_sum  # [B C Nlat Nlon]
-        distributed_correction = ak_normalized * column_error  # [B C Nlat Nlon]
+
+        # Apply uniform correction across all levels to satisfy column constraint.
+        # Mathematically: if sum_i(h_i * a_i * delta_x_i) = column_error_physical,
+        # and we choose delta_x_i = constant for all i, then:
+        # constant = column_error_physical / sum_i(h_i * a_i)
+        # In normalized space, this becomes:
+        # constant_normalized = column_error_normalized / h_ak_sum (where h_ak_sum is in normalized space)
+        # We distribute by level importance: delta_x_i = (h_i * a_i / h_ak_sum) * (column_error / h_ak_sum)
+        # which simplifies to: constant across levels divided by h_ak_sum
+        distributed_correction = column_error / h_ak_sum  # [B C Nlat Nlon] - uniform per level
 
         x_masked = torch.where(
             self.obs_mask,
@@ -299,19 +426,20 @@ class MaskedVelocityWrapper(VelocityWrapper):
     def masking_total_column_average_add(self, x):
         """
         Constrain vertical profile adjusting (additive) column-averaged observations (XCO2).
-        
+
         Args:
             x: [B, C, Nlat, Nlon] - the C-level CO2 field
-        """      
+        """
 
         if self.ak is None:
             self.ak = torch.ones(x.shape, device=x.device)
-        
-        C = x.shape[1]
 
-        correction = (1 / C * (self.obs_values.detach() - self.xco2_prior) - (self.ak * (x - self.co2_profile_prior))).sum(dim=1, keepdim=True)  # [B 1 Nlat Nlon]
+        h = self.pressure_weights if self.pressure_weights is not None else 1.0 / x.shape[1]
 
-        distributed_correction = 1/self.ak * correction  # [B C Nlat Nlon]
+        correction = (h * (self.obs_values.detach() - self.xco2_prior) - (h * self.ak * (x - self.co2_profile_prior))).sum(dim=1, keepdim=True)  # [B 1 Nlat Nlon]
+
+        h_ak = h * self.ak
+        distributed_correction = (h_ak / (h_ak ** 2).sum(dim=1, keepdim=True).clamp(min=1e-12)) * correction  # [B C Nlat Nlon]
 
         x_masked = torch.where(
             self.obs_mask,
@@ -324,20 +452,21 @@ class MaskedVelocityWrapper(VelocityWrapper):
     def masking_total_column_average_mult(self, x):
         """
         Constrain vertical profile adjusting (multiplicative) column-averaged observations (XCO2).
-        
+
         Args:
             x: [B, C, Nlat, Nlon] - the C-level CO2 field
         """
 
         if self.ak is None:
             self.ak = torch.ones(x.shape, device=x.device)
+        h = self.pressure_weights if self.pressure_weights is not None else 1.0 / x.shape[1]
         x_physical = x * self.target_std + self.target_mean
         obs_physical = self.obs_values * self.obs_std + self.obs_mean
-        C = x.shape[1]
 
-        xco2_physical = self.xco2_prior + (self.ak * (x_physical - self.co2_profile_prior)).sum(dim=1, keepdim=True)  # [B 1 Nlat Nlon]
+        xco2_physical = self.xco2_prior + (h * self.ak * (x_physical - self.co2_profile_prior)).sum(dim=1, keepdim=True)  # [B 1 Nlat Nlon]
 
-        correction = (self.xco2_prior / (C * self.ak) + x_physical - self.co2_profile_prior) * (obs_physical / xco2_physical - 1)  # [B C Nlat Nlon]
+        h_ak = h * self.ak
+        correction = (self.xco2_prior * h / h_ak.sum(dim=1, keepdim=True).clamp(min=1e-12) + x_physical - self.co2_profile_prior) * (obs_physical / xco2_physical - 1)  # [B C Nlat Nlon]
 
         x_scaled_physical = x_physical + correction  # [B C Nlat Nlon]
         x_scaled = (x_scaled_physical - self.target_mean) / self.target_std
@@ -354,13 +483,16 @@ class MaskedVelocityWrapper(VelocityWrapper):
         if self.ak is None:
             self.ak = torch.ones(x.shape, device=x.device)
 
-        ak_sum = self.ak.sum(dim=1, keepdim=True).clamp(min=1e-12)
-        xco2 = (self.ak * x).sum(dim=1, keepdim=True)  # [B 1 Nlat Nlon]
+        h = self.pressure_weights if self.pressure_weights is not None else 1.0 / x.shape[1]
+        h_ak = h * self.ak
+        h_ak_sum = h_ak.sum(dim=1, keepdim=True).clamp(min=1e-12)
+        xco2 = self.compute_xco2(x)  # [B 1 Nlat Nlon]
 
-        column_error = (self.obs_values.detach() - xco2) / ak_sum  # [B 1 Nlat Nlon]
-
-        unitary = torch.ones(x.shape, device=x.device)  # [B C Nlat Nlon]
-        distributed_correction = unitary * column_error  # [B C Nlat Nlon]
+        # Apply uniform correction across all levels to satisfy column constraint.
+        # Same logic as masking_total_column_average_simple:
+        # distributed_correction should be the same for all C levels
+        column_error = self.obs_values.detach() - xco2  # [B 1 Nlat Nlon]
+        distributed_correction = column_error / h_ak_sum  # [B 1 Nlat Nlon]
 
         x_masked = torch.where(
             self.obs_mask,
@@ -373,12 +505,15 @@ class MaskedVelocityWrapper(VelocityWrapper):
         if self.ak is None:
             self.ak = torch.ones(x.shape, device=x.device)
 
-        ak2_sum = (self.ak ** 2).sum(dim=1, keepdim=True).clamp(min=1e-12)
-        xco2 = (self.ak * x).sum(dim=1, keepdim=True)  # [B 1 Nlat Nlon]
+        h = self.pressure_weights if self.pressure_weights is not None else 1.0 / x.shape[1]
+        h_ak = h * self.ak
+        h_ak_sum = h_ak.sum(dim=1, keepdim=True).clamp(min=1e-12)
+        xco2 = self.compute_xco2(x)  # [B 1 Nlat Nlon]
 
-        column_error = (self.obs_values.detach() - xco2) / ak2_sum  # [B 1 Nlat Nlon]
-
-        distributed_correction = self.ak * column_error  # [B C Nlat Nlon]
+        # Apply uniform correction across all levels to satisfy column constraint.
+        # Same logic as masking_total_column_average_simple
+        column_error = self.obs_values.detach() - xco2  # [B 1 Nlat Nlon]
+        distributed_correction = column_error / h_ak_sum  # [B 1 Nlat Nlon]
 
         x_masked = torch.where(
             self.obs_mask,
@@ -391,11 +526,15 @@ class MaskedVelocityWrapper(VelocityWrapper):
         if self.ak is None:
             self.ak = torch.ones(x.shape, device=x.device)
 
-        xco2 = (self.ak * x).sum(dim=1, keepdim=True)  # [B 1 Nlat Nlon]
+        h = self.pressure_weights if self.pressure_weights is not None else 1.0 / x.shape[1]
+        h_ak = h * self.ak
+        h_ak_sum = h_ak.sum(dim=1, keepdim=True).clamp(min=1e-12)
+        xco2 = self.compute_xco2(x)  # [B 1 Nlat Nlon]
 
+        # Apply uniform correction across all levels to satisfy column constraint.
+        # Same logic as masking_total_column_average_simple
         column_error = self.obs_values.detach() - xco2  # [B 1 Nlat Nlon]
-
-        distributed_correction = (1/self.ak) * column_error  # [B C Nlat Nlon]
+        distributed_correction = column_error / h_ak_sum  # [B 1 Nlat Nlon]
 
         x_masked = torch.where(
             self.obs_mask,
@@ -446,9 +585,20 @@ class FlowMatching(RegularGridModel):
                 x_init = noise.reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)  # [B C Nlat Nlon]
             else:
                 x_init = torch.randn_like(all_levels, device=x_in.device)
+                B, C = x_init.shape[0], x_init.shape[1]
             if "obs_mask" in batch and "obs_values" in batch:
                 obs_var = self.generate_kwargs.get("obs_var", "co2massmix")
                 masking_config = self.prepare_masking_config(batch, B, C, obs_var)
+                # Compute targshift mean for correct physical-space conversion in column obs.
+                # batch[target_var] is [B, N, C]; targshift subtracts mean over (N, C) dims.
+                # We need the per-sample mean to undo targshift in compute_xco2.
+                if hasattr(self.submodel, 'targshift') and self.submodel.targshift:
+                    target_var = self.target_vars[0]
+                    batch_norm = (batch[target_var] - batch[f"{target_var}_offset"]) / batch[f"{target_var}_scale"]
+                    # targshift uses mean((1,2), keepdim=True) on [B, N, C] -> [B, 1, 1]
+                    targshift_mean = batch_norm.mean(dim=(1, 2), keepdim=True)  # [B, 1, 1]
+                    # Reshape to [B, 1, 1, 1] for broadcasting with x [B, C, Nlat, Nlon]
+                    masking_config["targshift_mean"] = targshift_mean.unsqueeze(-1)  # [B, 1, 1, 1]
             else:
                 masking_config = {}
             trajectory = self.inference_forward(
@@ -520,12 +670,17 @@ class FlowMatching(RegularGridModel):
             ak = batch["xco2_averaging_kernel"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)
             xco2_prior = batch["xco2_apriori"].reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2)
             co2_profile_prior = batch["co2_profile_apriori"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)
+            if "pressure_weight" in batch:
+                pressure_weights = batch["pressure_weight"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)
+            else:
+                pressure_weights = None
         else:
             obs_mask = batch["obs_mask"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)
             obs_values = batch["obs_values"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)
             ak = None
             xco2_prior = None
             co2_profile_prior = None
+            pressure_weights = None
 
         obs_mean = batch[f"{obs_var}_offset"].view(B, 1, 1, 1)
         obs_std = batch[f"{obs_var}_scale"].view(B, 1, 1, 1)
@@ -542,6 +697,7 @@ class FlowMatching(RegularGridModel):
             "ak": ak,                    # [B C Nlat Nlon]
             "xco2_prior": xco2_prior,
             "co2_profile_prior": co2_profile_prior,
+            "pressure_weights": pressure_weights,  # [B C Nlat Nlon] or None
         }        
         return masking_config
 

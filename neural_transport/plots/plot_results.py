@@ -1106,54 +1106,58 @@ def plot_obs_mask_and_samples(
 
 
 def plot_obs_mask_and_samples_x(
-    batch,
+    preds,
     preds_var,
     varname="co2massmix",
     nlat=32,
     nlon=64,
     max_samples=6,
+    time_idx=0,
 ):
     """
     Plot observed values, masked observations, and several generated samples.
+    Uses pure xarray inputs — obs_mask and obs_values come from preds dataset.
     Layout: 2x4 grid
-      [0,0] = Ground Truth
+      [0,0] = Ground Truth (masked obs)
       [1,0] = Masked Observations
       [0,1..3], [1,1..3] = Generated Samples (up to 6)
     """
-    b, t, c = 0, 0, 0
+    # Extract obs_mask and obs_values from xarray preds (time-aligned)
+    obs_mask_sel = preds["obs_mask"]
+    obs_values_sel = preds["obs_values"]
+    if "time" in obs_mask_sel.dims:
+        obs_mask_sel = obs_mask_sel.isel(time=time_idx)
+        obs_values_sel = obs_values_sel.isel(time=time_idx)
+    if "level" in obs_mask_sel.dims:
+        obs_mask_sel = obs_mask_sel.isel(level=0)
+        obs_values_sel = obs_values_sel.isel(level=0)
+    if "vari" in obs_mask_sel.dims:
+        obs_mask_sel = obs_mask_sel.isel(vari=0)
+        obs_values_sel = obs_values_sel.isel(vari=0)
+    if "trajectory_steps" in obs_mask_sel.dims:
+        obs_mask_sel = obs_mask_sel.isel(trajectory_steps=0)
+        obs_values_sel = obs_values_sel.isel(trajectory_steps=0)
 
-    obs_values = batch["obs_values"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
-    obs_mask = batch["obs_mask"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
-    masked_obs = np.where(obs_mask, obs_values, np.nan)
+    obs_mask_np = obs_mask_sel.values.astype(bool)
+    obs_values_np = obs_values_sel.values
+    masked_obs = np.where(obs_mask_np, obs_values_np, np.nan)
 
-    # Generated samples [sample, lat, lon, level, (time)]
+    # Generated samples
     samples = preds_var
     if "time" in samples.dims:
-        samples = samples.isel(time=t)
-
-    if "xco2_averaging_kernel" in batch:
-        ak = batch["xco2_averaging_kernel"][b, t, :, :].detach().cpu()  # [N, C]
-        ak_sum = ak.sum(dim=-1, keepdim=True)  # [N, 1]
-        ak = ak / ak_sum
-        vals = batch[varname][b, t, :, :].detach().cpu()  # [N, C]
-        target_vals = (ak * vals).sum(dim=-1).numpy().reshape(nlat, nlon)
-        if "level" in samples.dims:
-            ak_reshaped = ak.numpy().reshape(nlat, nlon, -1)  # [lat, lon, level]
-            samples_np = samples.values  # [sample, lat, lon, level]
-            samples_list = []
-            for i in range(min(samples_np.shape[0], max_samples)):
-                samples_list.append((ak_reshaped * samples_np[i]).sum(axis=-1))
-            samples = xr.DataArray(
-                np.array(samples_list),
-                dims=["sample", "lat", "lon"]
-            )
-    else:
-        target_vals = batch[varname][b, t, :, :].mean(dim=-1).detach().cpu().numpy().reshape(nlat, nlon)
-        if "level" in samples.dims:
-            samples = samples.mean(dim="level")
+        samples = samples.isel(time=time_idx)
+    if "trajectory_steps" in samples.dims:
+        samples = samples.isel(trajectory_steps=-1)
+    if "level" in samples.dims:
+        samples = samples.mean(dim="level")
+    if "vari" in samples.dims:
+        samples = samples.isel(vari=0)
 
     samples_np = samples.values  # shape: [sample, lat, lon]
     n_samples = min(samples_np.shape[0], max_samples)
+
+    # Use masked obs as "ground truth" stand-in
+    target_vals = obs_values_np
 
     # Global color limits
     vmin = np.nanmin([np.nanmin(target_vals), np.nanmin(samples_np[:n_samples, ...])])
@@ -1162,7 +1166,6 @@ def plot_obs_mask_and_samples_x(
         obs_min, obs_max = vmin, vmax
     else:
         obs_min, obs_max = np.nanmin(masked_obs), np.nanmax(masked_obs)
-    targ_min, targ_max = np.nanmin(target_vals), np.nanmax(target_vals)
 
     # Figure setup
     aspect_ratio = nlon / nlat
@@ -1172,8 +1175,8 @@ def plot_obs_mask_and_samples_x(
     fig, axs = plt.subplots(2, 4, figsize=(fig_width, fig_height))
     axs = axs.reshape(2, 4)
 
-    # Panels ([0,0]: Ground truth, [1,0]: Masked obs, [0,1..3] and [1,1..3]: samples)
-    im = plot_panel(axs[0, 0], target_vals, "Ground Truth", vmin=targ_min, vmax=targ_max, aspect_ratio=aspect_ratio, bold=True)
+    # Panels ([0,0]: Obs values, [1,0]: Masked obs, [0,1..3] and [1,1..3]: samples)
+    im = plot_panel(axs[0, 0], obs_values_np, "Obs Values", vmin=obs_min, vmax=obs_max, aspect_ratio=aspect_ratio, bold=True)
     plot_panel(axs[1, 0], np.ma.masked_invalid(masked_obs), "Masked Observations",
                vmin=obs_min, vmax=obs_max, aspect_ratio=aspect_ratio, bold=True)
 
@@ -1201,46 +1204,40 @@ def plot_obs_mask_and_samples_x(
 
 
 def plot_mask_pattern_on_samples(
-    batch,
+    preds,
     preds_var,
     nlat=32,
     nlon=64,
     max_samples=6,
+    time_idx=0,
 ):
     """
     Plot generated samples with mask pattern overlaid as contours.
-    This helps debug if mask pattern artifacts appear in generated samples.
+    Uses pure xarray inputs — obs_mask comes from preds dataset (time-aligned).
     """
-    b, t, c = 0, 0, 0
+    # Extract obs_mask from xarray preds
+    obs_mask_sel = preds["obs_mask"]
+    if "time" in obs_mask_sel.dims:
+        obs_mask_sel = obs_mask_sel.isel(time=time_idx)
+    if "level" in obs_mask_sel.dims:
+        obs_mask_sel = obs_mask_sel.isel(level=0)
+    if "vari" in obs_mask_sel.dims:
+        obs_mask_sel = obs_mask_sel.isel(vari=0)
+    if "trajectory_steps" in obs_mask_sel.dims:
+        obs_mask_sel = obs_mask_sel.isel(trajectory_steps=0)
 
-    # Get mask pattern
-    if "obs_mask_original" in batch:
-        obs_mask = batch["obs_mask_original"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
-    else:
-        obs_mask = batch["obs_mask"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
+    obs_mask = obs_mask_sel.values.astype(bool)
 
-    # Generated samples [sample, lat, lon, level, (time)]
+    # Generated samples
     samples = preds_var
     if "time" in samples.dims:
-        samples = samples.isel(time=t)
-
-    if "xco2_averaging_kernel" in batch:
-        ak = batch["xco2_averaging_kernel"][b, t, :, :].detach().cpu()  # [N, C]
-        ak_sum = ak.sum(dim=-1, keepdim=True)  # [N, 1]
-        ak = ak / ak_sum
-        if "level" in samples.dims:
-            ak_reshaped = ak.numpy().reshape(nlat, nlon, -1)  # [lat, lon, level]
-            samples_np = samples.values  # [sample, lat, lon, level]
-            samples_list = []
-            for i in range(min(samples_np.shape[0], max_samples)):
-                samples_list.append((ak_reshaped * samples_np[i]).sum(axis=-1))
-            samples = xr.DataArray(
-                np.array(samples_list),
-                dims=["sample", "lat", "lon"]
-            )
-    else:
-        if "level" in samples.dims:
-            samples = samples.mean(dim="level")
+        samples = samples.isel(time=time_idx)
+    if "trajectory_steps" in samples.dims:
+        samples = samples.isel(trajectory_steps=-1)
+    if "level" in samples.dims:
+        samples = samples.mean(dim="level")
+    if "vari" in samples.dims:
+        samples = samples.isel(vari=0)
 
     samples_np = samples.values  # shape: [sample, lat, lon]
     n_samples = min(samples_np.shape[0], max_samples)
@@ -1270,10 +1267,11 @@ def plot_mask_pattern_on_samples(
         )
         # Overlay mask as red contour
         ax.contour(
-            obs_mask,
+            obs_mask.astype(float),
             levels=[0.5],
             colors='red',
             linewidths=1.5,
+            origin='lower',
         )
         ax.set_title(f"Sample {i} + Mask", fontsize=11)
         ax.axis("off")
@@ -1293,7 +1291,6 @@ def plot_mask_pattern_on_samples(
 
 
 def plot_masking_diagnostics(
-        batch,
         preds,
         out_dir,
         varnames=["co2massmix"],
@@ -1302,6 +1299,7 @@ def plot_masking_diagnostics(
         imgformats=["svg", "png", "pdf"]):
     """
     Save diagnostics for masking or flow matching analysis.
+    Uses pure xarray inputs — obs_mask and obs_values are extracted from preds.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(exist_ok=True, parents=True)
@@ -1312,23 +1310,24 @@ def plot_masking_diagnostics(
 
         preds_var = preds[varname]
 
-        fig = plot_obs_mask_and_samples_x(
-            batch,
-            preds_var,
-            varname=varname,
-            nlat=nlat,
-            nlon=nlon,
-            max_samples=6,
-            )
+        if "obs_values" in preds:
+            fig = plot_obs_mask_and_samples_x(
+                preds,
+                preds_var,
+                varname=varname,
+                nlat=nlat,
+                nlon=nlon,
+                max_samples=6,
+                )
 
-        for fmt in imgformats:
-            fig.savefig(out_dir / f"masking_{varname}.{fmt}", dpi=300)
-        plt.close(fig)
+            for fmt in imgformats:
+                fig.savefig(out_dir / f"masking_{varname}.{fmt}", dpi=300)
+            plt.close(fig)
 
         # Plot mask pattern overlay on generated samples
-        if "obs_mask_original" in batch:
+        if "obs_mask" in preds:
             fig_mask = plot_mask_pattern_on_samples(
-                batch,
+                preds,
                 preds_var,
                 nlat=nlat,
                 nlon=nlon,

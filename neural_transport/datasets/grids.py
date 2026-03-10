@@ -80,6 +80,7 @@ VERTICAL_LAYERS_PROTOTYPE_COORDS = {
     "l34": dict(level=np.array(CARBONTRACKER_HEIGHT)),
     "l20": dict(level=np.array(L20_HEIGHT)),
     "l3": dict(level=np.array([1013.0, 1005.0, 843.0])),
+    "l1": dict(level=np.array([500.0])),
 }
 
 

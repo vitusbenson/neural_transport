@@ -32,6 +32,8 @@ pip3 install lightning cdsapi pypdf2 trimesh rtree ipykernel ipywidgets tensorbo
 pip3 install git+https://github.com/jbusecke/xmovie.git
 # Go inside your neural_transport folder (cd neural_transport)
 pip install -e .
+```                                                                                                                                                                                                       
+             
 ```
 
 

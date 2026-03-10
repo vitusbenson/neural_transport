@@ -272,8 +272,6 @@ def create_oco2_mask_test(
 
     B, T, N, C = batch[target_var].shape
     device = batch[target_var].device
-    value = batch[f"{target_var}_offset"]
-    value = molemix_to_massmix(value)
 
     assert nlat * nlon == N, "nlat * nlon must equal N"
 
@@ -313,7 +311,8 @@ def create_oco2_mask_test(
     )
 
     obs_mask[:, :, obs_indices, :] = True
-    obs_values[:, :, obs_indices, :] = value
+    gt_values = molemix_to_massmix(batch[target_var].clone())
+    obs_values[:, :, obs_indices, :] = gt_values[:, :, obs_indices, :]
 
     # Handle xco2_averaging_kernel
     ak = batch["xco2_averaging_kernel"].clone()  # [B, T, N, C=10]
@@ -326,6 +325,116 @@ def create_oco2_mask_test(
     batch["xco2_averaging_kernel"] = mean_ak_full
 
     return obs_mask, obs_values  # [B T N C] each
+
+
+def create_column_mask(
+    batch,
+    target_var="co2massmix",
+    obs_fraction=0.1,
+    mask_pattern="random",
+    nlat=32,
+    nlon=64,
+    ak_10=None,
+):
+    """
+    Create synthetic XCO2 column observations from a 3D CO2 field using
+    average OCO-2 averaging kernel and CarbonTracker pressure weights.
+
+    Computes XCO2 = sum(h_k * a_k * x_k) where:
+        h_k = (p_bottom_k - p_top_k) / p_surface  (pressure weight)
+        a_k = mean OCO-2 averaging kernel at level k
+        x_k = CO2 mass mixing ratio at level k
+
+    Args:
+        batch: dict of tensors [B, T, N, C]
+        target_var: 3D CO2 variable name
+        obs_fraction: fraction of spatial points to observe
+        mask_pattern: spatial pattern for observations
+        nlat, nlon: grid dimensions
+        ak_10: averaging kernel on 10 aggregated levels [C=10], numpy array.
+               If None, uses uniform AK (all ones).
+
+    Returns:
+        obs_mask: bool [B, T, N, 1] spatial mask
+        obs_values: float [B, T, N, 1] synthetic XCO2 at observed locations
+        Also modifies batch in-place to add:
+            xco2_averaging_kernel [B, T, N, C]
+            xco2_apriori [B, T, N, 1]  (set to zero - no prior correction needed for OSSE)
+            co2_profile_apriori [B, T, N, C]  (set to zero)
+            pressure_weight [B, T, N, C]
+    """
+    device = batch[target_var].device
+    B, T, N, C = batch[target_var].shape
+
+    # Compute pressure weights h_k = (p_bottom_k - p_top_k) / p_surface
+    p_bottom = batch["p_bottom"]  # [B, T, N, C]
+    p_top = batch["p_top"]        # [B, T, N, C]
+    dp = p_bottom - p_top         # [B, T, N, C]
+    p_surface = p_bottom[:, :, :, 0:1]  # surface level (level 0)
+    h_k = dp / p_surface.clamp(min=1e-6)  # [B, T, N, C]
+
+    # Averaging kernel
+    if ak_10 is not None:
+        ak = torch.tensor(ak_10, dtype=torch.float32, device=device)
+        ak = ak.view(1, 1, 1, C).expand(B, T, N, C)
+    else:
+        ak = torch.ones(B, T, N, C, device=device)
+
+    # Compute synthetic XCO2 = sum(h_k * a_k * x_k)
+    co2 = batch[target_var]  # [B, T, N, C]
+    xco2 = (h_k * ak * co2).sum(dim=-1, keepdim=True)  # [B, T, N, 1]
+
+    # Create spatial mask
+    obs_mask = torch.zeros((B, T, N, 1), dtype=torch.bool, device=device)
+    obs_values = torch.full((B, T, N, 1), float('nan'), device=device)
+
+    for t_idx in range(T):
+        if mask_pattern == "random":
+            num_obs = int(obs_fraction * N)
+            obs_indices = torch.randperm(N, device=device)[:num_obs]
+        elif mask_pattern == "checkerboard":
+            grid = torch.arange(N, device=device).reshape(nlat, nlon)
+            mask2d = (torch.arange(nlat, device=device)[:, None] +
+                      torch.arange(nlon, device=device)[None, :]) % 2 == 0
+            obs_indices = grid[mask2d].reshape(-1)
+        elif mask_pattern == "satellite":
+            grid = torch.arange(N, device=device).reshape(nlat, nlon)
+            swath_width = max(1, int(obs_fraction * nlon / 8))
+            tilt = -5 * np.pi / 180.0
+            cols = []
+            for i in range(0, nlon, swath_width * 8):
+                for w in range(swath_width):
+                    col_idx = i + w
+                    if col_idx < nlon:
+                        lat_offsets = ((torch.arange(nlat, device=device) * np.tan(tilt)).long()) % nlon
+                        col_with_tilt = (col_idx + lat_offsets) % nlon
+                        cols.append(col_with_tilt.unsqueeze(0))
+            cols = torch.cat(cols, dim=0)
+            obs_indices = grid[torch.arange(nlat).unsqueeze(0), cols].reshape(-1)
+        elif mask_pattern == "vertical":
+            num_cols = max(1, int(obs_fraction * nlon))
+            cols_sel = torch.arange(0, nlon, nlon // num_cols, device=device)
+            grid = torch.arange(N, device=device).reshape(nlat, nlon)
+            obs_indices = grid[:, cols_sel].reshape(-1)
+        elif mask_pattern == "horizontal":
+            num_rows = max(1, int(obs_fraction * nlat))
+            rows = torch.arange(0, nlat, nlat // num_rows, device=device)
+            grid = torch.arange(N, device=device).reshape(nlat, nlon)
+            obs_indices = grid[rows, :].reshape(-1)
+        else:
+            raise ValueError(f"Unknown mask pattern: {mask_pattern}")
+
+        obs_mask[:, t_idx, obs_indices, :] = True
+        obs_values[:, t_idx, obs_indices, :] = xco2[:, t_idx, obs_indices, :]
+
+    # Add AK, prior, and pressure_weight to batch for prepare_masking_config
+    batch["xco2_averaging_kernel"] = ak
+    # For OSSE with CT as truth, prior is zero (XCO2 = sum(h*a*x), no prior correction)
+    batch["xco2_apriori"] = torch.zeros(B, T, N, 1, device=device)
+    batch["co2_profile_apriori"] = torch.zeros(B, T, N, C, device=device)
+    batch["pressure_weight"] = h_k
+
+    return obs_mask, obs_values  # [B T N 1], [B T N 1]
 
 
 def create_mask(batch, target_var="co2massmix", obs_fraction=0.1, mask_pattern="random", nlat=32, nlon=64):
@@ -480,7 +589,7 @@ def iterative_generate_oco2(
     dss = []
     obss = []
     if mask_pattern is None:
-        T = 50
+        T = 5
         # T = len(dataset_gen)
     else:
         T = min(len(dataset), len(dataset_gen))
@@ -545,7 +654,13 @@ def iterative_generate_oco2(
             sample=("sample", np.arange(n_samples)),
         )
         ds = ds.expand_dims(time=[prototype_zarr.isel(time=t).time.values])
-        
+
+        if masking:
+            obs_mask_xr = dataset_gen.tensor_to_xarray(batch_gen["obs_mask"][:1])
+            obs_values_xr = dataset_gen.tensor_to_xarray(obs_values[:1])
+            ds["obs_mask"] = obs_mask_xr
+            ds["obs_values"] = obs_values_xr
+
         if remap:
             ds = remap_with_cdo(dataset, prototype_zarr.isel(time=0), ds)
 
@@ -575,7 +690,7 @@ def iterative_generate_oco2(
     ds_all.to_zarr(zarrpath, mode="w")
 
     if analyze_masking and masking:
-        plot_masking_diagnostics(batch, ds_all,
+        plot_masking_diagnostics(ds_all,
                                  str(outpath).replace("preds", "plots"),
                                  varnames=target_vars_3d, nlat=nlat, nlon=nlon,
                                  imgformats=["png"])
@@ -602,11 +717,13 @@ def iterative_generate(
     condition_one_timestep = generate_kwargs.get("condition_one_timestep", True)
     n_samples = generate_kwargs.get("n_samples", 10)
     masking = generate_kwargs.get("masking", False)
+    mask_source = generate_kwargs.get("mask_source", "3d")
     mask_pattern = generate_kwargs.get("mask_pattern", "vertical")
     analyze_masking = generate_kwargs.get("analyze_masking", False)
     obs_fraction = generate_kwargs.get("obs_fraction", 0.2)
     noise_pattern = generate_kwargs.get("noise_pattern", None)
     analyze_noise = generate_kwargs.get("analyze_noise", False)
+    ak_10 = generate_kwargs.get("ak_10", None)
 
     nlat, nlon = model.model.in_nlat, model.model.in_nlon
 
@@ -638,23 +755,41 @@ def iterative_generate(
         base_batch = {k: v.unsqueeze(0).to(device) for k, v in dataset[0].items()} # condition on the first timestep
         if masking:
             target_var = target_vars_3d[0]
-            if mask_pattern is None:
+            if mask_source in ("column", "xco2"):
+                obs_mask, obs_values = create_column_mask(
+                    base_batch, target_var=target_var, obs_fraction=obs_fraction,
+                    mask_pattern=mask_pattern, nlat=nlat, nlon=nlon, ak_10=ak_10)
+                base_batch["obs_mask"] = obs_mask
+                obs_values_normed = model.model.normalize_observations(obs_values, base_batch, target_var=target_var, targshift=False)
+                base_batch["obs_values"] = obs_values_normed
+            elif mask_pattern is None:
                 obs_mask, obs_values = create_oco2_mask(base_batch, target_var=target_var)
+                base_batch["obs_mask"] = obs_mask
+                obs_values_normed = model.model.normalize_observations(obs_values, base_batch, target_var=target_var)
+                base_batch["obs_values"] = obs_values_normed
             else:
                 obs_mask, obs_values = create_mask(base_batch, target_var=target_var, obs_fraction=obs_fraction, mask_pattern=mask_pattern, nlat=nlat, nlon=nlon)
-            base_batch["obs_mask"] = obs_mask
-            obs_values_normed = model.model.normalize_observations(obs_values, base_batch, target_var=target_var)
-            base_batch["obs_values"] = obs_values_normed
+                base_batch["obs_mask"] = obs_mask
+                obs_values_normed = model.model.normalize_observations(obs_values, base_batch, target_var=target_var)
+                base_batch["obs_values"] = obs_values_normed
 
     for i in tqdm(range(n_samples), desc="Generating samples") if verbose else range(n_samples):
         if not condition_one_timestep:
             base_batch = {k: v.unsqueeze(0).to(device) for k, v in dataset[i].items()} # condition on different timesteps
             if masking:
                 target_var = target_vars_3d[0]
-                obs_mask, obs_values = create_mask(base_batch, target_var=target_var, obs_fraction=obs_fraction, mask_pattern=mask_pattern, nlat=nlat, nlon=nlon)
-                base_batch["obs_mask"] = obs_mask
-                obs_values_normed = model.model.normalize_observations(obs_values, base_batch, target_var=target_var)
-                base_batch["obs_values"] = obs_values_normed
+                if mask_source in ("column", "xco2"):
+                    obs_mask, obs_values = create_column_mask(
+                        base_batch, target_var=target_var, obs_fraction=obs_fraction,
+                        mask_pattern=mask_pattern, nlat=nlat, nlon=nlon, ak_10=ak_10)
+                    base_batch["obs_mask"] = obs_mask
+                    obs_values_normed = model.model.normalize_observations(obs_values, base_batch, target_var=target_var, targshift=False)
+                    base_batch["obs_values"] = obs_values_normed
+                else:
+                    obs_mask, obs_values = create_mask(base_batch, target_var=target_var, obs_fraction=obs_fraction, mask_pattern=mask_pattern, nlat=nlat, nlon=nlon)
+                    base_batch["obs_mask"] = obs_mask
+                    obs_values_normed = model.model.normalize_observations(obs_values, base_batch, target_var=target_var)
+                    base_batch["obs_values"] = obs_values_normed
         batch = {k: v.clone() for k, v in base_batch.items()}
         batch["noise"] = noise_list[i].to(device)
 
@@ -685,6 +820,12 @@ def iterative_generate(
             sample=("sample", [i]),
         )
 
+        if masking:
+            obs_mask_xr = dataset.tensor_to_xarray(batch["obs_mask"][:1])
+            obs_values_xr = dataset.tensor_to_xarray(batch["obs_values"][:1])
+            ds["obs_mask"] = obs_mask_xr
+            ds["obs_values"] = obs_values_xr
+
         if remap:
             ds = remap_with_cdo(dataset, prototype_zarr.isel(time=0), ds)
 
@@ -714,7 +855,7 @@ def iterative_generate(
     ds_all.to_zarr(zarrpath, mode="w")
 
     if analyze_masking and masking:
-        plot_masking_diagnostics(batch, ds_all,
+        plot_masking_diagnostics(ds_all,
                                  str(outpath).replace("preds", "plots"),
                                  varnames=target_vars_3d, nlat=nlat, nlon=nlon,
                                  imgformats=["png"])

@@ -148,7 +148,7 @@ def train_rollout(
     return model.global_rank
 
 
-def load_dataset(data_path, data_kwargs):
+def load_dataset(data_path, data_kwargs, load_obspack=True):
 
     dataset = CarbonDataset(
         data_path=data_path,
@@ -159,7 +159,7 @@ def load_dataset(data_path, data_kwargs):
         n_timesteps=1,
         target_vars=data_kwargs["target_vars"],
         forcing_vars=data_kwargs["forcing_vars"],
-        load_obspack=True,
+        load_obspack=load_obspack,
         new_zarr=True,
     )
 
