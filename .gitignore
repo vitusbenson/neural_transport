@@ -181,3 +181,7 @@ neural_transport/flowmatching_dev/old/testScript_old*
 
 # Experiment outputs (generated artifacts)
 experiments/
+
+# Allow neural_transport/experiments package (source code, not outputs)
+!neural_transport/experiments/
+!neural_transport/experiments/**/*.py

@@ -91,10 +91,10 @@ Build reusable evaluation so every subsequent phase auto-produces full diagnosti
 
 Formalize `toy_column_osse.py` as a mandatory validation gate.
 
-- [ ] Make importable as test module with pytest markers (quick ~30s, full ~5min)
-- [ ] Every conditioning method must pass: column RMSE < threshold, no NaN, no divergence
-- [ ] Run on all existing methods to establish baseline
-- [ ] Run `osse_runner` on real CT data for baseline evaluation of current methods
+- [x] Make importable as test module with pytest markers (quick ~30s, full ~5min)
+- [x] Every conditioning method must pass: column RMSE < threshold, no NaN, no divergence
+- [x] Run on all existing methods to establish baseline
+- [x] Run `osse_runner` on real CT data for baseline evaluation of current methods
 
 **Deliverable**: Baseline metrics + plots for unconditional and all 4 existing conditioning modes.
 

@@ -78,6 +78,7 @@ python_functions = ["test_*"]
 addopts = ["-v", "--tb=short", "-ra"]
 filterwarnings = ["ignore::DeprecationWarning", "ignore::UserWarning"]
 markers = [
-    "slow: marks tests as slow",
+    "slow: marks tests as slow (~5min, full model training)",
     "gpu: marks tests requiring GPU",
+    "quick: marks fast sanity tests (~30s)",
 ]

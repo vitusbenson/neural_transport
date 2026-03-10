@@ -443,81 +443,8 @@ CONDITIONING_METHODS = {
 }
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Toy column OSSE for debugging")
-    parser.add_argument("--device", type=str, default="cpu")
-    parser.add_argument("--n_train", type=int, default=10000)
-    parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--n_samples", type=int, default=20)
-    parser.add_argument("--obs_fraction", type=float, default=0.3)
-    parser.add_argument("--out_dir", type=str, default=None)
-    args = parser.parse_args()
-
-    device = args.device
-    nlat, nlon, nlev = 16, 32, 4
-
-    if args.out_dir is None:
-        # Store output outside the package, in the repo-level experiments directory
-        repo_root = Path(__file__).resolve().parent.parent.parent
-        out_dir = repo_root / "experiments" / "toy_column_osse_output"
-    else:
-        out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    # 1. Generate data
-    print("Generating toy data...")
-    data = generate_toy_data(n_samples=args.n_train, nlat=nlat, nlon=nlon, nlev=nlev)
-    column_weights = get_column_weights(nlev)
-
-    # 2. Train flow matching model
-    print("Training flow matching model...")
-    conv_model, data_mean, data_std = train_flow_matching(data, nlev=nlev, epochs=args.epochs, lr=1e-3, device=device)
-
-    velocity_wrapper = ToyVelocityWrapper(conv_model, nlev=nlev).to(device)
-
-    # 3. Pick a ground truth sample and create column obs
-    gt_idx = 0
-    gt_norm = ((data[gt_idx : gt_idx + 1] - data_mean) / data_std).to(device)
-    gt_phys = data[gt_idx : gt_idx + 1].to(device)
-
-    obs_mask, obs_values = create_column_obs(gt_phys, column_weights, obs_fraction=args.obs_fraction, seed=123)
-    obs_mask = obs_mask.to(device)
-    obs_values = obs_values.to(device)
-
-    print(f"GT field shape: {gt_norm.shape}")
-    print(f"Obs mask: {obs_mask.sum().item()}/{obs_mask.numel()} locations observed")
-    print(f"Column weights: {column_weights.tolist()}")
-
-    # 4. Test each conditioning method
-    all_results = {}
-
-    for method_name, method_config in CONDITIONING_METHODS.items():
-        print(f"\nTesting: {method_name}")
-        config = {k: v for k, v in method_config.items()}
-        is_unconditional = config.pop("_unconditional", False)
-
-        torch.manual_seed(42)
-
-        if is_unconditional:
-            samples = sample_unconditional(velocity_wrapper, args.n_samples, nlev, nlat, nlon, device)
-        else:
-            masking_config = build_masking_config(obs_mask, obs_values, data_mean, data_std, column_weights, device)
-            samples = sample_conditioned(
-                velocity_wrapper, masking_config, config, args.n_samples, nlev, nlat, nlon, device
-            )
-
-        metrics = evaluate(samples, gt_norm, obs_mask, column_weights, data_mean, data_std)
-        all_results[method_name] = {"samples": samples.cpu(), "metrics": metrics}
-        print(f"  {metrics}")
-
-    # 5. Save results
-    metrics_summary = {name: res["metrics"] for name, res in all_results.items()}
-    with open(out_dir / "metrics_summary.json", "w") as f:
-        json.dump(metrics_summary, f, indent=2)
-
-    plot_results(all_results, gt_norm.cpu(), obs_mask.cpu(), column_weights, data_mean, data_std, out_dir)
-
-    # 6. Print summary table
+def _print_summary_table(all_results):
+    """Print a formatted summary table of results."""
     print(f"\n{'=' * 100}")
     header = f"{'Method':<22} {'RMSE_3d':>10} {'RMSE_3d_o':>10} {'RMSE_3d_a':>10} {'RMSE_xco2':>10} {'RMSE_xo':>10} {'RMSE_xa':>10}"
     print(header)
@@ -534,6 +461,142 @@ def main():
             f"{_f(m['rmse_xco2_obs']):>10} {_f(m['rmse_xco2_away']):>10}"
         )
     print(f"{'=' * 100}")
+
+
+def run_toy_osse(
+    device="cpu",
+    n_train=10000,
+    epochs=50,
+    n_samples=20,
+    obs_fraction=0.3,
+    methods=None,
+    out_dir=None,
+    seed=42,
+    nlat=16,
+    nlon=32,
+    nlev=4,
+):
+    """Run toy column OSSE end-to-end.
+
+    Parameters
+    ----------
+    device : str
+        Device to use for training and sampling.
+    n_train : int
+        Number of training samples to generate.
+    epochs : int
+        Number of training epochs.
+    n_samples : int
+        Number of ensemble samples per conditioning method.
+    obs_fraction : float
+        Fraction of spatial locations observed.
+    methods : list[str] or None
+        Subset of CONDITIONING_METHODS to run. None runs all.
+    out_dir : str or Path or None
+        Output directory for plots/JSON. None skips saving.
+    seed : int
+        Random seed for data generation.
+    nlat, nlon, nlev : int
+        Grid dimensions.
+
+    Returns
+    -------
+    dict[str, dict]
+        Maps method_name -> {"samples": Tensor, "metrics": dict}.
+    """
+    # 1. Generate data
+    print("Generating toy data...")
+    data = generate_toy_data(n_samples=n_train, nlat=nlat, nlon=nlon, nlev=nlev, seed=seed)
+    column_weights = get_column_weights(nlev)
+
+    # 2. Train flow matching model
+    print("Training flow matching model...")
+    conv_model, data_mean, data_std = train_flow_matching(data, nlev=nlev, epochs=epochs, lr=1e-3, device=device)
+
+    velocity_wrapper = ToyVelocityWrapper(conv_model, nlev=nlev).to(device)
+
+    # 3. Pick a ground truth sample and create column obs
+    gt_idx = 0
+    gt_norm = ((data[gt_idx : gt_idx + 1] - data_mean) / data_std).to(device)
+    gt_phys = data[gt_idx : gt_idx + 1].to(device)
+
+    obs_mask, obs_values = create_column_obs(gt_phys, column_weights, obs_fraction=obs_fraction, seed=123)
+    obs_mask = obs_mask.to(device)
+    obs_values = obs_values.to(device)
+
+    print(f"GT field shape: {gt_norm.shape}")
+    print(f"Obs mask: {obs_mask.sum().item()}/{obs_mask.numel()} locations observed")
+    print(f"Column weights: {column_weights.tolist()}")
+
+    # 4. Select conditioning methods
+    if methods is not None:
+        selected = {k: v for k, v in CONDITIONING_METHODS.items() if k in methods}
+        if not selected:
+            raise ValueError(f"No matching methods. Available: {list(CONDITIONING_METHODS.keys())}")
+    else:
+        selected = CONDITIONING_METHODS
+
+    # 5. Test each conditioning method
+    all_results = {}
+
+    for method_name, method_config in selected.items():
+        print(f"\nTesting: {method_name}")
+        config = {k: v for k, v in method_config.items()}
+        is_unconditional = config.pop("_unconditional", False)
+
+        torch.manual_seed(42)
+
+        if is_unconditional:
+            samples = sample_unconditional(velocity_wrapper, n_samples, nlev, nlat, nlon, device)
+        else:
+            masking_config = build_masking_config(obs_mask, obs_values, data_mean, data_std, column_weights, device)
+            samples = sample_conditioned(velocity_wrapper, masking_config, config, n_samples, nlev, nlat, nlon, device)
+
+        metrics = evaluate(samples, gt_norm, obs_mask, column_weights, data_mean, data_std)
+        all_results[method_name] = {"samples": samples.cpu(), "metrics": metrics}
+        print(f"  {metrics}")
+
+    # 6. Save results (if out_dir provided)
+    if out_dir is not None:
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        metrics_summary = {name: res["metrics"] for name, res in all_results.items()}
+        with open(out_dir / "metrics_summary.json", "w") as f:
+            json.dump(metrics_summary, f, indent=2)
+
+        plot_results(all_results, gt_norm.cpu(), obs_mask.cpu(), column_weights, data_mean, data_std, out_dir)
+
+    # 7. Print summary table
+    _print_summary_table(all_results)
+
+    return all_results
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Toy column OSSE for debugging")
+    parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--n_train", type=int, default=10000)
+    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--n_samples", type=int, default=20)
+    parser.add_argument("--obs_fraction", type=float, default=0.3)
+    parser.add_argument("--out_dir", type=str, default=None)
+    args = parser.parse_args()
+
+    if args.out_dir is None:
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        out_dir = repo_root / "experiments" / "toy_column_osse_output"
+    else:
+        out_dir = args.out_dir
+
+    run_toy_osse(
+        device=args.device,
+        n_train=args.n_train,
+        epochs=args.epochs,
+        n_samples=args.n_samples,
+        obs_fraction=args.obs_fraction,
+        out_dir=out_dir,
+    )
 
 
 if __name__ == "__main__":
