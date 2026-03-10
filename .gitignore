@@ -178,3 +178,6 @@ neural_transport/flowmatching_dev/test_plots/*
 neural_transport/flowmatching_dev/examples/*
 neural_transport/flowmatching_dev/old/testScript_ancient*
 neural_transport/flowmatching_dev/old/testScript_old*
+
+# Experiment outputs (generated artifacts)
+experiments/

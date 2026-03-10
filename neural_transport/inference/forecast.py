@@ -1,9 +1,7 @@
 import shutil
 import tempfile
-import time as pytime
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import torch
 import xarray as xr
@@ -13,9 +11,7 @@ from tqdm import tqdm
 
 def get_zarrpath_obspath(out_path, rollout, freq, zarr_filename=None, zero_surfflux=False):
     if zarr_filename is None:
-        zarr_filename = (
-            f"co2_pred_rollout_{freq}.zarr" if rollout else "co2_pred_singlestep.zarr"
-        )
+        zarr_filename = f"co2_pred_rollout_{freq}.zarr" if rollout else "co2_pred_singlestep.zarr"
     if zero_surfflux:
         zarr_filename = zarr_filename.replace("co2_pred", "co2_pred_zeroflux")
 
@@ -42,7 +38,7 @@ def iterative_forecast(
     target_vars_3d=[],
     target_vars_2d=[],
 ):
-    zarrpath, obspath = get_zarrpath_obspath(out_path, rollout, freq, zarr_filename, zero_surfflux = zero_surfflux)
+    zarrpath, obspath = get_zarrpath_obspath(out_path, rollout, freq, zarr_filename, zero_surfflux=zero_surfflux)
 
     prototype_zarr = dataset.create_prototype_zarr(
         zarrpath,
@@ -67,10 +63,11 @@ def iterative_forecast(
 
     dss = []
     obss = []
+    preds = {}
     for t in tqdm(range(T), desc="Timestep") if verbose else range(T):
         batch = {k: v.unsqueeze(0).to(device) for k, v in dataset[t].items()}
 
-        if rollout and (prototype_zarr.time[t].values not in time):
+        if rollout and preds and (prototype_zarr.time[t].values not in time):
             for k in preds:
                 batch[k] = preds[k]
 
@@ -84,9 +81,7 @@ def iterative_forecast(
         preds["gph_bottom"] = batch["gph_bottom"]
         preds["gph_top"] = batch["gph_top"]
 
-        ds = xr.Dataset(
-            {k: dataset.tensor_to_xarray(pred) for k, pred in preds.items()}
-        )
+        ds = xr.Dataset({k: dataset.tensor_to_xarray(pred) for k, pred in preds.items()})
 
         ds = ds.assign_coords(time=prototype_zarr.isel(time=t + 1).time)
 
@@ -99,17 +94,11 @@ def iterative_forecast(
         if (t % 1000 == 999) or (t == T - 1):
             ds = xr.concat(dss, dim="time")
 
-            ds_remap = (
-                remap_with_cdo(dataset, prototype_zarr.isel(time=t), ds)
-                if remap
-                else ds
-            )
+            ds_remap = remap_with_cdo(dataset, prototype_zarr.isel(time=t), ds) if remap else ds
 
             timeslice = slice(t - (len(ds_remap.time) - 2), t + 2)
 
-            ds_remap.drop_vars(["level", "lat", "lon"]).to_zarr(
-                zarrpath, region=dict(time=timeslice)
-            )
+            ds_remap.drop_vars(["level", "lat", "lon"]).to_zarr(zarrpath, region=dict(time=timeslice))
 
             dss = []
 
@@ -151,23 +140,16 @@ def remap_with_cdo(dataset, prototype_zarr, ds):
     ds["time"].attrs = {"standard_name": "time"}
     ds["height"].attrs = {"standard_name": "air_pressure"}
 
-    grid_temp_file = tempfile.NamedTemporaryFile(
-        delete=True, prefix="grid_temp_file_", dir=tempfile.gettempdir()
-    )
+    grid_temp_file = tempfile.NamedTemporaryFile(delete=True, prefix="grid_temp_file_", dir=tempfile.gettempdir())
     prototype_zarr.to_netcdf(grid_temp_file.name)
 
-    ds_temp_file = tempfile.NamedTemporaryFile(
-        delete=True, prefix="ds_temp_file_", dir=tempfile.gettempdir()
-    )
+    ds_temp_file = tempfile.NamedTemporaryFile(delete=True, prefix="ds_temp_file_", dir=tempfile.gettempdir())
     ds.transpose("time", "height", "cell", "nv").to_netcdf(ds_temp_file.name)
 
-    ds_remap = cdo.remapcon(
-        grid_temp_file.name, input=ds_temp_file.name, returnXDataset=True
-    )
+    ds_remap = cdo.remapcon(grid_temp_file.name, input=ds_temp_file.name, returnXDataset=True)
 
     grid_temp_file.close()
     ds_temp_file.close()
 
     cdo.cleanTempDir()
     return ds_remap
-

@@ -26,7 +26,6 @@ https://codes.ecmwf.int/grib/param-db/?id=212.
 """
 
 import dataclasses
-import functools
 from collections.abc import Callable, Sequence
 
 import numpy as np
@@ -90,28 +89,94 @@ def era5_tsi_data() -> xr.DataArray:
     tsi = 0.9965 * np.array(
         [
             # fmt: off
-      # 1951-1995 (non-repeating sequence)
-      1365.7765, 1365.7676, 1365.6284, 1365.6564, 1365.7773,
-      1366.3109, 1366.6681, 1366.6328, 1366.3828, 1366.2767,
-      1365.9199, 1365.7484, 1365.6963, 1365.6976, 1365.7341,
-      1365.9178, 1366.1143, 1366.1644, 1366.2476, 1366.2426,
-      1365.9580, 1366.0525, 1365.7991, 1365.7271, 1365.5345,
-      1365.6453, 1365.8331, 1366.2747, 1366.6348, 1366.6482,
-      1366.6951, 1366.2859, 1366.1992, 1365.8103, 1365.6416,
-      1365.6379, 1365.7899, 1366.0826, 1366.6479, 1366.5533,
-      1366.4457, 1366.3021, 1366.0286, 1365.7971, 1365.6996,
-      # 1996-2008 (13 year cycle, repeated below)
-      1365.6121, 1365.7399, 1366.1021, 1366.3851, 1366.6836,
-      1366.6022, 1366.6807, 1366.2300, 1366.0480, 1365.8545,
-      1365.8107, 1365.7240, 1365.6918,
-      # 2009-2021
-      1365.6121, 1365.7399, 1366.1021, 1366.3851, 1366.6836,
-      1366.6022, 1366.6807, 1366.2300, 1366.0480, 1365.8545,
-      1365.8107, 1365.7240, 1365.6918,
-      # 2022-2034
-      1365.6121, 1365.7399, 1366.1021, 1366.3851, 1366.6836,
-      1366.6022, 1366.6807, 1366.2300, 1366.0480, 1365.8545,
-      1365.8107, 1365.7240, 1365.6918,
+            # 1951-1995 (non-repeating sequence)
+            1365.7765,
+            1365.7676,
+            1365.6284,
+            1365.6564,
+            1365.7773,
+            1366.3109,
+            1366.6681,
+            1366.6328,
+            1366.3828,
+            1366.2767,
+            1365.9199,
+            1365.7484,
+            1365.6963,
+            1365.6976,
+            1365.7341,
+            1365.9178,
+            1366.1143,
+            1366.1644,
+            1366.2476,
+            1366.2426,
+            1365.9580,
+            1366.0525,
+            1365.7991,
+            1365.7271,
+            1365.5345,
+            1365.6453,
+            1365.8331,
+            1366.2747,
+            1366.6348,
+            1366.6482,
+            1366.6951,
+            1366.2859,
+            1366.1992,
+            1365.8103,
+            1365.6416,
+            1365.6379,
+            1365.7899,
+            1366.0826,
+            1366.6479,
+            1366.5533,
+            1366.4457,
+            1366.3021,
+            1366.0286,
+            1365.7971,
+            1365.6996,
+            # 1996-2008 (13 year cycle, repeated below)
+            1365.6121,
+            1365.7399,
+            1366.1021,
+            1366.3851,
+            1366.6836,
+            1366.6022,
+            1366.6807,
+            1366.2300,
+            1366.0480,
+            1365.8545,
+            1365.8107,
+            1365.7240,
+            1365.6918,
+            # 2009-2021
+            1365.6121,
+            1365.7399,
+            1366.1021,
+            1366.3851,
+            1366.6836,
+            1366.6022,
+            1366.6807,
+            1366.2300,
+            1366.0480,
+            1365.8545,
+            1365.8107,
+            1365.7240,
+            1365.6918,
+            # 2022-2034
+            1365.6121,
+            1365.7399,
+            1366.1021,
+            1366.3851,
+            1366.6836,
+            1366.6022,
+            1366.6807,
+            1366.2300,
+            1366.0480,
+            1365.8545,
+            1365.8107,
+            1365.7240,
+            1365.6918,
             # fmt: on
         ]
     )
@@ -317,10 +382,7 @@ def _get_solar_sin_altitude(
     # https://en.wikipedia.org/wiki/Hour_angle#Solar_hour_angle
     hour_angle = 2.0 * np.pi * solar_time + longitude
     # https://en.wikipedia.org/wiki/Solar_zenith_angle
-    sin_altitude = (
-        cos_latitude * op.cos_declination * np.cos(hour_angle)
-        + sin_latitude * op.sin_declination
-    )
+    sin_altitude = cos_latitude * op.cos_declination * np.cos(hour_angle) + sin_latitude * op.sin_declination
     return sin_altitude
 
 
@@ -563,15 +625,11 @@ def get_toa_incident_solar_radiation_for_xarray(
     """
     missing_dims = set(["lat", "lon"]) - set(data_array_like.dims)
     if missing_dims:
-        raise ValueError(
-            f"'{missing_dims}' dimensions are missing in `data_array_like`."
-        )
+        raise ValueError(f"'{missing_dims}' dimensions are missing in `data_array_like`.")
 
     missing_coords = set(["time", "lat", "lon"]) - set(data_array_like.coords)
     if missing_coords:
-        raise ValueError(
-            f"'{missing_coords}' coordinates are missing in `data_array_like`."
-        )
+        raise ValueError(f"'{missing_coords}' coordinates are missing in `data_array_like`.")
 
     if "time" in data_array_like.dims:
         timestamps = data_array_like.coords["time"].data

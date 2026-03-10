@@ -4,8 +4,7 @@ All metric functions accept numpy arrays. Dataclasses for structured results.
 Extracted and extended from compare_conditioning_osse.py (experiment 08).
 """
 
-from dataclasses import dataclass, asdict
-from typing import Optional
+from dataclasses import asdict, dataclass
 
 import numpy as np
 
@@ -56,8 +55,8 @@ def rmse_3d(pred, gt, weights=None):
     if weights is not None:
         w = np.asarray(weights).reshape(-1, 1, 1)
         w = w / w.mean()
-        return float(np.sqrt(np.mean(w * diff ** 2)))
-    return float(np.sqrt(np.mean(diff ** 2)))
+        return float(np.sqrt(np.mean(w * diff**2)))
+    return float(np.sqrt(np.mean(diff**2)))
 
 
 def rmse_xco2(pred, gt, pressure_weights, ak, weights=None):
@@ -79,8 +78,8 @@ def rmse_xco2(pred, gt, pressure_weights, ak, weights=None):
     if weights is not None:
         w = np.asarray(weights).reshape(-1, 1)
         w = w / w.mean()
-        return float(np.sqrt(np.mean(w * diff ** 2)))
-    return float(np.sqrt(np.mean(diff ** 2)))
+        return float(np.sqrt(np.mean(w * diff**2)))
+    return float(np.sqrt(np.mean(diff**2)))
 
 
 def rmse_at_obs(pred, gt, mask_2d, weights=None):
@@ -198,10 +197,7 @@ def calibration_score(samples, gt, quantiles=None):
 
     # For each quantile, fraction of grid points where gt < percentile
     gt_expanded = gt[None, ...]  # [1, ...]
-    observed = np.array([
-        float(np.mean(gt_expanded[0] < percentiles[i]))
-        for i in range(len(quantiles))
-    ])
+    observed = np.array([float(np.mean(gt_expanded[0] < percentiles[i])) for i in range(len(quantiles))])
 
     calibration_error = float(np.mean((observed - quantiles) ** 2) ** 0.5)
 
@@ -288,18 +284,17 @@ class OSSEResult:
     samples: np.ndarray  # [n_samples, nlat, nlon, nlev]
     ensemble_mean: np.ndarray  # [nlat, nlon, nlev]
     gt: np.ndarray  # [nlat, nlon, nlev]
-    mask_2d: Optional[np.ndarray] = None  # [nlat, nlon] bool
-    pressure_weights: Optional[np.ndarray] = None  # [nlat, nlon, nlev]
-    ak: Optional[np.ndarray] = None  # [nlat, nlon, nlev]
-    rank_hist: Optional[np.ndarray] = None  # [n_samples + 1]
-    calibration_data: Optional[dict] = None
-    crps_map: Optional[np.ndarray] = None  # [nlat, nlon, (nlev)]
-    lat: Optional[np.ndarray] = None  # [nlat]
-    lon: Optional[np.ndarray] = None  # [nlon]
+    mask_2d: np.ndarray | None = None  # [nlat, nlon] bool
+    pressure_weights: np.ndarray | None = None  # [nlat, nlon, nlev]
+    ak: np.ndarray | None = None  # [nlat, nlon, nlev]
+    rank_hist: np.ndarray | None = None  # [n_samples + 1]
+    calibration_data: dict | None = None
+    crps_map: np.ndarray | None = None  # [nlat, nlon, (nlev)]
+    lat: np.ndarray | None = None  # [nlat]
+    lon: np.ndarray | None = None  # [nlon]
 
 
-def compute_all_metrics(samples, gt, mask_2d=None, pressure_weights=None,
-                        ak=None, lat=None):
+def compute_all_metrics(samples, gt, mask_2d=None, pressure_weights=None, ak=None, lat=None):
     """Orchestrator: compute all metrics from ensemble samples and ground truth.
 
     Parameters
@@ -333,20 +328,20 @@ def compute_all_metrics(samples, gt, mask_2d=None, pressure_weights=None,
     if cos_w is not None:
         cos_w_2d = cos_w.reshape(-1, 1)
         cos_w_2d = cos_w_2d / cos_w_2d.mean()
-        val_rmse_col = float(np.sqrt(np.mean(cos_w_2d * diff_col ** 2)))
+        val_rmse_col = float(np.sqrt(np.mean(cos_w_2d * diff_col**2)))
     else:
-        val_rmse_col = float(np.sqrt(np.mean(diff_col ** 2)))
+        val_rmse_col = float(np.sqrt(np.mean(diff_col**2)))
 
     # R2
     diff = ens_mean - gt
     if cos_w is not None:
         w3d = cos_w.reshape(-1, 1, 1)
         w3d = w3d / w3d.mean()
-        ss_res = np.sum(w3d * diff ** 2)
+        ss_res = np.sum(w3d * diff**2)
         gt_mean = np.mean(w3d * gt) / np.mean(w3d)
         ss_tot = np.sum(w3d * (gt - gt_mean) ** 2)
     else:
-        ss_res = np.sum(diff ** 2)
+        ss_res = np.sum(diff**2)
         gt_mean = np.mean(gt)
         ss_tot = np.sum((gt - gt_mean) ** 2)
     val_r2 = float(1 - ss_res / max(ss_tot, 1e-12))
@@ -356,20 +351,16 @@ def compute_all_metrics(samples, gt, mask_2d=None, pressure_weights=None,
     val_rmse_xco2_obs = np.nan
     val_rmse_xco2_away = np.nan
     if pressure_weights is not None and ak is not None:
-        val_rmse_xco2_full = rmse_xco2(ens_mean, gt, pressure_weights, ak,
-                                        weights=cos_w)
+        val_rmse_xco2_full = rmse_xco2(ens_mean, gt, pressure_weights, ak, weights=cos_w)
         # XCO2 at obs / away
         if mask_2d is not None:
-            h_ak = pressure_weights * ak
             xco2_pred = compute_xco2_column(ens_mean, pressure_weights, ak)
             xco2_gt = compute_xco2_column(gt, pressure_weights, ak)
             xco2_diff = xco2_pred - xco2_gt
             if mask_2d.any():
-                val_rmse_xco2_obs = float(
-                    np.sqrt(np.mean(xco2_diff[mask_2d] ** 2)))
+                val_rmse_xco2_obs = float(np.sqrt(np.mean(xco2_diff[mask_2d] ** 2)))
             if (~mask_2d).any():
-                val_rmse_xco2_away = float(
-                    np.sqrt(np.mean(xco2_diff[~mask_2d] ** 2)))
+                val_rmse_xco2_away = float(np.sqrt(np.mean(xco2_diff[~mask_2d] ** 2)))
 
     # Spread-skill ratio
     val_spread_skill = spread_skill_ratio(samples, gt)

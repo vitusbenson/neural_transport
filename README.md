@@ -32,8 +32,10 @@ pip3 install lightning cdsapi pypdf2 trimesh rtree ipykernel ipywidgets tensorbo
 pip3 install git+https://github.com/jbusecke/xmovie.git
 # Go inside your neural_transport folder (cd neural_transport)
 pip install -e .
-```                                                                                                                                                                                                       
-             
+
+# Development tools (linting, testing, pre-commit hooks)
+pip install ruff pytest pytest-cov pre-commit
+pre-commit install
 ```
 
 
@@ -49,7 +51,7 @@ In case you use NeuralTransport in your research or work, it would be highly app
   eprint={2408.11032},
   archivePrefix={arXiv},
   primaryClass={cs.LG},
-  url={https://arxiv.org/abs/2408.11032}, 
+  url={https://arxiv.org/abs/2408.11032},
 }
 ```
 

@@ -9,8 +9,8 @@ import numpy as np
 import seaborn as sns
 import xarray as xr
 
-from neural_transport.plots.utilities.plot_utils import save_figure
 from neural_transport.plots.utilities.cmaps import get_cmap_list
+from neural_transport.plots.utilities.plot_utils import save_figure
 
 sns.set_theme()  # Optional seaborn style
 sns.color_palette("crest", as_cmap=True)
@@ -20,11 +20,11 @@ def plot_samples(
     traj: xr.DataArray,
     n_samples: int = 2,
     ncol: int = 2,
-    sample_indices: list[int] | None=None,
+    sample_indices: list[int] | None = None,
     level_idx: int = 0,
-    cmaps: list[str] | None=None,
+    cmaps: list[str] | None = None,
     seed: int = 42,
-    figsize: tuple[int, int] | None=None,
+    figsize: tuple[int, int] | None = None,
     title: str = "Samples",
 ) -> plt.Figure:
     """Plot selected/random samples at the last time step."""
@@ -88,7 +88,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Plot trajectory samples at the last time step.")
     parser.add_argument("--samples_path", type=str, required=True, help="Path to .zarr or .nc file containing samples.")
     parser.add_argument("--out_dir", type=str, required=True, help="Output directory for saved plots.")
-    parser.add_argument("--use_selected", action="store_true", help="Use the full cmap_selected list instead of default_cmap.")
+    parser.add_argument(
+        "--use_selected", action="store_true", help="Use the full cmap_selected list instead of default_cmap."
+    )
     parser.add_argument("--use_ipcc", action="store_true", help="Use IPCC colormaps instead of default or selected.")
     parser.add_argument("--use_ipcc_one", action="store_true", help="Use a single IPCC colormap.")
     parser.add_argument("--n_samples", type=int, default=2, help="Number of samples to plot.")

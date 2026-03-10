@@ -18,15 +18,11 @@ class NeuralTransport(pl.LightningModule):
         model_kwargs={},
         loss="mse",
         loss_kwargs={},
-        metrics=[
-            {"name": "rmse", "kwargs": {"weights": {"co2massmix": np.ones((1, 1, 1))}}}
-        ],
+        metrics=[{"name": "rmse", "kwargs": {"weights": {"co2massmix": np.ones((1, 1, 1))}}}],
         no_grad_step_shedule=None,
         lr=1e-3,
         weight_decay=0.1,
-        lr_shedule_kwargs=dict(
-            warmup_steps=1000, halfcosine_steps=299000, min_lr=3e-7, max_lr=1.0
-        ),
+        lr_shedule_kwargs=dict(warmup_steps=1000, halfcosine_steps=299000, min_lr=3e-7, max_lr=1.0),
         val_dataloader_names=["singlestep", "rollout"],
         plot_kwargs=dict(
             variables=["co2molemix"],
@@ -48,9 +44,7 @@ class NeuralTransport(pl.LightningModule):
         if pretrained_ckptpath is not None:
             ckpt = torch.load(pretrained_ckptpath, map_location="cpu")
             model_state_dict = {
-                k.replace("model.", ""): v
-                for k, v in ckpt["state_dict"].items()
-                if k.startswith("model.")
+                k.replace("model.", ""): v for k, v in ckpt["state_dict"].items() if k.startswith("model.")
             }
             for key in [
                 "multiscale_encoder.position_feats",
@@ -64,7 +58,6 @@ class NeuralTransport(pl.LightningModule):
         self.metrics = ManyMetrics(metrics)
 
     def forward(self, batch):
-
         T = max(batch[v].shape[1] for v in batch if isinstance(batch[v], torch.Tensor))
 
         for t in range(T):
@@ -85,15 +78,18 @@ class NeuralTransport(pl.LightningModule):
             else:
                 curr_preds = self.model(curr_data)
             if t == 0:
-                preds = {k : torch.empty((curr_preds[k].shape[0], T, *curr_preds[k].shape[1:]), device=curr_preds[k].device) for k in curr_preds}
+                preds = {
+                    k: torch.empty((curr_preds[k].shape[0], T, *curr_preds[k].shape[1:]), device=curr_preds[k].device)
+                    for k in curr_preds
+                }
 
             for v in preds:
                 preds[v][:, t] = curr_preds[v]
-                
+
         if T == 1 and "trajectory" in preds:
-            preds["trajectory"] = preds["trajectory"].squeeze(1) # [T_Flow T B N C] -> [T_Flow B N C]
+            preds["trajectory"] = preds["trajectory"].squeeze(1)  # [T_Flow T B N C] -> [T_Flow B N C]
             preds["trajectory"] = preds["trajectory"].permute(1, 0, 2, 3)
-        return preds # [B, T, Nlat*Nlon, C]
+        return preds  # [B, T, Nlat*Nlon, C]
 
     def no_grad_shedule(self, global_step, t):
         return (
@@ -171,14 +167,7 @@ class NeuralTransport(pl.LightningModule):
                     return min_lr + (max_lr - min_lr) * current_step / warmup_steps
                 elif current_step <= warmup_steps + halfcosine_steps:
                     return min_lr + (max_lr - min_lr) * (
-                        (
-                            math.cos(
-                                ((current_step - warmup_steps) / (halfcosine_steps))
-                                * math.pi
-                            )
-                            + 1
-                        )
-                        / 2
+                        (math.cos(((current_step - warmup_steps) / (halfcosine_steps)) * math.pi) + 1) / 2
                     )
                 else:
                     return min_lr

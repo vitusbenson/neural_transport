@@ -23,16 +23,15 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
-
-from flow_matching.path.scheduler import CondOTScheduler
 from flow_matching.path import AffineProbPath
+from flow_matching.path.scheduler import CondOTScheduler
 from flow_matching.solver import ODESolver
+from torch.utils.data import DataLoader, TensorDataset
 
 from neural_transport.models.flowmatching import MaskedVelocityWrapper
 
-
 # ── Data generation ──────────────────────────────────────────────────────
+
 
 def generate_toy_data(n_samples=10000, nlat=16, nlon=32, nlev=4, seed=42):
     """Generate 3D fields as mixtures of spatially-correlated Gaussians.
@@ -58,8 +57,7 @@ def generate_toy_data(n_samples=10000, nlat=16, nlon=32, nlev=4, seed=42):
             amplitude = rng.uniform(380, 420)
 
             bump = amplitude * np.exp(
-                -0.5 * ((lat_mesh - center_lat) / sigma_lat) ** 2
-                - 0.5 * ((lon_mesh - center_lon) / sigma_lon) ** 2
+                -0.5 * ((lat_mesh - center_lat) / sigma_lat) ** 2 - 0.5 * ((lon_mesh - center_lon) / sigma_lon) ** 2
             )  # [nlat, nlon]
 
             # Per-level modulation (surface has more variability)
@@ -76,6 +74,7 @@ def generate_toy_data(n_samples=10000, nlat=16, nlon=32, nlev=4, seed=42):
 
 
 # ── Column forward model ────────────────────────────────────────────────
+
 
 def get_column_weights(nlev=4):
     """Fixed column weights mimicking pressure-weighted AK.
@@ -127,6 +126,7 @@ def create_column_obs(fields, weights, obs_fraction=0.3, seed=None):
 
 # ── Tiny flow matching model ────────────────────────────────────────────
 
+
 class TinyConvNet(nn.Module):
     """Small ConvNet for flow matching velocity prediction (~50k params)."""
 
@@ -167,6 +167,7 @@ class ToyVelocityWrapper(nn.Module):
 
 # ── Training ────────────────────────────────────────────────────────────
 
+
 def train_flow_matching(data, nlev=4, epochs=50, lr=1e-3, batch_size=128, device="cpu"):
     """Train unconditional flow matching model on toy data."""
     model = TinyConvNet(nlev=nlev).to(device)
@@ -206,14 +207,15 @@ def train_flow_matching(data, nlev=4, epochs=50, lr=1e-3, batch_size=128, device
 
         if (epoch + 1) % 10 == 0:
             avg = epoch_loss / len(dataset)
-            print(f"  Epoch {epoch+1}/{epochs}: loss={avg:.6f}")
+            print(f"  Epoch {epoch + 1}/{epochs}: loss={avg:.6f}")
 
-    print(f"  Training took {time.time()-t0:.1f}s")
+    print(f"  Training took {time.time() - t0:.1f}s")
     model.eval()
     return model, data_mean.item(), data_std.item()
 
 
 # ── Conditioning test ───────────────────────────────────────────────────
+
 
 def sample_unconditional(velocity_wrapper, n_samples, nlev, nlat, nlon, device, steps=20):
     """Generate unconditional samples."""
@@ -221,14 +223,13 @@ def sample_unconditional(velocity_wrapper, n_samples, nlev, nlat, nlon, device, 
     time_grid = torch.linspace(0, 1, steps, device=device)
 
     solver = ODESolver(velocity_model=velocity_wrapper)
-    traj = solver.sample(time_grid=time_grid, x_init=x_init,
-                         method="midpoint", step_size=None,
-                         return_intermediates=False)
+    traj = solver.sample(
+        time_grid=time_grid, x_init=x_init, method="midpoint", step_size=None, return_intermediates=False
+    )
     return traj
 
 
-def sample_conditioned(model_wrapper, masking_config, generate_kwargs,
-                       n_samples, nlev, nlat, nlon, device, steps=20):
+def sample_conditioned(model_wrapper, masking_config, generate_kwargs, n_samples, nlev, nlat, nlon, device, steps=20):
     """Generate conditioned samples using MaskedVelocityWrapper."""
     x_init = torch.randn(n_samples, nlev, nlat, nlon, device=device)
     time_grid = torch.linspace(0, 1, steps, device=device)
@@ -242,9 +243,9 @@ def sample_conditioned(model_wrapper, masking_config, generate_kwargs,
     )
 
     solver = ODESolver(velocity_model=masked_wrapper)
-    traj = solver.sample(time_grid=time_grid, x_init=x_init,
-                         method="midpoint", step_size=None,
-                         return_intermediates=False)
+    traj = solver.sample(
+        time_grid=time_grid, x_init=x_init, method="midpoint", step_size=None, return_intermediates=False
+    )
     return traj
 
 
@@ -282,6 +283,7 @@ def build_masking_config(obs_mask, obs_values, data_mean, data_std, column_weigh
 
 
 # ── Evaluation ──────────────────────────────────────────────────────────
+
 
 def evaluate(samples, gt, obs_mask, column_weights, data_mean, data_std):
     """Compute metrics for conditioned samples.
@@ -330,8 +332,8 @@ def evaluate(samples, gt, obs_mask, column_weights, data_mean, data_std):
 
 # ── Plotting ────────────────────────────────────────────────────────────
 
-def plot_results(all_results, gt_field, obs_mask, column_weights, data_mean, data_std,
-                 out_dir):
+
+def plot_results(all_results, gt_field, obs_mask, column_weights, data_mean, data_std, out_dir):
     """Plot comparison: GT vs each conditioning method."""
     gt_phys = gt_field * data_std + data_mean
     w = column_weights.view(1, -1, 1, 1)
@@ -362,7 +364,7 @@ def plot_results(all_results, gt_field, obs_mask, column_weights, data_mean, dat
         pred_xco2 = (w[0] * ens_mean).sum(dim=0).cpu().numpy()  # [nlat, nlon]
 
         axes[row, 0].imshow(pred_xco2, origin="lower", cmap="cividis", vmin=vmin, vmax=vmax, aspect="auto")
-        axes[row, 0].set_title(f"Pred XCO2")
+        axes[row, 0].set_title("Pred XCO2")
 
         xco2_diff = np.abs(pred_xco2 - gt_xco2)
         dmax = max(np.nanpercentile(xco2_diff, 98), 1e-6)
@@ -375,12 +377,12 @@ def plot_results(all_results, gt_field, obs_mask, column_weights, data_mean, dat
 
         metrics = result["metrics"]
         metrics_str = "\n".join(f"{k}: {v:.4f}" for k, v in metrics.items())
-        axes[row, 3].text(0.1, 0.5, metrics_str, transform=axes[row, 3].transAxes,
-                          fontsize=8, va="center", family="monospace")
+        axes[row, 3].text(
+            0.1, 0.5, metrics_str, transform=axes[row, 3].transAxes, fontsize=8, va="center", family="monospace"
+        )
         axes[row, 3].axis("off")
 
-        axes[row, 0].set_ylabel(method_name.replace("_", "\n"), fontsize=9,
-                                rotation=0, labelpad=60, va="center")
+        axes[row, 0].set_ylabel(method_name.replace("_", "\n"), fontsize=9, rotation=0, labelpad=60, va="center")
 
     for ax in axes.flatten():
         ax.set_xticks([])
@@ -455,7 +457,9 @@ def main():
     nlat, nlon, nlev = 16, 32, 4
 
     if args.out_dir is None:
-        out_dir = Path(__file__).resolve().parent / "toy_column_osse_output"
+        # Store output outside the package, in the repo-level experiments directory
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        out_dir = repo_root / "experiments" / "toy_column_osse_output"
     else:
         out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -467,18 +471,16 @@ def main():
 
     # 2. Train flow matching model
     print("Training flow matching model...")
-    conv_model, data_mean, data_std = train_flow_matching(
-        data, nlev=nlev, epochs=args.epochs, lr=1e-3, device=device)
+    conv_model, data_mean, data_std = train_flow_matching(data, nlev=nlev, epochs=args.epochs, lr=1e-3, device=device)
 
     velocity_wrapper = ToyVelocityWrapper(conv_model, nlev=nlev).to(device)
 
     # 3. Pick a ground truth sample and create column obs
     gt_idx = 0
-    gt_norm = ((data[gt_idx:gt_idx+1] - data_mean) / data_std).to(device)
-    gt_phys = data[gt_idx:gt_idx+1].to(device)
+    gt_norm = ((data[gt_idx : gt_idx + 1] - data_mean) / data_std).to(device)
+    gt_phys = data[gt_idx : gt_idx + 1].to(device)
 
-    obs_mask, obs_values = create_column_obs(
-        gt_phys, column_weights, obs_fraction=args.obs_fraction, seed=123)
+    obs_mask, obs_values = create_column_obs(gt_phys, column_weights, obs_fraction=args.obs_fraction, seed=123)
     obs_mask = obs_mask.to(device)
     obs_values = obs_values.to(device)
 
@@ -497,14 +499,12 @@ def main():
         torch.manual_seed(42)
 
         if is_unconditional:
-            samples = sample_unconditional(
-                velocity_wrapper, args.n_samples, nlev, nlat, nlon, device)
+            samples = sample_unconditional(velocity_wrapper, args.n_samples, nlev, nlat, nlon, device)
         else:
-            masking_config = build_masking_config(
-                obs_mask, obs_values, data_mean, data_std, column_weights, device)
+            masking_config = build_masking_config(obs_mask, obs_values, data_mean, data_std, column_weights, device)
             samples = sample_conditioned(
-                velocity_wrapper, masking_config, config,
-                args.n_samples, nlev, nlat, nlon, device)
+                velocity_wrapper, masking_config, config, args.n_samples, nlev, nlat, nlon, device
+            )
 
         metrics = evaluate(samples, gt_norm, obs_mask, column_weights, data_mean, data_std)
         all_results[method_name] = {"samples": samples.cpu(), "metrics": metrics}
@@ -515,22 +515,25 @@ def main():
     with open(out_dir / "metrics_summary.json", "w") as f:
         json.dump(metrics_summary, f, indent=2)
 
-    plot_results(all_results, gt_norm.cpu(), obs_mask.cpu(), column_weights,
-                 data_mean, data_std, out_dir)
+    plot_results(all_results, gt_norm.cpu(), obs_mask.cpu(), column_weights, data_mean, data_std, out_dir)
 
     # 6. Print summary table
-    print(f"\n{'='*100}")
+    print(f"\n{'=' * 100}")
     header = f"{'Method':<22} {'RMSE_3d':>10} {'RMSE_3d_o':>10} {'RMSE_3d_a':>10} {'RMSE_xco2':>10} {'RMSE_xo':>10} {'RMSE_xa':>10}"
     print(header)
-    print(f"{'-'*100}")
+    print(f"{'-' * 100}")
     for name, res in all_results.items():
         m = res["metrics"]
+
         def _f(v):
             return f"{v:.4f}" if not np.isnan(v) else "N/A"
-        print(f"{name:<22} {_f(m['rmse_3d_full']):>10} {_f(m['rmse_3d_obs']):>10} "
-              f"{_f(m['rmse_3d_away']):>10} {_f(m['rmse_xco2_full']):>10} "
-              f"{_f(m['rmse_xco2_obs']):>10} {_f(m['rmse_xco2_away']):>10}")
-    print(f"{'='*100}")
+
+        print(
+            f"{name:<22} {_f(m['rmse_3d_full']):>10} {_f(m['rmse_3d_obs']):>10} "
+            f"{_f(m['rmse_3d_away']):>10} {_f(m['rmse_xco2_full']):>10} "
+            f"{_f(m['rmse_xco2_obs']):>10} {_f(m['rmse_xco2_away']):>10}"
+        )
+    print(f"{'=' * 100}")
 
 
 if __name__ == "__main__":

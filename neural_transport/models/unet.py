@@ -5,7 +5,6 @@ from neural_transport.models.regulargrid import RegularGridModel
 
 
 def get_norm(norm, n_in, n_groups=8):
-
     if norm == "batch":
         return nn.BatchNorm2d(n_in)
     elif norm == "group":
@@ -17,25 +16,21 @@ def get_norm(norm, n_in, n_groups=8):
 
 
 class PeriodicPadding(nn.Module):
-
     def __init__(self, n_pad):
         super().__init__()
         self.n_pad = n_pad
 
     def forward(self, x):
-
         x = nn.functional.pad(
             x, (self.n_pad, self.n_pad, 0, 0), mode="circular"
         )  # torch.cat([x[:, :, -self.n_pad:, :], x, x[:, :, :self.n_pad, :]], dim = 2)
 
-        x = nn.functional.pad(
-            x, (0, 0, self.n_pad, self.n_pad), mode="constant", value=0
-        )
+        x = nn.functional.pad(x, (0, 0, self.n_pad, self.n_pad), mode="constant", value=0)
 
         return x
 
-class ResBlock(nn.Module):
 
+class ResBlock(nn.Module):
     def __init__(
         self,
         n_in,
@@ -51,9 +46,7 @@ class ResBlock(nn.Module):
 
         self.pad = PeriodicPadding(n_pad)
 
-        self.conv = nn.Conv2d(
-            n_in, embed_dim, filter_size, stride=1, padding=0, bias=(norm is None)
-        )
+        self.conv = nn.Conv2d(n_in, embed_dim, filter_size, stride=1, padding=0, bias=(norm is None))
 
         self.act = ACTIVATIONS[act]()
 
@@ -61,7 +54,6 @@ class ResBlock(nn.Module):
         self.add_skip = add_skip
 
     def forward(self, x):
-
         skip = x
 
         x = self.pad(x)
@@ -76,7 +68,6 @@ class ResBlock(nn.Module):
 
 
 class UNet(RegularGridModel):
-
     def init_model(
         self,
         in_chans=193,
@@ -92,7 +83,6 @@ class UNet(RegularGridModel):
         mlp_as_readout=False,
         out_clip=None,
     ):
-
         self.in_chans = in_chans
         self.out_chans = out_chans
         self.in_interpolation = in_interpolation
@@ -114,11 +104,7 @@ class UNet(RegularGridModel):
                 enc_stage.append(nn.MaxPool2d(2, 2))
             for j, filter_size in enumerate(filters):
                 n_in = in_chans if (i == 0) and (j == 0) else embed_dim
-                enc_stage.append(
-                    ResBlock(
-                        n_in, embed_dim, act=act, norm=norm, filter_size=filter_size
-                    )
-                )
+                enc_stage.append(ResBlock(n_in, embed_dim, act=act, norm=norm, filter_size=filter_size))
             enc_stages.append(nn.Sequential(*enc_stage))
 
         self.enc_stages = nn.ModuleList(enc_stages)
@@ -153,7 +139,6 @@ class UNet(RegularGridModel):
                 add_skip=True,
             )
         else:
-
             final_linear = nn.Conv2d(embed_dim, out_chans, 1, bias=True)
             nn.init.zeros_(final_linear.weight)
             nn.init.zeros_(final_linear.bias)
@@ -176,7 +161,6 @@ class UNet(RegularGridModel):
             # self.apply(init_weights)
 
     def model(self, x_in):
-
         x = nn.functional.interpolate(
             x_in,
             size=(self.resc_lat, self.resc_lon),
@@ -194,9 +178,7 @@ class UNet(RegularGridModel):
         for stage, skip in zip(self.dec_stages[1:], skips[::-1][1:]):
             x = stage(x + skip)
 
-        x = nn.functional.interpolate(
-            x, size=(self.nlat, self.nlon), mode=self.out_interpolation
-        )
+        x = nn.functional.interpolate(x, size=(self.nlat, self.nlon), mode=self.out_interpolation)
 
         x_out = self.readout(x)
 

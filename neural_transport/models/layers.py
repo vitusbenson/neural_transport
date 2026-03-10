@@ -3,7 +3,6 @@ import torch.nn as nn
 
 
 class Tanh3x(nn.Module):
-
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.tanh = nn.Tanh()
@@ -44,7 +43,6 @@ class MLP(nn.Module):
 
 
 class MultiScaleModule(nn.Module):
-
     def __init__(self):
         super().__init__()
 
@@ -58,9 +56,7 @@ class MultiScaleModule(nn.Module):
         self.window_size_lat = window_size_lat
         self.window_size_lon = window_size_lon
 
-        lats = torch.linspace(
-            -90 + 90 / in_shape[0], 90 - 90 / in_shape[0], in_shape[0]
-        )
+        lats = torch.linspace(-90 + 90 / in_shape[0], 90 - 90 / in_shape[0], in_shape[0])
         lons = torch.linspace(0, 360 - 360 / in_shape[1], in_shape[1])
 
         lat_scaled, lon_scaled = torch.meshgrid(
@@ -77,10 +73,7 @@ class MultiScaleModule(nn.Module):
         area = torch.stack(
             in_shape[1]
             * [
-                torch.abs(
-                    torch.sin(torch.deg2rad(lats + latstep / 2))
-                    - torch.sin(torch.deg2rad(lats - latstep / 2))
-                )
+                torch.abs(torch.sin(torch.deg2rad(lats + latstep / 2)) - torch.sin(torch.deg2rad(lats - latstep / 2)))
                 * lonstep
                 / 180
                 * 100  # arbitrary scaling
@@ -88,9 +81,7 @@ class MultiScaleModule(nn.Module):
             dim=-1,
         )
 
-        feats = torch.stack(
-            [lat_scaled, lon_scaled, cos_lat, sin_lon, cos_lon, area], dim=-1
-        )
+        feats = torch.stack([lat_scaled, lon_scaled, cos_lat, sin_lon, cos_lon, area], dim=-1)
 
         window_feats = feats.reshape(
             -1,
@@ -100,12 +91,8 @@ class MultiScaleModule(nn.Module):
             window_size_lon,
         ).permute(0, 1, 3, 2, 4)
 
-        relative_lats = torch.linspace(
-            -1 + 1 / window_size_lat, 1 - 1 / window_size_lat, window_size_lat
-        )
-        relative_lons = torch.linspace(
-            -1 + 1 / window_size_lon, 1 - 1 / window_size_lon, window_size_lon
-        )
+        relative_lats = torch.linspace(-1 + 1 / window_size_lat, 1 - 1 / window_size_lat, window_size_lat)
+        relative_lons = torch.linspace(-1 + 1 / window_size_lon, 1 - 1 / window_size_lon, window_size_lon)
 
         relative_lats, relative_lons = torch.meshgrid(
             relative_lats,
@@ -142,7 +129,6 @@ class MultiScaleModule(nn.Module):
 
 
 class MultiScaleEncoder(MultiScaleModule):
-
     def __init__(
         self,
         in_shape,
@@ -166,7 +152,6 @@ class MultiScaleEncoder(MultiScaleModule):
         )
 
     def forward(self, x):
-
         B, C, H, W = x.shape
         # Transform into windows
         x_window = x.reshape(
@@ -195,7 +180,6 @@ class MultiScaleEncoder(MultiScaleModule):
 
 
 class MultiScaleDecoder(MultiScaleModule):
-
     def __init__(
         self,
         in_shape,
@@ -219,7 +203,6 @@ class MultiScaleDecoder(MultiScaleModule):
         )
 
     def forward(self, x):
-
         # Repeat into Window Shape
         # Stack Positional features
         # Apply MLP
@@ -228,11 +211,7 @@ class MultiScaleDecoder(MultiScaleModule):
 
         # Repeat into Window Shape
 
-        x_repeated = (
-            x.unsqueeze(-1)
-            .unsqueeze(-1)
-            .expand(B, C, H, W, self.window_size_lat, self.window_size_lon)
-        )
+        x_repeated = x.unsqueeze(-1).unsqueeze(-1).expand(B, C, H, W, self.window_size_lat, self.window_size_lon)
 
         # Stack Positional features
         x_feats = torch.cat(

@@ -1,6 +1,5 @@
 import numpy as np
 
-
 R_EARTH = 6.371e3  # km
 
 M_CO2 = 44.009e-3
@@ -9,41 +8,50 @@ M_C = 12.011e-3
 M_CH4 = 16.043e-3
 M_CO = 28.0101e-3
 
-def massmix_to_density(massmix, airdensity, ppm = False, eps = 1e-12):
+
+def massmix_to_density(massmix, airdensity, ppm=False, eps=1e-12):
     if ppm:
         return massmix * 1e-6 * (airdensity + eps)
     else:
         return massmix * (airdensity + eps)
 
-def density_to_massmix(density, airdensity, ppm = False, eps = 1e-12):
+
+def density_to_massmix(density, airdensity, ppm=False, eps=1e-12):
     if ppm:
         return density / (airdensity + eps) * 1e6
     else:
         return density / (airdensity + eps)
 
-def molemix_to_massmix(molemix, M = M_CO2):
+
+def molemix_to_massmix(molemix, M=M_CO2):
     return molemix * M / M_air
 
-def massmix_to_molemix(massmix, M = M_CO2):
+
+def massmix_to_molemix(massmix, M=M_CO2):
     return massmix * M_air / M
 
-def massmix_to_mass(massmix, airdensity, V, ppm = False, eps = 1e-12):
+
+def massmix_to_mass(massmix, airdensity, V, ppm=False, eps=1e-12):
     if ppm:
         return massmix * 1e-6 * (airdensity * V + eps)
     else:
         return massmix * (airdensity * V + eps)
 
-def mass_to_massmix(mass, airdensity, V, ppm = False, eps = 1e-12):
+
+def mass_to_massmix(mass, airdensity, V, ppm=False, eps=1e-12):
     if ppm:
         return mass / (airdensity * V + eps) * 1e6
     else:
         return mass / (airdensity * V + eps)
 
-def density_to_mass(density, V, eps = 1e-12):
+
+def density_to_mass(density, V, eps=1e-12):
     return density * (V + eps)
 
-def mass_to_density(mass, V, eps = 1e-12):
+
+def mass_to_density(mass, V, eps=1e-12):
     return mass / (V + eps)
+
 
 def zonal_wavenumber_to_wavelength(k, lat=0.0):
     """
@@ -66,6 +74,7 @@ def zonal_wavenumber_to_wavelength(k, lat=0.0):
     k = np.maximum(np.array(k, dtype=float), 1e-6)  # avoid division by zero
     return circumference / k
 
+
 def wavelength_to_zonal_wavenumber(wavelength_km, lat=0.0):
     """
     Convert wavelength (in km) to zonal wavenumber for a given latitude.
@@ -86,6 +95,7 @@ def wavelength_to_zonal_wavenumber(wavelength_km, lat=0.0):
     circumference = 2 * np.pi * R_EARTH * np.cos(lat_rad)
     wavelength_km = np.maximum(np.array(wavelength_km, dtype=float), 1e-6)
     return circumference / wavelength_km
+
 
 def km_per_gridcell(batch):
     lat = batch["lat"].values

@@ -5,19 +5,18 @@ with ensemble diagnostics (rank histogram, calibration, spread maps).
 """
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
 from neural_transport.inference.metrics import (
-    OSSEResult,
     compute_xco2_column,
 )
-from neural_transport.plots.utilities.plot_utils import save_figure, mpl_rc_params
+from neural_transport.plots.utilities.plot_utils import mpl_rc_params, save_figure
 
 
-def plot_conditioning_comparison(results, out_dir, level_idx=0, max_samples=3,
-                                 imgformats=None):
+def plot_conditioning_comparison(results, out_dir, level_idx=0, max_samples=3, imgformats=None):
     """Grid plot: rows=methods, cols=[GT | Observed | Ens.Mean | |Error| | Samples].
 
     Parameters
@@ -36,7 +35,9 @@ def plot_conditioning_comparison(results, out_dir, level_idx=0, max_samples=3,
     n_cols = 4 + max_samples  # GT, Observed, Ens.Mean, |Diff|, Samples
 
     fig, axes = plt.subplots(
-        n_exp, n_cols, figsize=(4 * n_cols, 3.5 * n_exp),
+        n_exp,
+        n_cols,
+        figsize=(4 * n_cols, 3.5 * n_exp),
         gridspec_kw={"wspace": 0.05, "hspace": 0.35},
     )
     if n_exp == 1:
@@ -63,30 +64,33 @@ def plot_conditioning_comparison(results, out_dir, level_idx=0, max_samples=3,
         vmax = np.nanpercentile(gt_slice, 98)
 
         # Col 0: Ground truth
-        axes[row, 0].imshow(gt_slice, origin="lower", cmap="cividis",
-                            vmin=vmin, vmax=vmax, aspect="auto")
+        axes[row, 0].imshow(gt_slice, origin="lower", cmap="cividis", vmin=vmin, vmax=vmax, aspect="auto")
         axes[row, 0].set_title("Ground Truth" if row == 0 else "", fontsize=10)
 
         # Col 1: Observed locations
         if res.mask_2d is not None:
             obs_display = np.where(res.mask_2d, gt_slice, np.nan)
-            axes[row, 1].imshow(obs_display, origin="lower", cmap="cividis",
-                                vmin=vmin, vmax=vmax, aspect="auto")
+            axes[row, 1].imshow(obs_display, origin="lower", cmap="cividis", vmin=vmin, vmax=vmax, aspect="auto")
         else:
-            axes[row, 1].text(0.5, 0.5, "No obs",
-                              transform=axes[row, 1].transAxes,
-                              ha="center", va="center", fontsize=10, color="gray")
+            axes[row, 1].text(
+                0.5,
+                0.5,
+                "No obs",
+                transform=axes[row, 1].transAxes,
+                ha="center",
+                va="center",
+                fontsize=10,
+                color="gray",
+            )
         axes[row, 1].set_title("Observed" if row == 0 else "", fontsize=10)
 
         # Col 2: Ensemble mean
-        axes[row, 2].imshow(ens_slice, origin="lower", cmap="cividis",
-                            vmin=vmin, vmax=vmax, aspect="auto")
+        axes[row, 2].imshow(ens_slice, origin="lower", cmap="cividis", vmin=vmin, vmax=vmax, aspect="auto")
         axes[row, 2].set_title("Ens. Mean" if row == 0 else "", fontsize=10)
 
         # Col 3: |Difference|
         dmax = np.nanpercentile(diff, 98) if diff.size > 0 else 1.0
-        axes[row, 3].imshow(diff, origin="lower", cmap="Reds",
-                            vmin=0, vmax=max(dmax, 1e-8), aspect="auto")
+        axes[row, 3].imshow(diff, origin="lower", cmap="Reds", vmin=0, vmax=max(dmax, 1e-8), aspect="auto")
         axes[row, 3].set_title("|Difference|" if row == 0 else "", fontsize=10)
 
         # Cols 4+: Individual samples
@@ -97,19 +101,15 @@ def plot_conditioning_comparison(results, out_dir, level_idx=0, max_samples=3,
                 sample_slice = res.samples[i].mean(axis=-1)
             else:
                 sample_slice = res.samples[i, :, :, level_idx]
-            ax.imshow(sample_slice, origin="lower", cmap="cividis",
-                      vmin=vmin, vmax=vmax, aspect="auto")
+            ax.imshow(sample_slice, origin="lower", cmap="cividis", vmin=vmin, vmax=vmax, aspect="auto")
             if row == 0:
                 ax.set_title(f"Sample {i}", fontsize=10)
 
         # Row label with metrics
         label = name.replace("_", "\n")
         m = res.metrics
-        metrics_str = (f"RMSE={m.rmse_3d_full:.3f}\n"
-                       f"R2={m.r2:.3f}\n"
-                       f"spread={m.sample_spread:.2f}")
-        axes[row, 0].set_ylabel(f"{label}\n\n{metrics_str}", fontsize=8,
-                                rotation=0, labelpad=100, va="center")
+        metrics_str = f"RMSE={m.rmse_3d_full:.3f}\nR2={m.r2:.3f}\nspread={m.sample_spread:.2f}"
+        axes[row, 0].set_ylabel(f"{label}\n\n{metrics_str}", fontsize=8, rotation=0, labelpad=100, va="center")
 
         for ax in axes[row]:
             ax.set_xticks([])
@@ -139,16 +139,34 @@ def plot_metrics_summary(results, out_dir, imgformats=None):
     names = list(results.keys())
 
     metrics_keys = [
-        "rmse_3d_full", "rmse_3d_obs", "rmse_3d_away",
-        "rmse_xco2_full", "rmse_xco2_obs", "rmse_xco2_away",
-        "r2", "spread_skill", "roughness_lat", "roughness_lon",
-        "sample_spread", "crps_mean", "calibration_error",
+        "rmse_3d_full",
+        "rmse_3d_obs",
+        "rmse_3d_away",
+        "rmse_xco2_full",
+        "rmse_xco2_obs",
+        "rmse_xco2_away",
+        "r2",
+        "spread_skill",
+        "roughness_lat",
+        "roughness_lon",
+        "sample_spread",
+        "crps_mean",
+        "calibration_error",
     ]
     labels = [
-        "RMSE 3D\n(full)", "RMSE 3D\n(obs)", "RMSE 3D\n(away)",
-        "RMSE XCO2\n(full)", "RMSE XCO2\n(obs)", "RMSE XCO2\n(away)",
-        "R\u00b2", "Spread/\nSkill", "Roughness\n(lat)", "Roughness\n(lon)",
-        "Sample\nSpread", "CRPS\n(mean)", "Calibration\nError",
+        "RMSE 3D\n(full)",
+        "RMSE 3D\n(obs)",
+        "RMSE 3D\n(away)",
+        "RMSE XCO2\n(full)",
+        "RMSE XCO2\n(obs)",
+        "RMSE XCO2\n(away)",
+        "R\u00b2",
+        "Spread/\nSkill",
+        "Roughness\n(lat)",
+        "Roughness\n(lon)",
+        "Sample\nSpread",
+        "CRPS\n(mean)",
+        "Calibration\nError",
     ]
 
     n_metrics = len(metrics_keys)
@@ -163,16 +181,15 @@ def plot_metrics_summary(results, out_dir, imgformats=None):
         for n in names:
             v = getattr(results[n].metrics, key, np.nan)
             values.append(v if not (isinstance(v, float) and np.isnan(v)) else 0)
-        bars = axes[i].bar(x, values,
-                           color=plt.cm.tab10(x / max(len(names), 1)))
+        bars = axes[i].bar(x, values, color=plt.cm.tab10(x / max(len(names), 1)))
         axes[i].set_xticks(x)
-        axes[i].set_xticklabels([n.replace("_", "\n") for n in names],
-                                fontsize=6, rotation=45, ha="right")
+        axes[i].set_xticklabels([n.replace("_", "\n") for n in names], fontsize=6, rotation=45, ha="right")
         axes[i].set_title(label, fontsize=11)
         axes[i].grid(axis="y", alpha=0.3)
         for bar, val in zip(bars, values):
-            axes[i].text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
-                         f"{val:.3f}", ha="center", va="bottom", fontsize=6)
+            axes[i].text(
+                bar.get_x() + bar.get_width() / 2, bar.get_height(), f"{val:.3f}", ha="center", va="bottom", fontsize=6
+            )
 
     for i in range(n_metrics, len(axes)):
         axes[i].axis("off")
@@ -196,8 +213,7 @@ def plot_ensemble_diagnostics(results, out_dir, imgformats=None):
     plt.rcParams.update(mpl_rc_params)
     n_exp = len(results)
 
-    fig, axes = plt.subplots(n_exp, 3, figsize=(15, 4 * n_exp),
-                             gridspec_kw={"hspace": 0.4, "wspace": 0.3})
+    fig, axes = plt.subplots(n_exp, 3, figsize=(15, 4 * n_exp), gridspec_kw={"hspace": 0.4, "wspace": 0.3})
     if n_exp == 1:
         axes = axes[np.newaxis, :]
 
@@ -206,16 +222,13 @@ def plot_ensemble_diagnostics(results, out_dir, imgformats=None):
         ax = axes[row, 0]
         if res.rank_hist is not None:
             n_bins = len(res.rank_hist)
-            ax.bar(np.arange(n_bins), res.rank_hist, color="steelblue",
-                   edgecolor="white", linewidth=0.5)
-            ax.axhline(1.0 / n_bins, color="red", linestyle="--",
-                       linewidth=1, label="Uniform")
+            ax.bar(np.arange(n_bins), res.rank_hist, color="steelblue", edgecolor="white", linewidth=0.5)
+            ax.axhline(1.0 / n_bins, color="red", linestyle="--", linewidth=1, label="Uniform")
             ax.set_xlabel("Rank")
             ax.set_ylabel("Frequency")
             ax.legend(fontsize=7)
         else:
-            ax.text(0.5, 0.5, "N/A", transform=ax.transAxes,
-                    ha="center", va="center", color="gray")
+            ax.text(0.5, 0.5, "N/A", transform=ax.transAxes, ha="center", va="center", color="gray")
         ax.set_title(f"{name}: Rank Histogram", fontsize=9)
 
         # Col 1: Calibration diagram
@@ -233,11 +246,9 @@ def plot_ensemble_diagnostics(results, out_dir, imgformats=None):
             ax.set_aspect("equal")
             ax.legend(fontsize=7)
             cal_err = res.calibration_data.get("calibration_error", np.nan)
-            ax.text(0.05, 0.9, f"CE={cal_err:.3f}",
-                    transform=ax.transAxes, fontsize=8)
+            ax.text(0.05, 0.9, f"CE={cal_err:.3f}", transform=ax.transAxes, fontsize=8)
         else:
-            ax.text(0.5, 0.5, "N/A", transform=ax.transAxes,
-                    ha="center", va="center", color="gray")
+            ax.text(0.5, 0.5, "N/A", transform=ax.transAxes, ha="center", va="center", color="gray")
         ax.set_title(f"{name}: Calibration", fontsize=9)
 
         # Col 2: Spread map (ensemble std, column-mean)
@@ -268,60 +279,51 @@ def plot_xco2_maps(results, out_dir, imgformats=None):
         imgformats = ["png", "pdf"]
 
     # Filter to methods with pressure_weights and ak
-    valid = {k: v for k, v in results.items()
-             if v.pressure_weights is not None and v.ak is not None}
+    valid = {k: v for k, v in results.items() if v.pressure_weights is not None and v.ak is not None}
     if not valid:
         return
 
     plt.rcParams.update(mpl_rc_params)
     n_exp = len(valid)
 
-    fig, axes = plt.subplots(n_exp, 4, figsize=(20, 4 * n_exp),
-                             gridspec_kw={"wspace": 0.1, "hspace": 0.35})
+    fig, axes = plt.subplots(n_exp, 4, figsize=(20, 4 * n_exp), gridspec_kw={"wspace": 0.1, "hspace": 0.35})
     if n_exp == 1:
         axes = axes[np.newaxis, :]
 
     first_res = next(iter(valid.values()))
-    xco2_gt = compute_xco2_column(first_res.gt, first_res.pressure_weights,
-                                  first_res.ak)
+    xco2_gt = compute_xco2_column(first_res.gt, first_res.pressure_weights, first_res.ak)
     vmin = np.nanpercentile(xco2_gt, 2)
     vmax = np.nanpercentile(xco2_gt, 98)
 
     for row, (name, res) in enumerate(valid.items()):
-        xco2_pred = compute_xco2_column(res.ensemble_mean,
-                                        res.pressure_weights, res.ak)
+        xco2_pred = compute_xco2_column(res.ensemble_mean, res.pressure_weights, res.ak)
         xco2_err = np.abs(xco2_pred - xco2_gt)
 
         # Col 0: GT XCO2
-        axes[row, 0].imshow(xco2_gt, origin="lower", cmap="cividis",
-                            vmin=vmin, vmax=vmax, aspect="auto")
+        axes[row, 0].imshow(xco2_gt, origin="lower", cmap="cividis", vmin=vmin, vmax=vmax, aspect="auto")
         axes[row, 0].set_title("GT XCO2" if row == 0 else "", fontsize=10)
 
         # Col 1: Predicted XCO2
-        axes[row, 1].imshow(xco2_pred, origin="lower", cmap="cividis",
-                            vmin=vmin, vmax=vmax, aspect="auto")
+        axes[row, 1].imshow(xco2_pred, origin="lower", cmap="cividis", vmin=vmin, vmax=vmax, aspect="auto")
         axes[row, 1].set_title("Pred XCO2" if row == 0 else "", fontsize=10)
 
         # Col 2: |Error|
         emax = np.nanpercentile(xco2_err, 98) if xco2_err.size > 0 else 1.0
-        axes[row, 2].imshow(xco2_err, origin="lower", cmap="Reds",
-                            vmin=0, vmax=max(emax, 1e-8), aspect="auto")
+        axes[row, 2].imshow(xco2_err, origin="lower", cmap="Reds", vmin=0, vmax=max(emax, 1e-8), aspect="auto")
         axes[row, 2].set_title("|XCO2 Error|" if row == 0 else "", fontsize=10)
 
         # Col 3: Obs overlay
         if res.mask_2d is not None:
             obs_display = np.where(res.mask_2d, xco2_gt, np.nan)
-            axes[row, 3].imshow(obs_display, origin="lower", cmap="cividis",
-                                vmin=vmin, vmax=vmax, aspect="auto")
+            axes[row, 3].imshow(obs_display, origin="lower", cmap="cividis", vmin=vmin, vmax=vmax, aspect="auto")
         else:
-            axes[row, 3].text(0.5, 0.5, "No obs",
-                              transform=axes[row, 3].transAxes,
-                              ha="center", va="center", color="gray")
+            axes[row, 3].text(
+                0.5, 0.5, "No obs", transform=axes[row, 3].transAxes, ha="center", va="center", color="gray"
+            )
         axes[row, 3].set_title("Obs Overlay" if row == 0 else "", fontsize=10)
 
         # Row label
-        axes[row, 0].set_ylabel(name.replace("_", "\n"), fontsize=9,
-                                rotation=0, labelpad=60, va="center")
+        axes[row, 0].set_ylabel(name.replace("_", "\n"), fontsize=9, rotation=0, labelpad=60, va="center")
         for ax in axes[row]:
             ax.set_xticks([])
             ax.set_yticks([])
@@ -346,8 +348,7 @@ def plot_zonal_mean(results, out_dir, imgformats=None):
     plt.rcParams.update(mpl_rc_params)
     n_exp = len(results)
 
-    fig, axes = plt.subplots(1, n_exp + 1, figsize=(4 * (n_exp + 1), 5),
-                             sharey=True)
+    fig, axes = plt.subplots(1, n_exp + 1, figsize=(4 * (n_exp + 1), 5), sharey=True)
     if n_exp == 0:
         plt.close(fig)
         return
@@ -357,16 +358,14 @@ def plot_zonal_mean(results, out_dir, imgformats=None):
     vmin = np.nanpercentile(gt_zonal, 2)
     vmax = np.nanpercentile(gt_zonal, 98)
 
-    axes[0].imshow(gt_zonal, origin="lower", cmap="cividis",
-                   vmin=vmin, vmax=vmax, aspect="auto")
+    axes[0].imshow(gt_zonal, origin="lower", cmap="cividis", vmin=vmin, vmax=vmax, aspect="auto")
     axes[0].set_title("Ground Truth", fontsize=10)
     axes[0].set_ylabel("Latitude index")
     axes[0].set_xlabel("Level")
 
     for i, (name, res) in enumerate(results.items()):
         pred_zonal = res.ensemble_mean.mean(axis=1)  # [nlat, nlev]
-        axes[i + 1].imshow(pred_zonal, origin="lower", cmap="cividis",
-                           vmin=vmin, vmax=vmax, aspect="auto")
+        axes[i + 1].imshow(pred_zonal, origin="lower", cmap="cividis", vmin=vmin, vmax=vmax, aspect="auto")
         axes[i + 1].set_title(name, fontsize=9)
         axes[i + 1].set_xlabel("Level")
 

@@ -13,15 +13,13 @@ import numpy as np
 
 from neural_transport.inference.generative import iterative_generate
 from neural_transport.inference.metrics import (
-    MetricsResult,
     OSSEResult,
     compute_all_metrics,
-    _to_numpy,
 )
 from neural_transport.plots.conditioning_diagnostics import (
     plot_conditioning_comparison,
-    plot_metrics_summary,
     plot_ensemble_diagnostics,
+    plot_metrics_summary,
     plot_xco2_maps,
     plot_zonal_mean,
 )
@@ -83,10 +81,21 @@ def _extract_samples(ds_pred, nlat, nlon):
     return pred_np
 
 
-def run_single_osse(model, dataset, generate_kwargs, device="cuda",
-                    nlat=32, nlon=64, gt_field=None,
-                    pressure_weights=None, ak=None, lat=None,
-                    name="unnamed", outpath=None, seed=42):
+def run_single_osse(
+    model,
+    dataset,
+    generate_kwargs,
+    device="cuda",
+    nlat=32,
+    nlon=64,
+    gt_field=None,
+    pressure_weights=None,
+    ak=None,
+    lat=None,
+    name="unnamed",
+    outpath=None,
+    seed=42,
+):
     """Run a single OSSE experiment.
 
     1. Deep-copy model
@@ -115,6 +124,7 @@ def run_single_osse(model, dataset, generate_kwargs, device="cuda",
     OSSEResult
     """
     import pytorch_lightning as pl
+
     pl.seed_everything(seed)
 
     if outpath is None:
@@ -126,8 +136,9 @@ def run_single_osse(model, dataset, generate_kwargs, device="cuda",
 
     print(f"\n{'=' * 60}")
     print(f"  Running OSSE: {name}")
-    config_display = {k: v for k, v in generate_kwargs.items()
-                      if k not in ("generate_data_kwargs", "data_path_generate")}
+    config_display = {
+        k: v for k, v in generate_kwargs.items() if k not in ("generate_data_kwargs", "data_path_generate")
+    }
     print(f"  Config: {json.dumps(config_display, default=str, indent=4)}")
     print(f"{'=' * 60}")
 
@@ -156,7 +167,8 @@ def run_single_osse(model, dataset, generate_kwargs, device="cuda",
 
     # Compute all metrics
     metrics, extra_data = compute_all_metrics(
-        samples, gt_field,
+        samples,
+        gt_field,
         mask_2d=mask_2d,
         pressure_weights=pressure_weights,
         ak=ak,
@@ -183,11 +195,22 @@ def run_single_osse(model, dataset, generate_kwargs, device="cuda",
     return result
 
 
-def run_osse_comparison(model, dataset, experiments, base_generate_kwargs,
-                        device="cuda", out_dir="osse_results",
-                        nlat=32, nlon=64, lat=None, lon=None,
-                        pressure_weights=None, ak=None,
-                        gt_field=None, seed=42):
+def run_osse_comparison(
+    model,
+    dataset,
+    experiments,
+    base_generate_kwargs,
+    device="cuda",
+    out_dir="osse_results",
+    nlat=32,
+    nlon=64,
+    lat=None,
+    lon=None,
+    pressure_weights=None,
+    ak=None,
+    gt_field=None,
+    seed=42,
+):
     """Run multiple OSSE experiments, save results, and produce all plots.
 
     Parameters
@@ -243,6 +266,7 @@ def run_osse_comparison(model, dataset, experiments, base_generate_kwargs,
             results[exp_name] = result
         except Exception as e:
             import traceback
+
             print(f"  !! FAILED: {exp_name}: {e}")
             traceback.print_exc()
             continue
@@ -312,6 +336,7 @@ def save_osse_results(results, out_dir):
 
 def _print_comparison_table(results):
     """Print a formatted comparison table of metrics."""
+
     def _fmt(v):
         if isinstance(v, float) and np.isnan(v):
             return "N/A"

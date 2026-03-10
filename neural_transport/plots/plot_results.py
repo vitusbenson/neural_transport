@@ -6,23 +6,21 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+import torch
 import xarray as xr
 import xrft
 import xskillscore
+from sklearn.decomposition import PCA
 from xmovie import Movie
 from xmovie.core import convert_gif
 
 from neural_transport.inference.analyse import freq_mean
 from neural_transport.tools.conversion import (
     density_to_massmix,
+    km_per_gridcell,
     massmix_to_molemix,
     zonal_wavenumber_to_wavelength,
-    km_per_gridcell,
 )
-
-from sklearn.decomposition import PCA
-
-import torch
 
 mpl_rc_params = {
     "xtick.labelsize": 8,
@@ -35,10 +33,7 @@ mpl_rc_params = {
 }
 
 
-def plot_value_over_leadtime(
-    da, ylabel="", ylim=[0, 1], thresh_value=None, figsize=(8, 5), freq="QS", **kwargs
-):
-
+def plot_value_over_leadtime(da, ylabel="", ylim=[0, 1], thresh_value=None, figsize=(8, 5), freq="QS", **kwargs):
     daf = (
         freq_mean(da, freq=freq).rename(time="days")
         # if freq else da.assign_coords().rename(time="days")
@@ -51,15 +46,8 @@ def plot_value_over_leadtime(
         if thresh_value is not None:
             plt.axhline(y=thresh_value, ls="--", color="black", zorder=0)
 
-            invalid_days = (
-                daf.min("level")
-                .compute()
-                .where(lambda x: x < thresh_value, drop=True)
-                .days.values
-            )
-            min_days = (
-                daf.days.values[-1] if len(invalid_days) == 0 else invalid_days[0]
-            )
+            invalid_days = daf.min("level").compute().where(lambda x: x < thresh_value, drop=True).days.values
+            min_days = daf.days.values[-1] if len(invalid_days) == 0 else invalid_days[0]
             plt.axvline(x=min_days, color="black", zorder=0, lw=0.5)
         else:
             min_days = 0
@@ -116,9 +104,7 @@ def rel_std(pred, targ, weights, dims=["lat", "lon"]):
     return (pred * weights).std(dims) / (targ * weights).std(dims)
 
 
-METRICS = dict(
-    rmse=rmse, mae=mae, bias=bias, r2=r2, nse=nse, rel_mean=rel_mean, rel_std=rel_std
-)
+METRICS = dict(rmse=rmse, mae=mae, bias=bias, r2=r2, nse=nse, rel_mean=rel_mean, rel_std=rel_std)
 METRIC_LABELS = dict(
     rmse="RMSE",
     mae="MAE",
@@ -159,13 +145,13 @@ def compute_metric_over_samples(metric_func, pred, targ, weights, dims=None):
     """
     if dims is None:
         dims = [d for d in ["lat", "lon", "time"] if d in pred.dims]
-    
+
     targ_aligned = targ
     if "time" not in pred.dims and "time" in targ.dims:
         targ_aligned = targ.isel(time=0, drop=True)
         weights = weights.isel(time=0, drop=True) if "time" in weights.dims else weights
         dims = [d for d in dims if d != "time"]
-    
+
     metrics = []
     for s in range(pred.sizes["sample"]):
         metrics.append(
@@ -186,7 +172,7 @@ def plot_metric_over_leadtime(pred, targ, metric, figsize=(8, 5), freq="QS"):
     _, weights = xr.broadcast(targ, weights)
 
     metric_func = METRICS[metric]
-    
+
     metric_pred = metric_func(pred.compute(), targ.compute(), weights)
 
     ylim = get_metric_limits(metric, metric_pred)
@@ -217,9 +203,7 @@ def plot_value_over_space(da, clabel="", figsize=(8, 4), **kwargs):
             **kwargs,
         )
         ax.set_global()
-        gl = ax.gridlines(
-            draw_labels=True, linewidth=0.5, color="dimgray", alpha=0.4, zorder=2
-        )
+        gl = ax.gridlines(draw_labels=True, linewidth=0.5, color="dimgray", alpha=0.4, zorder=2)
         gl.xlabel_style = {"size": 8, "color": "dimgray"}
         gl.ylabel_style = {"size": 8, "color": "dimgray"}
         gl.bottom_labels = False
@@ -251,7 +235,7 @@ def plot_metric_over_space(pred, targ, metric, figsize=(8, 4)):
     reduce_dims = []
     if "time" in pred.dims:
         reduce_dims.append("time")
-    
+
     if "sample" in pred.dims:
         metric_pred = compute_metric_over_samples(metric_func, pred, targ, weights, dims=reduce_dims)
     else:
@@ -346,9 +330,9 @@ def plot_zonal_spectrum_line(pred, targ, figsize=(8, 5), **kwargs):
         fig = plt.figure(figsize=figsize)
         ax = plt.subplot()
 
-        xr.concat(
-            [Specpred_mean, Spectarg_mean], dim=["Prediction", "Target"]
-        ).rename({"concat_dim": "Variable"}).plot(yscale="log", hue="Variable", ax=ax)
+        xr.concat([Specpred_mean, Spectarg_mean], dim=["Prediction", "Target"]).rename({"concat_dim": "Variable"}).plot(
+            yscale="log", hue="Variable", ax=ax
+        )
         ax.set_title("Zonal Power Spectrum")
         ax.set_xlabel("Frequency")
         ax.set_ylabel("Power")
@@ -409,9 +393,9 @@ def plot_zonal_spectrum_line_physical(pred, targ, figsize=(8, 5), **kwargs):
         fig, ax = plt.subplots(figsize=figsize)
 
         # Plot
-        xr.concat([Specpred_mean, Spectarg_mean], dim=["Prediction", "Target"]) \
-          .rename({"concat_dim": "Variable"}) \
-          .plot(x="k_circ", yscale="log", hue="Variable", ax=ax)
+        xr.concat([Specpred_mean, Spectarg_mean], dim=["Prediction", "Target"]).rename({"concat_dim": "Variable"}).plot(
+            x="k_circ", yscale="log", hue="Variable", ax=ax
+        )
 
         ax.set_title("Zonal Power Spectrum")
         ax.set_xlabel("Zonal Wavenumber [cycles per Earth circumference]")
@@ -425,11 +409,11 @@ def plot_zonal_spectrum_line_physical(pred, targ, figsize=(8, 5), **kwargs):
         bottom_ticks = ax.get_xticks()
         freq_nonzero = bottom_ticks[bottom_ticks > 0]
         wavelength_nonzero = zonal_wavenumber_to_wavelength(freq_nonzero, lat_mean)
-       
+
         # Set nicely spaced ticks
         secax.set_xticks(freq_nonzero)
         # secax.set_xticklabels([f"{km:.2e}" for km in wavelength_nonzero]) # scientific notation
-        secax.set_xticklabels([f"{km:.0f}" for km in wavelength_nonzero]) # non-scientific notation
+        secax.set_xticklabels([f"{km:.0f}" for km in wavelength_nonzero])  # non-scientific notation
 
         plt.tight_layout()
 
@@ -446,13 +430,13 @@ def plot_zonal_spectrum_heatmap(pred, targ, figsize=(8, 5), freq="QS", **kwargs)
         average_time = True
     else:
         rename_dict["time"] = "Lead time [days]"
-    
+
     Specpredf = freq_mean(Specpred, freq=freq)
     Spectargf = freq_mean(Spectarg, freq=freq, average_time=average_time)
 
     result = xr.concat([Specpredf, Spectargf], dim=["Prediction", "Target"])
     result = result.rename(rename_dict)
-    
+
     with mpl.rc_context(mpl_rc_params):
         if "time" in Specpredf.dims:
             result.plot(
@@ -485,9 +469,7 @@ def get_pred_targ_from_varname(preds, targs, varname):
                     )
                 )
             else:
-                targs[varname] = massmix_to_molemix(
-                    targs[varname.replace("molemix", "massmix")]
-                )
+                targs[varname] = massmix_to_molemix(targs[varname.replace("molemix", "massmix")])
             targs[varname].attrs = dict(units="ppm", long_name=varname)
         if varname not in preds:
             if varname.replace("molemix", "massmix") not in preds:
@@ -499,21 +481,17 @@ def get_pred_targ_from_varname(preds, targs, varname):
                     )
                 )
             else:
-                preds[varname] = massmix_to_molemix(
-                    preds[varname.replace("molemix", "massmix")]
-                )
+                preds[varname] = massmix_to_molemix(preds[varname.replace("molemix", "massmix")])
 
     elif varname.endswith("massmix") and varname not in targs:
-        targs[varname] = density_to_massmix(
-            targs[varname.replace("massmix", "density")]
-        )
+        targs[varname] = density_to_massmix(targs[varname.replace("massmix", "density")])
 
     pred = preds[varname].compute()
     targ = targs[varname].compute()
 
     if "sample" not in pred.dims:
         pred["time"] = targ["time"]
-    
+
     pred["level"] = targ["level"]
     return pred, targ
 
@@ -527,7 +505,7 @@ def plot_metrics(
     over_latheight=True,
     zonal_spectrum=True,
     varnames=["co2molemix"],
-    metrics=["rmse", "mae", "bias", "rel_mean", "rel_std"], # "r2", "nse",
+    metrics=["rmse", "mae", "bias", "rel_mean", "rel_std"],  # "r2", "nse",
     imgformats=["svg", "png", "pdf"],
 ):
     out_dir = Path(out_dir)
@@ -549,9 +527,7 @@ def plot_metrics(
                 plt_fct(pred, targ, metric)
 
                 for imgformat in imgformats:
-                    plt.savefig(
-                        out_dir / f"{varname}_{metric}_{plottype}.{imgformat}", dpi=300
-                    )
+                    plt.savefig(out_dir / f"{varname}_{metric}_{plottype}.{imgformat}", dpi=300)
 
                 plt.close()
 
@@ -559,25 +535,19 @@ def plot_metrics(
             plot_zonal_spectrum_line(pred, targ)
 
             for imgformat in imgformats:
-                plt.savefig(
-                    out_dir / f"{varname}_zonal_spectrum_line.{imgformat}", dpi=300
-                )
+                plt.savefig(out_dir / f"{varname}_zonal_spectrum_line.{imgformat}", dpi=300)
             plt.close()
 
             plot_zonal_spectrum_line_physical(pred, targ)
 
             for imgformat in imgformats:
-                plt.savefig(
-                    out_dir / f"{varname}_zonal_spectrum_line_physical.{imgformat}", dpi=300
-                )
+                plt.savefig(out_dir / f"{varname}_zonal_spectrum_line_physical.{imgformat}", dpi=300)
             plt.close()
 
             plot_zonal_spectrum_heatmap(pred, targ)
 
             for imgformat in imgformats:
-                plt.savefig(
-                    out_dir / f"{varname}_zonal_spectrum_heatmap.{imgformat}", dpi=300
-                )
+                plt.savefig(out_dir / f"{varname}_zonal_spectrum_heatmap.{imgformat}", dpi=300)
             plt.close()
 
     return
@@ -762,9 +732,7 @@ def animate_predictions(
 
         vmin = targ.isel(level=levels).quantile(0.02).compute().item()
         vmax = targ.isel(level=levels).quantile(0.98).compute().item()
-        max_delta = (
-            np.abs(targ - pred).isel(level=levels).quantile(0.95).compute().item()
-        )
+        max_delta = np.abs(targ - pred).isel(level=levels).quantile(0.95).compute().item()
 
         nstep = 101
 
@@ -829,23 +797,19 @@ def plot_obspack_stations(
     if compare_obs is not None:
         if "co2molemix" not in compare_obs:
             if "co2massmix" not in compare_obs:
-                compare_obs["co2massmix"] = density_to_massmix(
-                    compare_obs.co2density, compare_obs.airdensity, ppm=True
-                )
+                compare_obs["co2massmix"] = density_to_massmix(compare_obs.co2density, compare_obs.airdensity, ppm=True)
             compare_obs["co2molemix"] = massmix_to_molemix(compare_obs.co2massmix)
 
-    metadata["default_level"] = metadata.level == metadata.groupby(
-        ["station", "quality", "type"]
-    )["level"].transform("max")
+    metadata["default_level"] = metadata.level == metadata.groupby(["station", "quality", "type"])["level"].transform(
+        "max"
+    )
     if stations == "all":
         stations = metadata.station.unique()
     if ids is not None:
         subset = metadata[metadata.id.isin(ids)]
     else:
         subset = metadata[
-            (metadata.station.isin(stations))
-            & (metadata.type.isin(types))
-            & (metadata.quality.isin(quality))
+            (metadata.station.isin(stations)) & (metadata.type.isin(types)) & (metadata.quality.isin(quality))
         ]
         if levels == "default":
             subset = subset[subset.default_level]
@@ -872,13 +836,9 @@ def plot_obspack_stations(
             ax = plt.subplot()
 
             if compare_obs is not None:
-                compare_obs.co2molemix.isel(cell=i).plot(
-                    ax=ax, label="Inversion", color="tab:green", lw=0.75
-                )
+                compare_obs.co2molemix.isel(cell=i).plot(ax=ax, label="Inversion", color="tab:green", lw=0.75)
 
-            obs.co2molemix.isel(cell=i).plot(
-                ax=ax, label="Predicted", color="tab:orange", lw=0.75
-            )
+            obs.co2molemix.isel(cell=i).plot(ax=ax, label="Predicted", color="tab:orange", lw=0.75)
 
             obs.obs_co2molemix.isel(cell=i).plot(
                 ax=ax, color="black", lw=0.75, alpha=0.85, label="Observed", marker="x"
@@ -888,9 +848,7 @@ def plot_obspack_stations(
             ax.set_title(f"{row['site_name']}, Level {row['level']}")
             ax.set_ylabel("CO2 molemix [ppm]")
 
-            for date in pd.date_range(
-                start=obs.time[0].item(), end=obs.time[-1].item(), freq=freq
-            ):
+            for date in pd.date_range(start=obs.time[0].item(), end=obs.time[-1].item(), freq=freq):
                 ax.axvline(x=date, color="grey", alpha=0.5, ls="--", lw=0.5, zorder=0)
             plt.legend()
             plt.tight_layout()
@@ -907,15 +865,12 @@ def plot_analyze_noise_path(noises, angles, label="$\\theta$"):
     """
     noises_flat = [x.flatten().cpu() for x in noises]
     norms = torch.tensor([x.norm().item() for x in noises_flat])
-    cosine_sims = [
-        torch.nn.functional.cosine_similarity(noises_flat[0], x, dim=0).item()
-        for x in noises_flat
-    ]
+    cosine_sims = [torch.nn.functional.cosine_similarity(noises_flat[0], x, dim=0).item() for x in noises_flat]
 
     if isinstance(angles, torch.Tensor):
         xvals = angles.cpu().numpy()
         is_numeric = True
-    elif all(isinstance(a, (int, float)) for a in angles):
+    elif all(isinstance(a, int | float) for a in angles):
         xvals = np.array(angles)
         is_numeric = True
     else:
@@ -973,7 +928,7 @@ def plot_pairwise_cosine_similarity(noises, labels=None):
     """
     Compute and plot the pairwise cosine similarity matrix between noise samples.
     """
-    
+
     X = torch.stack([x.flatten() for x in noises])
     X_norm = X / (X.norm(dim=1, keepdim=True) + 1e-8)
     cos_sim = (X_norm @ X_norm.T).cpu().numpy()
@@ -1078,15 +1033,23 @@ def plot_obs_mask_and_samples(
     axs = axs.reshape(2, 4)
 
     # Panels ([0,0]: Ground truth, [1,0]: Masked obs, [0,1..3] and [1,1..3]: samples)
-    im = plot_panel(axs[0, 0], target_vals, "Ground Truth", vmin=targ_min, vmax=targ_max, aspect_ratio=aspect_ratio, bold=True)
-    plot_panel(axs[1, 0], np.ma.masked_invalid(masked_obs), "Masked Observations",
-               vmin=obs_min, vmax=obs_max, aspect_ratio=aspect_ratio, bold=True)
+    im = plot_panel(
+        axs[0, 0], target_vals, "Ground Truth", vmin=targ_min, vmax=targ_max, aspect_ratio=aspect_ratio, bold=True
+    )
+    plot_panel(
+        axs[1, 0],
+        np.ma.masked_invalid(masked_obs),
+        "Masked Observations",
+        vmin=obs_min,
+        vmax=obs_max,
+        aspect_ratio=aspect_ratio,
+        bold=True,
+    )
 
     for i in range(n_samples):
         row = 0 if i < 3 else 1
         col = (i % 3) + 1
-        plot_panel(axs[row, col], samples_np[i, :, :], f"Sample {i}",
-                   vmin=vmin, vmax=vmax, aspect_ratio=aspect_ratio)
+        plot_panel(axs[row, col], samples_np[i, :, :], f"Sample {i}", vmin=vmin, vmax=vmax, aspect_ratio=aspect_ratio)
 
     fig.text(0.56, 0.9, "Generated Samples", fontsize=14, fontweight="bold", ha="center", va="top")
 
@@ -1176,15 +1139,23 @@ def plot_obs_mask_and_samples_x(
     axs = axs.reshape(2, 4)
 
     # Panels ([0,0]: Obs values, [1,0]: Masked obs, [0,1..3] and [1,1..3]: samples)
-    im = plot_panel(axs[0, 0], obs_values_np, "Obs Values", vmin=obs_min, vmax=obs_max, aspect_ratio=aspect_ratio, bold=True)
-    plot_panel(axs[1, 0], np.ma.masked_invalid(masked_obs), "Masked Observations",
-               vmin=obs_min, vmax=obs_max, aspect_ratio=aspect_ratio, bold=True)
+    im = plot_panel(
+        axs[0, 0], obs_values_np, "Obs Values", vmin=obs_min, vmax=obs_max, aspect_ratio=aspect_ratio, bold=True
+    )
+    plot_panel(
+        axs[1, 0],
+        np.ma.masked_invalid(masked_obs),
+        "Masked Observations",
+        vmin=obs_min,
+        vmax=obs_max,
+        aspect_ratio=aspect_ratio,
+        bold=True,
+    )
 
     for i in range(n_samples):
         row = 0 if i < 3 else 1
         col = (i % 3) + 1
-        plot_panel(axs[row, col], samples_np[i, :, :], f"Sample {i}",
-                   vmin=vmin, vmax=vmax, aspect_ratio=aspect_ratio)
+        plot_panel(axs[row, col], samples_np[i, :, :], f"Sample {i}", vmin=vmin, vmax=vmax, aspect_ratio=aspect_ratio)
 
     fig.text(0.56, 0.9, "Generated Samples", fontsize=14, fontweight="bold", ha="center", va="top")
 
@@ -1291,12 +1262,8 @@ def plot_mask_pattern_on_samples(
 
 
 def plot_masking_diagnostics(
-        preds,
-        out_dir,
-        varnames=["co2massmix"],
-        nlat=32,
-        nlon=64,
-        imgformats=["svg", "png", "pdf"]):
+    preds, out_dir, varnames=["co2massmix"], nlat=32, nlon=64, imgformats=["svg", "png", "pdf"]
+):
     """
     Save diagnostics for masking or flow matching analysis.
     Uses pure xarray inputs — obs_mask and obs_values are extracted from preds.
@@ -1318,7 +1285,7 @@ def plot_masking_diagnostics(
                 nlat=nlat,
                 nlon=nlon,
                 max_samples=6,
-                )
+            )
 
             for fmt in imgformats:
                 fig.savefig(out_dir / f"masking_{varname}.{fmt}", dpi=300)
@@ -1341,15 +1308,16 @@ def plot_masking_diagnostics(
 
 
 def plot_samples(
-        preds,
-        out_dir,
-        score_path,
-        tests=None,
-        freq="QS",
-        varnames=["co2molemix"],
-        normalize=False,
-        imgformats=["svg", "png", "pdf"],
-        **generate_kwargs):
+    preds,
+    out_dir,
+    score_path,
+    tests=None,
+    freq="QS",
+    varnames=["co2molemix"],
+    normalize=False,
+    imgformats=["svg", "png", "pdf"],
+    **generate_kwargs,
+):
     """
     Wrapper for sample diagnostics plots
     """
@@ -1360,7 +1328,9 @@ def plot_samples(
     out_dir.mkdir(parents=True, exist_ok=True)
     score_path = Path(score_path)
     maps = xr.open_dataset(score_path / ("metrics_maps.nc" if freq == "QS" else f"metrics_maps_{freq}.nc"))
-    df_global_scalars = pd.read_csv(score_path / ("metrics_global_scalars.csv" if freq == "QS" else f"metrics_global_scalars_{freq}.csv"))
+    df_global_scalars = pd.read_csv(
+        score_path / ("metrics_global_scalars.csv" if freq == "QS" else f"metrics_global_scalars_{freq}.csv")
+    )
 
     for varname in varnames:
         if varname not in preds:
@@ -1368,27 +1338,32 @@ def plot_samples(
 
         preds_var = preds[varname]  # shape: [sample=100, lat=32, lon=64, level=10]
 
-        plot_sample_cdf(preds_var, out_dir,
-                        tests=tests,
-                        varname=varname,
-                        avg_over_levels=avg_over_levels,
-                        normalize=normalize,
-                        center_to_test_mean=False,
-                        imgformats=imgformats,)
+        plot_sample_cdf(
+            preds_var,
+            out_dir,
+            tests=tests,
+            varname=varname,
+            avg_over_levels=avg_over_levels,
+            normalize=normalize,
+            center_to_test_mean=False,
+            imgformats=imgformats,
+        )
 
-        plot_sample_cdf(preds_var, out_dir,
-                        tests=tests,
-                        varname=varname,
-                        avg_over_levels=avg_over_levels,
-                        normalize=normalize,
-                        center_to_test_mean=True,
-                        imgformats=imgformats,)
+        plot_sample_cdf(
+            preds_var,
+            out_dir,
+            tests=tests,
+            varname=varname,
+            avg_over_levels=avg_over_levels,
+            normalize=normalize,
+            center_to_test_mean=True,
+            imgformats=imgformats,
+        )
 
         if noise_pattern is not None:
-            plot_pairwise_sample_distances(preds_var, out_dir,
-                                        varname=varname,
-                                        avg_over_levels=avg_over_levels,
-                                        imgformats=imgformats)
+            plot_pairwise_sample_distances(
+                preds_var, out_dir, varname=varname, avg_over_levels=avg_over_levels, imgformats=imgformats
+            )
 
         if tests is not None and varname not in tests:
             raise KeyError(f"{varname} not found in tests")
@@ -1398,71 +1373,46 @@ def plot_samples(
 
         if not avg_over_levels:
             for i, lvl in enumerate(tests_var_mean.level.values):
-                plot_crps(maps,
-                          df_global_scalars,
-                          out_dir,
-                          varname=varname,
-                          level=lvl,
-                          imgformats=imgformats)
+                plot_crps(maps, df_global_scalars, out_dir, varname=varname, level=lvl, imgformats=imgformats)
 
-                plot_scatter_preds_vs_tests(maps, df_global_scalars,
-                                            preds_var.isel(level=i),
-                                            tests_var_mean.isel(level=i),
-                                            out_dir,
-                                            varname=varname,
-                                            level=lvl,
-                                            imgformats=imgformats)
+                plot_scatter_preds_vs_tests(
+                    maps,
+                    df_global_scalars,
+                    preds_var.isel(level=i),
+                    tests_var_mean.isel(level=i),
+                    out_dir,
+                    varname=varname,
+                    level=lvl,
+                    imgformats=imgformats,
+                )
 
-                plot_spread_skill(maps,
-                                  out_dir,
-                                  varname=varname,
-                                  level=lvl,
-                                  imgformats=imgformats)
+                plot_spread_skill(maps, out_dir, varname=varname, level=lvl, imgformats=imgformats)
 
-                plot_error_locations(maps,
-                                     out_dir,
-                                     varname=varname,
-                                     level=lvl,
-                                     imgformats=imgformats)
+                plot_error_locations(maps, out_dir, varname=varname, level=lvl, imgformats=imgformats)
 
         preds_var_mean = preds_var.mean(dim="level")  # shape: [sample, lat, lon]
         tests_var_mean = tests_var_mean.mean(dim="level")  # shape: [lat, lon]
 
-        plot_crps(maps,
-                  df_global_scalars,
-                  out_dir,
-                  varname=varname,
-                  imgformats=imgformats)
+        plot_crps(maps, df_global_scalars, out_dir, varname=varname, imgformats=imgformats)
 
-        plot_scatter_preds_vs_tests(maps, df_global_scalars,
-                                    preds_var_mean,
-                                    tests_var_mean,
-                                    out_dir,
-                                    varname=varname,
-                                    imgformats=imgformats)
+        plot_scatter_preds_vs_tests(
+            maps, df_global_scalars, preds_var_mean, tests_var_mean, out_dir, varname=varname, imgformats=imgformats
+        )
 
-        plot_spread_skill(maps,
-                          out_dir,
-                          varname=varname,
-                          imgformats=imgformats)
+        plot_spread_skill(maps, out_dir, varname=varname, imgformats=imgformats)
 
-        plot_error_locations(maps,
-                             out_dir,
-                             varname=varname,
-                             imgformats=imgformats)
+        plot_error_locations(maps, out_dir, varname=varname, imgformats=imgformats)
 
 
-def plot_pairwise_sample_distances(preds_var, out_dir,
-                                   varname="co2molemix",
-                                   avg_over_levels=True,
-                                   imgformats=["svg", "png", "pdf"]):
+def plot_pairwise_sample_distances(
+    preds_var, out_dir, varname="co2molemix", avg_over_levels=True, imgformats=["svg", "png", "pdf"]
+):
     """
     Plot pairwise L2 distances between samples for a given variable at one vertical level.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    
     # Determine levels
     if "level" in preds_var.dims and not avg_over_levels:
         levels = preds_var.level.values
@@ -1494,7 +1444,6 @@ def plot_pairwise_sample_distances(preds_var, out_dir,
             filename = f"pairwise_distances_{varname}" + (f"_level{level}" if level is not None else "") + f".{fmt}"
             fig.savefig(out_dir / filename, dpi=300)
 
-
         plt.close(fig)
 
 
@@ -1502,11 +1451,16 @@ def normalize_array(arr, normalize):
     return (arr - arr.mean()) / arr.std() if normalize else arr
 
 
-def plot_sample_cdf(preds_var, out_dir, tests=None,
-                    varname="co2molemix", avg_over_levels=True,
-                    normalize=False,
-                    center_to_test_mean=False,
-                    imgformats=["svg", "png", "pdf"]):
+def plot_sample_cdf(
+    preds_var,
+    out_dir,
+    tests=None,
+    varname="co2molemix",
+    avg_over_levels=True,
+    normalize=False,
+    center_to_test_mean=False,
+    imgformats=["svg", "png", "pdf"],
+):
     """
     Plot cumulative distribution functions (CDFs) of normalized mean values per sample for one or multiple variables. Optionally compare to test data.
     """
@@ -1527,7 +1481,6 @@ def plot_sample_cdf(preds_var, out_dir, tests=None,
             tests_var = tests_var.mean(dim="level")  # shape: [sample, lat, lon]
         test_mean = tests_var.mean(dim=["lat", "lon"])  # shape: [sample, (level)]
 
-
     fig, ax = plt.subplots(figsize=(8, 5))
 
     if not avg_over_levels:
@@ -1540,7 +1493,7 @@ def plot_sample_cdf(preds_var, out_dir, tests=None,
             if center_to_test_mean and test_mean is not None:
                 level_pred -= test_mean.sel(level=lvl).mean().values
             x_pred = np.sort(level_pred)
-            y_pred = np.arange(1, len(level_pred)+1) / len(level_pred)
+            y_pred = np.arange(1, len(level_pred) + 1) / len(level_pred)
             ax.plot(x_pred, y_pred, label=f"Predictions (level={lvl:.0f})", marker="x", alpha=0.7, color=color)
 
             # Test CDF
@@ -1548,7 +1501,7 @@ def plot_sample_cdf(preds_var, out_dir, tests=None,
                 level_test = test_mean.sel(level=lvl).values
                 level_test = normalize_array(level_test, normalize)
                 x_test = np.sort(level_test)
-                y_test = np.arange(1, len(level_test)+1) / len(level_test)
+                y_test = np.arange(1, len(level_test) + 1) / len(level_test)
                 ax.plot(x_test, y_test, label=f"Tests (level={lvl:.0f})", marker="o", alpha=0.7, color=color)
     else:
         pred_mean_vals = pred_mean.values
@@ -1556,14 +1509,14 @@ def plot_sample_cdf(preds_var, out_dir, tests=None,
         if center_to_test_mean and test_mean is not None:
             pred_mean_vals -= test_mean.mean().values
         x_pred = np.sort(pred_mean_vals)
-        y_pred = np.arange(1, len(pred_mean_vals)+1) / len(pred_mean_vals)
+        y_pred = np.arange(1, len(pred_mean_vals) + 1) / len(pred_mean_vals)
         ax.plot(x_pred, y_pred, label="Predictions", marker="x")
 
         if not center_to_test_mean and test_mean is not None:
             test_mean_vals = test_mean.values
             test_mean_vals = normalize_array(test_mean_vals, normalize)
             x_test = np.sort(test_mean_vals)
-            y_test = np.arange(1, len(test_mean_vals)+1) / len(test_mean_vals)
+            y_test = np.arange(1, len(test_mean_vals) + 1) / len(test_mean_vals)
             ax.plot(x_test, y_test, label="Tests", marker="o")
 
     xlabel = f"{'Normalized ' if normalize else ''}Mean {varname} {'[ppm]' if not normalize else ''}"
@@ -1585,9 +1538,7 @@ def plot_sample_cdf(preds_var, out_dir, tests=None,
     plt.close(fig)
 
 
-def plot_crps(maps, df_global_scalars, out_dir,
-              varname="co2molemix", level=None,
-              imgformats=["svg", "png", "pdf"]):
+def plot_crps(maps, df_global_scalars, out_dir, varname="co2molemix", level=None, imgformats=["svg", "png", "pdf"]):
     """
     Plot CRPS maps and global mean value.
     """
@@ -1615,10 +1566,16 @@ def plot_crps(maps, df_global_scalars, out_dir,
     plt.close(fig)
 
 
-def plot_scatter_preds_vs_tests(maps, df_global_scalars,
-                                preds_var, tests_var, out_dir,
-                                varname="co2molemix", level=None,
-                                imgformats=["svg", "png", "pdf"]):
+def plot_scatter_preds_vs_tests(
+    maps,
+    df_global_scalars,
+    preds_var,
+    tests_var,
+    out_dir,
+    varname="co2molemix",
+    level=None,
+    imgformats=["svg", "png", "pdf"],
+):
     """
     Scatter plot: ensemble mean predictions vs ground truth.
     """
@@ -1629,7 +1586,7 @@ def plot_scatter_preds_vs_tests(maps, df_global_scalars,
     n_points = np.prod(preds_var.sizes.get("lat", 1) * preds_var.sizes.get("lon", 1))
 
     if level is not None:
-        title=f"Predicted vs Ground Truth ({varname}) - level {level:.0f}"
+        title = f"Predicted vs Ground Truth ({varname}) - level {level:.0f}"
         level_str = f"_level{level:.0f}"
         ens_mean = maps[f"Mean_map_co2molemix_level{level:.0f}"].values
         slope = df_global_scalars[f"LinReg_Slope_level{level:.0f}"].iloc[0]
@@ -1639,7 +1596,7 @@ def plot_scatter_preds_vs_tests(maps, df_global_scalars,
         bias = df_global_scalars[f"Bias_scalar_level{level:.0f}"].iloc[0]
         crps = df_global_scalars[f"CRPS_ensemble_mean_level{level:.0f}"].iloc[0]
     else:
-        title=f"Predicted vs Ground Truth ({varname}) - mean over levels"
+        title = f"Predicted vs Ground Truth ({varname}) - mean over levels"
         level_str = ""
         ens_mean = maps["Mean_map_co2molemix"].values
         slope = df_global_scalars["LinReg_Slope"].iloc[0]
@@ -1649,18 +1606,18 @@ def plot_scatter_preds_vs_tests(maps, df_global_scalars,
         bias = df_global_scalars["Bias_scalar"].iloc[0]
         crps = df_global_scalars["CRPS_ensemble_mean"].iloc[0]
 
-    y_true   = tests_var.values
+    y_true = tests_var.values
     mask = np.isfinite(y_true) & np.isfinite(ens_mean)
     y_true, ens_mean = y_true[mask], ens_mean[mask]
 
     lims = [min(y_true.min(), ens_mean.min()), max(y_true.max(), ens_mean.max())]
     # --- Plot ---
-    fig, ax = plt.subplots(figsize=(6,6))
+    fig, ax = plt.subplots(figsize=(6, 6))
     hb = ax.hexbin(y_true, ens_mean, gridsize=100, cmap="cividis", bins="log")
     plt.colorbar(hb, ax=ax, label="log(count)")
 
     ax.plot(lims, lims, "k--", label="1:1 line")
-    ax.plot(lims, [slope*lim + intercept for lim in lims], "r-", label=f"Trend (slope={slope:.2f})")
+    ax.plot(lims, [slope * lim + intercept for lim in lims], "r-", label=f"Trend (slope={slope:.2f})")
     ax.set_xlabel("Ground Truth (ppm)")
     ax.set_ylabel("Ensemble Mean Prediction (ppm)")
     ax.set_title(title)
@@ -1674,17 +1631,14 @@ def plot_scatter_preds_vs_tests(maps, df_global_scalars,
         f"Bias = {bias:.2f} ppm\n"
         f"CRPS = {crps:.2f} ppm"
     )
-    ax.text(0.05, 0.95, textstr, transform=ax.transAxes,
-            va="top", ha="left", bbox=dict(facecolor="white", alpha=0.7))
+    ax.text(0.05, 0.95, textstr, transform=ax.transAxes, va="top", ha="left", bbox=dict(facecolor="white", alpha=0.7))
 
     for fmt in imgformats:
         fig.savefig(out_dir / f"scatter_{varname}{level_str}.{fmt}", dpi=300, bbox_inches="tight")
     plt.close(fig)
 
-        
-def plot_spread_skill(maps, out_dir,
-                      varname="co2molemix", level=None,
-                      imgformats=["svg", "png", "pdf"]):
+
+def plot_spread_skill(maps, out_dir, varname="co2molemix", level=None, imgformats=["svg", "png", "pdf"]):
     """
     Plot ensemble spread (std of predictions) vs absolute error (ensemble mean vs ground truth).
     """
@@ -1692,18 +1646,18 @@ def plot_spread_skill(maps, out_dir,
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if level is not None:
-        title=f"Spread-Skill ({varname}) - level {level:.0f}"
+        title = f"Spread-Skill ({varname}) - level {level:.0f}"
         level_str = f"_level{level:.0f}"
-        ens_std  = maps[f"Spread_map_co2molemix_level{level:.0f}"].values
+        ens_std = maps[f"Spread_map_co2molemix_level{level:.0f}"].values
         abs_error = np.abs(maps[f"Bias_map_co2molemix_level{level:.0f}"].values)
     else:
-        title=f"Spread-Skill ({varname}) - mean over levels"
+        title = f"Spread-Skill ({varname}) - mean over levels"
         level_str = ""
-        ens_std  = maps["Spread_map_co2molemix"].values
+        ens_std = maps["Spread_map_co2molemix"].values
         abs_error = np.abs(maps["Bias_map_co2molemix"].values)
 
     # --- Plot ---
-    fig, ax = plt.subplots(figsize=(6,6))
+    fig, ax = plt.subplots(figsize=(6, 6))
     hb = ax.hexbin(ens_std, abs_error, gridsize=80, cmap="magma", bins="log")
     plt.colorbar(hb, ax=ax, label="log(count)")
 
@@ -1719,45 +1673,44 @@ def plot_spread_skill(maps, out_dir,
     plt.close(fig)
 
 
-def plot_error_locations(maps, out_dir,
-                         varname="co2molemix", level=None,
-                         vmax_bias=5.0, vmax_rmse=10.0,
-                         imgformats=["svg", "png", "pdf"]):
-        """
-        Plot spatial bias, RMSE and ensemble spread maps.
-        """
-        out_dir = Path(out_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
+def plot_error_locations(
+    maps, out_dir, varname="co2molemix", level=None, vmax_bias=5.0, vmax_rmse=10.0, imgformats=["svg", "png", "pdf"]
+):
+    """
+    Plot spatial bias, RMSE and ensemble spread maps.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-        if level is not None:
-            title=f"Spatial Diagnostics: Bias, RMSE, and Ensemble Spread ({varname}) - level {level:.0f}"
-            level_str = f"_level{level:.0f}"
-            bias = maps[f"Bias_map_co2molemix_level{level:.0f}"].values
-            rmse = maps[f"RMSE_map_co2molemix_level{level:.0f}"].values
-            spread = maps[f"Spread_map_co2molemix_level{level:.0f}"].values
-        else:
-            title=f"Spatial Diagnostics: Bias, RMSE, and Ensemble Spread ({varname}) - mean over levels"
-            level_str = ""
-            bias = maps["Bias_map_co2molemix"].values
-            rmse = maps["RMSE_map_co2molemix"].values
-            spread = maps["Spread_map_co2molemix"].values
+    if level is not None:
+        title = f"Spatial Diagnostics: Bias, RMSE, and Ensemble Spread ({varname}) - level {level:.0f}"
+        level_str = f"_level{level:.0f}"
+        bias = maps[f"Bias_map_co2molemix_level{level:.0f}"].values
+        rmse = maps[f"RMSE_map_co2molemix_level{level:.0f}"].values
+        spread = maps[f"Spread_map_co2molemix_level{level:.0f}"].values
+    else:
+        title = f"Spatial Diagnostics: Bias, RMSE, and Ensemble Spread ({varname}) - mean over levels"
+        level_str = ""
+        bias = maps["Bias_map_co2molemix"].values
+        rmse = maps["RMSE_map_co2molemix"].values
+        spread = maps["Spread_map_co2molemix"].values
 
-        fig, axs = plt.subplots(1, 3, figsize=(15, 4), constrained_layout=True)
-        titles = ["Bias [ppm]", "RMSE [ppm]", "Ensemble spread ($\\sigma$) [ppm]"]
-        cmaps = ["RdBu_r", "inferno", "cividis"]
-        data = [bias, rmse, spread]
-        vmins = [-vmax_bias, 0, 0]
-        vmaxs = [vmax_bias, vmax_rmse, vmax_rmse]
+    fig, axs = plt.subplots(1, 3, figsize=(15, 4), constrained_layout=True)
+    titles = ["Bias [ppm]", "RMSE [ppm]", "Ensemble spread ($\\sigma$) [ppm]"]
+    cmaps = ["RdBu_r", "inferno", "cividis"]
+    data = [bias, rmse, spread]
+    vmins = [-vmax_bias, 0, 0]
+    vmaxs = [vmax_bias, vmax_rmse, vmax_rmse]
 
-        for ax, arr, title, cmap, vmin, vmax in zip(axs, data, titles, cmaps, vmins, vmaxs):
-            im = ax.imshow(arr[::-1, :], cmap=cmap, vmin=vmin, vmax=vmax)
-            ax.set_xlabel("Longitude")
-            ax.set_ylabel("Latitude")
-            ax.set_title(title, fontsize=14)
-            plt.colorbar(im, ax=ax, shrink=0.7)
+    for ax, arr, title, cmap, vmin, vmax in zip(axs, data, titles, cmaps, vmins, vmaxs):
+        im = ax.imshow(arr[::-1, :], cmap=cmap, vmin=vmin, vmax=vmax)
+        ax.set_xlabel("Longitude")
+        ax.set_ylabel("Latitude")
+        ax.set_title(title, fontsize=14)
+        plt.colorbar(im, ax=ax, shrink=0.7)
 
-        plt.suptitle(title, fontsize=16, fontweight="bold")
+    plt.suptitle(title, fontsize=16, fontweight="bold")
 
-        for fmt in imgformats:
-            fig.savefig(out_dir / f"error_maps_{varname}{level_str}.{fmt}", dpi=300, bbox_inches="tight")
-        plt.close(fig)
+    for fmt in imgformats:
+        fig.savefig(out_dir / f"error_maps_{varname}{level_str}.{fmt}", dpi=300, bbox_inches="tight")
+    plt.close(fig)

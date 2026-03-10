@@ -14,7 +14,6 @@ def iterative_benchmark(
     n_repeats=5,
     device="cpu",
 ):
-
     model = model.eval().to(device)
 
     batch = {k: v.unsqueeze(0).to(device) for k, v in dataset[0].items()}
@@ -26,14 +25,10 @@ def iterative_benchmark(
 
     for read_on_step, write_on_step in [(False, False), (True, False), (True, True)]:
         for repeat in range(n_repeats):
-
-            print(
-                f"Repeat {repeat}, read_on_step={read_on_step}, write_on_step={write_on_step}"
-            )
+            print(f"Repeat {repeat}, read_on_step={read_on_step}, write_on_step={write_on_step}")
             start = time.process_time()
 
             for i in range(n_steps):
-
                 if read_on_step:
                     batch = torch.load(Path(temp_dir.name) / "batch.pt")
                     # batch = {

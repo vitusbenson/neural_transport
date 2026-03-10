@@ -1,9 +1,8 @@
+import numpy as np
 import torch
 import torch.nn as nn
-from torchmetrics.functional import pearson_corrcoef, r2_score
-import numpy as np
 import xarray as xr
-from typing import Tuple
+from torchmetrics.functional import pearson_corrcoef, r2_score
 
 from neural_transport.tools.conversion import (
     density_to_mass,
@@ -16,9 +15,7 @@ class PixelwiseMetric(nn.Module):
         self.vars = list(weights.keys())
 
         for variable, weight in weights.items():
-            self.register_buffer(
-                f"weights_{variable}", torch.from_numpy(weight.astype("float32"))
-            )  # N, C
+            self.register_buffer(f"weights_{variable}", torch.from_numpy(weight.astype("float32")))  # N, C
 
     @property
     def name(self):
@@ -34,19 +31,11 @@ class PixelwiseMetric(nn.Module):
             #     print("shape mismatch metric", v, preds[v].shape, getattr(self, f"weights_{v}").shape)
 
             if "_delta" in v:
-                pred_delta = (
-                    preds[v.replace("_delta", "")] - batch[v.replace("_delta", "")]
-                )
-                targ_delta = (
-                    batch[v.replace("_delta", "_next")] - batch[v.replace("_delta", "")]
-                )
-                metric = self.compute_metric(
-                    pred_delta, targ_delta, getattr(self, f"weights_{v}")
-                )
+                pred_delta = preds[v.replace("_delta", "")] - batch[v.replace("_delta", "")]
+                targ_delta = batch[v.replace("_delta", "_next")] - batch[v.replace("_delta", "")]
+                metric = self.compute_metric(pred_delta, targ_delta, getattr(self, f"weights_{v}"))
             else:
-                metric = self.compute_metric(
-                    preds[v], batch[v], getattr(self, f"weights_{v}")
-                )
+                metric = self.compute_metric(preds[v], batch[v], getattr(self, f"weights_{v}"))
 
             if metric.numel() > 1:
                 for i, m in enumerate(metric):
@@ -107,10 +96,7 @@ class NSE(PixelwiseMetric):
 
     def compute_metric(self, pred, targ, weights):
         B, T, N, C = pred.shape
-        return (
-            r2_score(pred.reshape(-1, C), targ.reshape(-1, C), multioutput="raw_values")
-            ** 2
-        )
+        return r2_score(pred.reshape(-1, C), targ.reshape(-1, C), multioutput="raw_values") ** 2
 
 
 class Mass_RMSE(nn.Module):
@@ -119,19 +105,13 @@ class Mass_RMSE(nn.Module):
         self.molecule = molecule
 
         if weights is not None:
-            self.register_buffer(
-                "weights", torch.from_numpy(weights.astype("float32"))
-            )
+            self.register_buffer("weights", torch.from_numpy(weights.astype("float32")))
         else:
             self.weights = None
 
     def forward(self, preds, batch):
-        mass_pred = density_to_mass(
-            preds[f"{self.molecule}density"], batch["volume_next"]
-        )
-        mass_targ = density_to_mass(
-            batch[f"{self.molecule}density_next"], batch["volume_next"]
-        )
+        mass_pred = density_to_mass(preds[f"{self.molecule}density"], batch["volume_next"])
+        mass_targ = density_to_mass(batch[f"{self.molecule}density_next"], batch["volume_next"])
         if self.weights is not None:
             mass_pred = mass_pred * self.weights
             mass_targ = mass_targ * self.weights
@@ -142,14 +122,13 @@ class Mass_RMSE(nn.Module):
             f"mass_rrmse_{self.molecule}": rmse / mass_targ.sum([-1, -2]).mean(),
         }
 
-class Mass_RMSEv2(nn.Module):
-    def __init__(self, molecule = "co2"):
 
+class Mass_RMSEv2(nn.Module):
+    def __init__(self, molecule="co2"):
         super().__init__()
         self.molecule = molecule
 
     def forward(self, preds, batch):
-
         mass_pred = (preds[f"{self.molecule}massmix"] / 1e6) * batch["airmass_next"]
         mass_targ = (batch[f"{self.molecule}massmix_next"] / 1e6) * batch["airmass_next"]
 
@@ -159,6 +138,7 @@ class Mass_RMSEv2(nn.Module):
             f"mass_rmse_{self.molecule}": rmse,
             f"mass_rrmse_{self.molecule}": rmse / mass_targ.sum([-1, -2]).mean(),
         }
+
 
 METRICS = {
     "rmse": RMSE,
@@ -175,9 +155,7 @@ class ManyMetrics(nn.Module):
     def __init__(self, metrics=[dict(name="mass_rmse", kwargs=dict(molecule="co2"))]):
         super().__init__()
 
-        self.metrics = nn.ModuleList(
-            [METRICS[m["name"]](**m["kwargs"]) for m in metrics]
-        )
+        self.metrics = nn.ModuleList([METRICS[m["name"]](**m["kwargs"]) for m in metrics])
 
     def forward(self, preds, batch):
         metrics = {}
@@ -186,7 +164,7 @@ class ManyMetrics(nn.Module):
         return metrics
 
 
-def crps(preds, tests) -> Tuple[xr.DataArray | np.ndarray, float]:
+def crps(preds, tests) -> tuple[xr.DataArray | np.ndarray, float]:
     """
     Compute the Continuous Ranked Probability Score (CRPS)
     for ensemble predictions vs. ground truth.
@@ -235,8 +213,8 @@ def crps(preds, tests) -> Tuple[xr.DataArray | np.ndarray, float]:
     elif preds.ndim == 3:
         # preds: [samples, lat, lon]
         S, lat, lon = preds.shape
-        preds_flat = preds.reshape(S, lat*lon)  # [samples, N]
-    
+        preds_flat = preds.reshape(S, lat * lon)  # [samples, N]
+
     # Compute CRPS across ensemble dimension
     # term1 = mean(|x_i - obs|)
     term1 = np.mean(np.abs(preds_flat - tests_flat[None, ...]), axis=0)  # [N, (C)]
@@ -245,7 +223,9 @@ def crps(preds, tests) -> Tuple[xr.DataArray | np.ndarray, float]:
     term2 = 0.5 * np.mean(diffs, axis=(0, 1))  # [N, (C)]
 
     crps_flat = term1 - term2  # [N, (C)]
-    crps_map = crps_flat.reshape(lat, lon, C_t) if preds.ndim == 4 else crps_flat.reshape(lat, lon)  # [lat, lon, (level)]
+    crps_map = (
+        crps_flat.reshape(lat, lon, C_t) if preds.ndim == 4 else crps_flat.reshape(lat, lon)
+    )  # [lat, lon, (level)]
     crps_mean = float(np.mean(crps_map, axis=(0, 1)))  # average over lat, lon
     return crps_map, crps_mean
 
@@ -276,7 +256,7 @@ def compute_error_maps(gen_samples, gt):
     gen_samples_masked = np.where(mask, gen_samples, np.nan)
 
     bias_map = np.nanmean(gen_samples_masked, axis=0) - gt_masked
-    rmse_map = np.sqrt(np.nanmean((gen_samples_masked - gt_masked)**2, axis=0))
+    rmse_map = np.sqrt(np.nanmean((gen_samples_masked - gt_masked) ** 2, axis=0))
     spread_map = np.nanstd(gen_samples_masked, axis=0)
     mean_map = np.where(mask, mean_map, np.nan)
 

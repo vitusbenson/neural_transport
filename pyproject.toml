@@ -50,3 +50,34 @@ Issues = "https://github.com/vitusbenson/neural_transport/issues"
 [tool.setuptools.packages.find]
 include = ["neural_transport"]
 exclude = ["experiments*"]
+
+[dependency-groups]
+dev = [
+    "pre-commit",
+    "pytest",
+    "pytest-cov",
+    "ruff",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+ignore = ["E203", "E402", "E501", "E741"]
+
+[tool.ruff.format]
+skip-magic-trailing-comma = false
+quote-style = "preserve"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = ["-v", "--tb=short", "-ra"]
+filterwarnings = ["ignore::DeprecationWarning", "ignore::UserWarning"]
+markers = [
+    "slow: marks tests as slow",
+    "gpu: marks tests requiring GPU",
+]

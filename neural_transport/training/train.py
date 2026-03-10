@@ -10,20 +10,25 @@ from neural_transport.datamodule import CarbonDataModule, CarbonDataset
 from neural_transport.inference.analyse import compute_local_scores, compute_score_df, compute_score_df_generate
 from neural_transport.inference.forecast import iterative_forecast
 from neural_transport.inference.generative import (
-    iterative_generate, iterative_generate_oco2,
+    iterative_generate,
+    iterative_generate_oco2,
 )
+from neural_transport.litmodule import NeuralTransport
 from neural_transport.plots.plot_results import (
     animate_predictions,
     plot_metrics,
     plot_obspack_stations,
     plot_samples,
 )
-from neural_transport.litmodule import NeuralTransport
 from neural_transport.tools.conversion import massmix_to_molemix
 
 
 def train_singlestep(
-    run_dir, data_kwargs, lit_module_kwargs, trainer_kwargs, ckptpath=None,
+    run_dir,
+    data_kwargs,
+    lit_module_kwargs,
+    trainer_kwargs,
+    ckptpath=None,
     ckpt_kwargs=dict(
         save_top_k=1,  # -1,
         save_last=True,
@@ -31,25 +36,19 @@ def train_singlestep(
         filename="Epoch={epoch}-Step={step}-LossVal={Loss/Val_rollout:.6f}",
         auto_insert_metric_name=False,
         every_n_epochs=1,
-    )
+    ),
 ):
     run_dir = Path(run_dir)
 
-    logger = pl.loggers.tensorboard.TensorBoardLogger(
-        run_dir, name="", version="singlestep"
-    )
-    checkpoint_callback = pl.callbacks.ModelCheckpoint(
-        **ckpt_kwargs
-    )
+    logger = pl.loggers.tensorboard.TensorBoardLogger(run_dir, name="", version="singlestep")
+    checkpoint_callback = pl.callbacks.ModelCheckpoint(**ckpt_kwargs)
     checkpoint_callback.CHECKPOINT_NAME_LAST = "best"
 
     ckpt_kwargs["monitor"] = "step"
     ckpt_kwargs["mode"] = "max"
     ckpt_kwargs["filename"] = "latest-" + ckpt_kwargs["filename"]
 
-    latest_checkpoint_callback = pl.callbacks.ModelCheckpoint(
-        **ckpt_kwargs
-    )
+    latest_checkpoint_callback = pl.callbacks.ModelCheckpoint(**ckpt_kwargs)
 
     lr_monitor = pl.callbacks.LearningRateMonitor()
 
@@ -90,9 +89,7 @@ def train_rollout(
 
     if rollout_constant_lr:
         lit_module_kwargs["lr"] = rollout_constant_lr
-        lit_module_kwargs["lr_shedule_kwargs"] = dict(
-            warmup_steps=1, halfcosine_steps=100000, min_lr=1, max_lr=1
-        )
+        lit_module_kwargs["lr_shedule_kwargs"] = dict(warmup_steps=1, halfcosine_steps=100000, min_lr=1, max_lr=1)
 
     log_path = run_dir / "singlestep"
     ckptdir = log_path / "checkpoints"
@@ -111,9 +108,7 @@ def train_rollout(
         **lit_module_kwargs,
     )
 
-    logger = pl.loggers.tensorboard.TensorBoardLogger(
-        run_dir, name="", version="rollout"
-    )
+    logger = pl.loggers.tensorboard.TensorBoardLogger(run_dir, name="", version="rollout")
     checkpoint_callback = pl.callbacks.ModelCheckpoint(
         save_top_k=-1,
         save_last=True,
@@ -149,7 +144,6 @@ def train_rollout(
 
 
 def load_dataset(data_path, data_kwargs, load_obspack=True):
-
     dataset = CarbonDataset(
         data_path=data_path,
         dataset=data_kwargs["dataset"],
@@ -267,12 +261,14 @@ def load_pred_targ(target_path, pred_path):
     return co2targ, co2pred
 
 
-def score(target_path: str,
-          pred_path: str,
-          obs_pred_path: str | None = None,
-          freq: str | None = "QS",
-          target_var: str | None = "co2massmix",
-          generate_kwargs: dict | None = None) -> None:
+def score(
+    target_path: str,
+    pred_path: str,
+    obs_pred_path: str | None = None,
+    freq: str | None = "QS",
+    target_var: str | None = "co2massmix",
+    generate_kwargs: dict | None = None,
+) -> None:
     co2targ, co2pred = load_pred_targ(target_path, pred_path)
     co2pred = co2pred.isel(time=slice(1, None))
     co2targ = co2targ.isel(time=slice(1, None)).isel(time=slice(len(co2pred.time)))
@@ -284,7 +280,9 @@ def score(target_path: str,
 
     metrics = {}
     if generate_kwargs:
-        df_full, df_global_scalars, maps = compute_score_df_generate(co2targ, co2pred, target_var=target_var, **generate_kwargs)
+        df_full, df_global_scalars, maps = compute_score_df_generate(
+            co2targ, co2pred, target_var=target_var, **generate_kwargs
+        )
         df_full.index = pd.MultiIndex.from_product(
             [[f"{model_name}_{singlestep_or_rollout}_{ckpt_name}"], df_full.index],
             names=["model", "sample"],
@@ -295,7 +293,9 @@ def score(target_path: str,
         idx = pd.IndexSlice
         df_summary = df_full.loc[idx[f"{model_name}_{singlestep_or_rollout}_{ckpt_name}", ["mean", "std"]], :]
         df_summary.to_csv(score_path / ("metrics.csv" if freq == "QS" else f"metrics_{freq}.csv"))
-        df_global_scalars.to_csv(score_path / ("metrics_global_scalars.csv" if freq == "QS" else f"metrics_global_scalars_{freq}.csv"))
+        df_global_scalars.to_csv(
+            score_path / ("metrics_global_scalars.csv" if freq == "QS" else f"metrics_global_scalars_{freq}.csv")
+        )
         maps.to_netcdf(score_path / ("metrics_maps.nc" if freq == "QS" else f"metrics_maps_{freq}.nc"))
     else:
         metrics[f"{model_name}_{singlestep_or_rollout}_{ckpt_name}"] = compute_score_df(
@@ -314,10 +314,7 @@ def score(target_path: str,
 
         df = compute_local_scores(obs_preds=obspreds, freq=freq)
 
-        df.to_csv(
-            score_path
-            / ("obs_metrics.csv" if freq == "QS" else f"obs_metrics_{freq}.csv")
-        )
+        df.to_csv(score_path / ("obs_metrics.csv" if freq == "QS" else f"obs_metrics_{freq}.csv"))
 
 
 def plot(
@@ -376,15 +373,13 @@ def plot(
             postfix=f"3d_anim_t0={t0}-tend={tend}",
             num_workers=num_workers,
         )
-    
+
     if obs_pred_path and ("obspack" in plot_types):
         obspreds = xr.open_zarr(obs_pred_path)
 
         dataset = load_dataset(data_path_forecast, data_kwargs)
 
-        carboscope_obspred = (
-            xr.open_zarr(obs_compare_path) if obs_compare_path else None
-        )
+        carboscope_obspred = xr.open_zarr(obs_compare_path) if obs_compare_path else None
 
         plot_obspack_stations(
             obspreds,
@@ -454,28 +449,24 @@ def train_and_eval_singlestep(
         / f"{data_kwargs['dataset']}_{data_kwargs['grid']}_{data_kwargs['vertical_levels']}_{data_kwargs['freq']}.zarr"
     )
     pred_path = (
-        run_dir
-        / "singlestep"
-        / "preds"
-        / f"ckpt={ckpt}_massfixer={massfixer}"
-        / f"co2_pred_rollout_{freq}.zarr"
+        run_dir / "singlestep" / "preds" / f"ckpt={ckpt}_massfixer={massfixer}" / f"co2_pred_rollout_{freq}.zarr"
     )
     obs_pred_path = (
-        run_dir
-        / "singlestep"
-        / "preds"
-        / f"ckpt={ckpt}_massfixer={massfixer}"
-        / f"obs_co2_pred_rollout_{freq}.zarr"
+        run_dir / "singlestep" / "preds" / f"ckpt={ckpt}_massfixer={massfixer}" / f"obs_co2_pred_rollout_{freq}.zarr"
     )
     if type(lit_module_kwargs['model']).__name__ == "FlowMatching" or lit_module_kwargs['model'] == "flowmatching":
         obs_pred_path = None
         plot_types += ["samples"]
-    
+
     target_var = data_kwargs['target_vars'][0]
-    score(target_path, pred_path,
-          obs_pred_path=obs_pred_path,
-          freq=freq, target_var=target_var,
-          generate_kwargs=generate_kwargs)
+    score(
+        target_path,
+        pred_path,
+        obs_pred_path=obs_pred_path,
+        freq=freq,
+        target_var=target_var,
+        generate_kwargs=generate_kwargs,
+    )
     plot(
         target_path,
         pred_path,
@@ -555,11 +546,7 @@ def train_and_eval_rollout(
             / "rollout"
             / "preds"
             / f"ckpt={ckpt}_massfixer={massfixer}"
-            / (
-                f"co2_pred_rollout_{freq}.zarr"
-                if not zero_surfflux
-                else f"co2_pred_zeroflux_rollout_{freq}.zarr"
-            )
+            / (f"co2_pred_rollout_{freq}.zarr" if not zero_surfflux else f"co2_pred_zeroflux_rollout_{freq}.zarr")
         )
         obs_pred_path = (
             run_dir
@@ -575,8 +562,7 @@ def train_and_eval_rollout(
 
         if run_scoring:
             print("Starting Scoring")
-            score(target_path, pred_path,
-                  obs_pred_path=obs_pred_path, freq=freq, generate_kwargs=generate_kwargs)
+            score(target_path, pred_path, obs_pred_path=obs_pred_path, freq=freq, generate_kwargs=generate_kwargs)
         if run_plotting:
             print("Starting Plotting")
             plot(

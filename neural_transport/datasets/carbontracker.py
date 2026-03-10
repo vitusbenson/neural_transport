@@ -18,7 +18,7 @@ from neural_transport.datasets.grids import VERTICAL_LAYERS_PROTOTYPE_COORDS
 from neural_transport.datasets.solar_radiation import (
     get_toa_incident_solar_radiation_for_xarray,
 )
-from neural_transport.tools.conversion import molemix_to_massmix, M_CO2
+from neural_transport.tools.conversion import M_CO2, molemix_to_massmix
 from neural_transport.tools.obspack_helper import extract_obspack_locs_from_xarray
 
 dask.config.set(scheduler="threads")
@@ -32,10 +32,7 @@ def download_data(save_dir):
     FLUXES_PATH = f"{BASEPATH}fluxes/three-hourly/"
 
     for date in tqdm(np.arange("2000-01-01", "2021-03-01", dtype="datetime64")):
-
-        molefraction_filename = (
-            f"CT2022.molefrac_glb3x2_{date}.nc"  # f"CT2022.molefrac_nam1x1_{date}.nc"
-        )
+        molefraction_filename = f"CT2022.molefrac_glb3x2_{date}.nc"  # f"CT2022.molefrac_nam1x1_{date}.nc"
 
         url = f"{MOLEFRACTION_PATH}{molefraction_filename}"
 
@@ -66,20 +63,9 @@ def download_data(save_dir):
     print("Done!")
 
 
-def load_and_regrid(
-    molefraction_path, fluxes_path, regridder_molefraction, regridder_fluxes
-):
-
-    molefraction = (
-        xr.open_dataset(molefraction_path)
-        .rename(dict(latitude="lat", longitude="lon"))
-        .astype("float64")
-    )
-    fluxes = (
-        xr.open_dataset(fluxes_path)
-        .rename(dict(latitude="lat", longitude="lon"))
-        .astype("float64")
-    )
+def load_and_regrid(molefraction_path, fluxes_path, regridder_molefraction, regridder_fluxes):
+    molefraction = xr.open_dataset(molefraction_path).rename(dict(latitude="lat", longitude="lon")).astype("float64")
+    fluxes = xr.open_dataset(fluxes_path).rename(dict(latitude="lat", longitude="lon")).astype("float64")
 
     intensive_3d_latlon = regridder_molefraction(
         molefraction[
@@ -100,9 +86,7 @@ def load_and_regrid(
 
     molefraction["airmass"] = molefraction.air_mass * 1e-12  # Pg Air
 
-    molefraction["co2mass"] = (
-        molemix_to_massmix(molefraction.co2) * 1e-6
-    ) * molefraction.airmass
+    molefraction["co2mass"] = (molemix_to_massmix(molefraction.co2) * 1e-6) * molefraction.airmass
 
     extensive_3d_latlon = regridder_molefraction(
         molefraction[["co2mass", "airmass"]],
@@ -110,15 +94,13 @@ def load_and_regrid(
         regrid_method="conservative",
     )
 
-    fluxes_latlon = regridder_fluxes(
-        fluxes, intensive=True, regrid_method="conservative"
-    )
+    fluxes_latlon = regridder_fluxes(fluxes, intensive=True, regrid_method="conservative")
 
     ds = xr.Dataset(
         dict(
-            co2massmix=(
-                (extensive_3d_latlon.co2mass / extensive_3d_latlon.airmass) * 1e6
-            ).assign_attrs(units="1e-6kg / kg"),
+            co2massmix=((extensive_3d_latlon.co2mass / extensive_3d_latlon.airmass) * 1e6).assign_attrs(
+                units="1e-6kg / kg"
+            ),
             airmass=extensive_3d_latlon.airmass.assign_attrs(units="Pg"),  # Pg Air
             p_bottom=intensive_3d_latlon.pressure.isel(boundary=slice(None, -1))
             .rename({"boundary": "level"})
@@ -147,15 +129,11 @@ def load_and_regrid(
             cell_area=intensive_3d_latlon.cell_area.assign_attrs(units="m"),
             blh=intensive_3d_latlon.blh,
             orography=intensive_3d_latlon.orography,
-            co2flux_land=(fluxes_latlon.bio_flux_opt * M_CO2).assign_attrs(
+            co2flux_land=(fluxes_latlon.bio_flux_opt * M_CO2).assign_attrs(units="kg/m^2/s"),
+            co2flux_ocean=(fluxes_latlon.ocn_flux_opt * M_CO2).assign_attrs(units="kg/m^2/s"),
+            co2flux_anthro=((fluxes_latlon.fossil_flux_imp + fluxes_latlon.fire_flux_imp) * M_CO2).assign_attrs(
                 units="kg/m^2/s"
             ),
-            co2flux_ocean=(fluxes_latlon.ocn_flux_opt * M_CO2).assign_attrs(
-                units="kg/m^2/s"
-            ),
-            co2flux_anthro=(
-                (fluxes_latlon.fossil_flux_imp + fluxes_latlon.fire_flux_imp) * M_CO2
-            ).assign_attrs(units="kg/m^2/s"),
             tisr=get_toa_incident_solar_radiation_for_xarray(extensive_3d_latlon),
         )
     ).astype("float32")
@@ -166,16 +144,16 @@ def load_and_regrid(
 CARBONTRACKER_LEVEL_AGG = dict(
     l34=[[i] for i in range(34)],
     l10=[
-        [0],                                # 1013 hPa
-        [1],                                # 1005
-        [2],                                # 995
-        [3],                                # 971
-        [4, 5],                             # 943-894
-        [6, 7, 8],                          # 843-703
-        [9, 10, 11, 12],                    # 642-478
-        [13, 14, 15, 16, 17, 18],           # 441-278
-        [19, 20, 21, 22, 23, 24, 25, 26],   # 243-86
-        [27, 28, 29, 30, 31, 32, 33],       # 73-1
+        [0],  # 1013 hPa
+        [1],  # 1005
+        [2],  # 995
+        [3],  # 971
+        [4, 5],  # 943-894
+        [6, 7, 8],  # 843-703
+        [9, 10, 11, 12],  # 642-478
+        [13, 14, 15, 16, 17, 18],  # 441-278
+        [19, 20, 21, 22, 23, 24, 25, 26],  # 243-86
+        [27, 28, 29, 30, 31, 32, 33],  # 73-1
     ],
     l20=[[i] for i in range(6)] + [[i, i + 1] for i in range(6, 34, 2)],
     l3=[[0], [1, 2, 3, 4, 5], list(range(6, 34, 1))],
@@ -194,15 +172,51 @@ def get_mean_oco2_ak_on_ct_levels(save_dir):
     # Mean OCO-2 averaging kernel at 20 native pressure levels (MIP_OCO2_HEIGHT),
     # precomputed from oco2_assimilate.zarr where assimilate_flag==1.
     # Ordered from TOA (~0.1 hPa) to surface (~998 hPa).
-    MEAN_OCO2_AK_20 = np.array([
-        0.0026, 0.0524, 0.1047, 0.1610, 0.2376, 0.3059, 0.4088, 0.5164,
-        0.6083, 0.7002, 0.7622, 0.8527, 0.8935, 0.9190, 0.9547, 0.9646,
-        0.9812, 0.9896, 0.9961, 0.9995,
-    ])
+    MEAN_OCO2_AK_20 = np.array(
+        [
+            0.0026,
+            0.0524,
+            0.1047,
+            0.1610,
+            0.2376,
+            0.3059,
+            0.4088,
+            0.5164,
+            0.6083,
+            0.7002,
+            0.7622,
+            0.8527,
+            0.8935,
+            0.9190,
+            0.9547,
+            0.9646,
+            0.9812,
+            0.9896,
+            0.9961,
+            0.9995,
+        ]
+    )
     MIP_OCO2_HEIGHT_LOCAL = [
-        0.0984, 52.6136, 105.2272, 156.4836, 210.4544, 256.2101, 312.9672,
-        370.0722, 420.9087, 472.6453, 512.4202, 578.6387, 625.9344, 663.7776,
-        740.1443, 770.1723, 841.8174, 884.8869, 945.2906, 997.8886,
+        0.0984,
+        52.6136,
+        105.2272,
+        156.4836,
+        210.4544,
+        256.2101,
+        312.9672,
+        370.0722,
+        420.9087,
+        472.6453,
+        512.4202,
+        578.6387,
+        625.9344,
+        663.7776,
+        740.1443,
+        770.1723,
+        841.8174,
+        884.8869,
+        945.2906,
+        997.8886,
     ]
 
     # Try to compute from actual data, fall back to hardcoded values
@@ -211,6 +225,7 @@ def get_mean_oco2_ak_on_ct_levels(save_dir):
     if oco2_zarr.is_dir() and (oco2_zarr / ".zmetadata").exists():
         try:
             import xarray as xr
+
             ds_oco2 = xr.open_zarr(oco2_zarr)
             mean_ak_20 = ds_oco2["xco2_averaging_kernel"].mean("sounding_id").values
             sigma = ds_oco2["sigma_levels"].values
@@ -291,50 +306,27 @@ def vertical_aggregation_xco2(ds, ak_weights_34):
 def regrid_carbontracker(save_dir, gridname="latlon2x3", vertical_levels="l34"):
     save_dir = Path(save_dir)
 
-    out_path = (
-        save_dir
-        / "Carbontracker"
-        / "CT2022_regrid"
-        / f"CT2022_regrid_{gridname}_{vertical_levels}.zarr"
-    )
+    out_path = save_dir / "Carbontracker" / "CT2022_regrid" / f"CT2022_regrid_{gridname}_{vertical_levels}.zarr"
     if out_path.is_dir() and (out_path / ".zmetadata").exists():
         print(f"Skipping Regridding, {out_path} exists")
         return
 
     for date in tqdm(np.arange("2000-01-01", "2021-03-01", dtype="datetime64")):
+        molefraction_path = save_dir / "Carbontracker" / "CT2022_molefrac" / f"CT2022.molefrac_glb3x2_{date}.nc"
 
-        molefraction_path = (
-            save_dir
-            / "Carbontracker"
-            / "CT2022_molefrac"
-            / f"CT2022.molefrac_glb3x2_{date}.nc"
-        )
-
-        fluxes_path = (
-            save_dir
-            / "Carbontracker"
-            / "CT2022_flux"
-            / f"CT2022.flux1x1.{date.item().strftime('%Y%m%d')}.nc"
-        )
+        fluxes_path = save_dir / "Carbontracker" / "CT2022_flux" / f"CT2022.flux1x1.{date.item().strftime('%Y%m%d')}.nc"
 
         if not out_path.is_dir():
-
             regridder_molefraction = Regrid_to_LatLon(
-                xr.open_dataset(molefraction_path).rename(
-                    dict(latitude="lat", longitude="lon")
-                ),
+                xr.open_dataset(molefraction_path).rename(dict(latitude="lat", longitude="lon")),
                 gridname,
             )
             regridder_fluxes = Regrid_to_LatLon(
-                xr.open_dataset(fluxes_path).rename(
-                    dict(latitude="lat", longitude="lon")
-                ),
+                xr.open_dataset(fluxes_path).rename(dict(latitude="lat", longitude="lon")),
                 gridname,
             )
 
-        ds = load_and_regrid(
-            molefraction_path, fluxes_path, regridder_molefraction, regridder_fluxes
-        )
+        ds = load_and_regrid(molefraction_path, fluxes_path, regridder_molefraction, regridder_fluxes)
 
         if vertical_levels == "l1":
             ak_weights_34 = get_mean_oco2_ak_on_ct_levels(save_dir)
@@ -351,34 +343,21 @@ def regrid_carbontracker(save_dir, gridname="latlon2x3", vertical_levels="l34"):
             ds.to_zarr(out_path, mode="a", append_dim="time")
 
 
-def resample_carbontracker(
-    save_dir, gridname="latlon2x3", vertical_levels="l34", freq="6h"
-):
+def resample_carbontracker(save_dir, gridname="latlon2x3", vertical_levels="l34", freq="6h"):
     save_dir = Path(save_dir)
 
-    ds = xr.open_zarr(
-        save_dir
-        / "Carbontracker"
-        / "CT2022_regrid"
-        / f"CT2022_regrid_{gridname}_{vertical_levels}.zarr"
-    )
+    ds = xr.open_zarr(save_dir / "Carbontracker" / "CT2022_regrid" / f"CT2022_regrid_{gridname}_{vertical_levels}.zarr")
 
     for date in tqdm(np.arange("2000-01-01", "2021-03-01", dtype="datetime64")):
-
         ds_resample = temporal_resample(
-            ds.sel(
-                time=slice(date - np.timedelta64(1, "D"), date + np.timedelta64(2, "D"))
-            ),
+            ds.sel(time=slice(date - np.timedelta64(1, "D"), date + np.timedelta64(2, "D"))),
             str(date),
             str(date + np.timedelta64(1, "D")),
             freq=freq,
         ).sel(time=str(date))
 
         out_path = (
-            save_dir
-            / "Carbontracker"
-            / "CT2022_regrid"
-            / f"CT2022_regrid_{gridname}_{vertical_levels}_{freq}.zarr"
+            save_dir / "Carbontracker" / "CT2022_regrid" / f"CT2022_regrid_{gridname}_{vertical_levels}_{freq}.zarr"
         )
 
         if not out_path.is_dir():
@@ -387,17 +366,12 @@ def resample_carbontracker(
             ds_resample.to_zarr(out_path, mode="a", append_dim="time")
 
 
-def write_carbontracker(
-    save_dir, gridname="latlon2x3", vertical_levels="l34", freq="6h", output_dir=None
-):
+def write_carbontracker(save_dir, gridname="latlon2x3", vertical_levels="l34", freq="6h", output_dir=None):
     save_dir = Path(save_dir)
     output_dir = Path(output_dir) if output_dir is not None else save_dir
 
     ds = xr.open_zarr(
-        save_dir
-        / "Carbontracker"
-        / "CT2022_regrid"
-        / f"CT2022_regrid_{gridname}_{vertical_levels}_{freq}.zarr"
+        save_dir / "Carbontracker" / "CT2022_regrid" / f"CT2022_regrid_{gridname}_{vertical_levels}_{freq}.zarr"
     )
 
     for split, timeslice in zip(
@@ -421,18 +395,14 @@ def write_carbontracker(
             )
 
 
-def stats_carbontracker(
-    save_dir, gridname="latlon2x3", vertical_levels="l34", freq="6h", output_dir=None
-):
+def stats_carbontracker(save_dir, gridname="latlon2x3", vertical_levels="l34", freq="6h", output_dir=None):
     save_dir = Path(save_dir)
     output_dir = Path(output_dir) if output_dir is not None else save_dir
     train_dir = output_dir / "Carbontracker" / "train"
     val_dir = output_dir / "Carbontracker" / "val"
     test_dir = output_dir / "Carbontracker" / "test"
 
-    ds = xr.open_zarr(
-        train_dir / f"carbontracker_{gridname}_{vertical_levels}_{freq}.zarr"
-    )
+    ds = xr.open_zarr(train_dir / f"carbontracker_{gridname}_{vertical_levels}_{freq}.zarr")
 
     ds_stats = compute_stats(ds)
 
@@ -443,42 +413,25 @@ def stats_carbontracker(
         )
 
 
-def obspack_carbontracker(
-    save_dir, gridname="latlon2x3", vertical_levels="l34", freq="6h", output_dir=None
-):
+def obspack_carbontracker(save_dir, gridname="latlon2x3", vertical_levels="l34", freq="6h", output_dir=None):
     save_dir = Path(save_dir)
     output_dir = Path(output_dir) if output_dir is not None else save_dir
     test_dir = output_dir / "Carbontracker" / "test"
 
-    ds = xr.open_zarr(
-        test_dir / f"carbontracker_{gridname}_{vertical_levels}_{freq}.zarr"
-    )
-    ds = xr.merge(
-        [ds.variables_2d.to_dataset("vari_2d"), ds.variables_3d.to_dataset("vari_3d")]
-    )[["co2massmix", "gph_bottom", "gph_top"]].compute()
+    ds = xr.open_zarr(test_dir / f"carbontracker_{gridname}_{vertical_levels}_{freq}.zarr")
+    ds = xr.merge([ds.variables_2d.to_dataset("vari_2d"), ds.variables_3d.to_dataset("vari_3d")])[
+        ["co2massmix", "gph_bottom", "gph_top"]
+    ].compute()
 
-    obs = (
-        xr.open_zarr(save_dir / "Obspack" / f"obspack_{freq}.zarr")
-        .sel(time=ds.time, method="nearest")
-        .compute()
-    )
+    obs = xr.open_zarr(save_dir / "Obspack" / f"obspack_{freq}.zarr").sel(time=ds.time, method="nearest").compute()
 
-    obs["lat"] = obs.lat.interpolate_na(
-        dim="time", method="nearest", fill_value="extrapolate"
-    )
-    obs["lon"] = obs.lon.interpolate_na(
-        dim="time", method="nearest", fill_value="extrapolate"
-    )
-    obs["height"] = obs.height.interpolate_na(
-        dim="time", method="nearest", fill_value="extrapolate"
-    )
+    obs["lat"] = obs.lat.interpolate_na(dim="time", method="nearest", fill_value="extrapolate")
+    obs["lon"] = obs.lon.interpolate_na(dim="time", method="nearest", fill_value="extrapolate")
+    obs["height"] = obs.height.interpolate_na(dim="time", method="nearest", fill_value="extrapolate")
     with ProgressBar():
         obs_carbontracker = (
             xr.concat(
-                [
-                    extract_obspack_locs_from_xarray(ds.isel(time=i), obs)
-                    for i in range(len(ds.time))
-                ],
+                [extract_obspack_locs_from_xarray(ds.isel(time=i), obs) for i in range(len(ds.time))],
                 dim="time",
             )
             .compute()
@@ -494,13 +447,16 @@ def obspack_carbontracker(
 
 
 if __name__ == "__main__":
-
     import argparse
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--save_dir", type=str, required=True)
-    parser.add_argument("--output_dir", type=str, default=None,
-                        help="Output directory for write/stats/obspack steps. Defaults to save_dir.")
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default=None,
+        help="Output directory for write/stats/obspack steps. Defaults to save_dir.",
+    )
     parser.add_argument("--gridname", type=str, default="latlon2x3")
     parser.add_argument("--vertical_levels", type=str, default="l34")
     parser.add_argument("--freq", type=str, default="3h")

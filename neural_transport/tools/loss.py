@@ -10,9 +10,7 @@ class MAE(nn.Module):
         self.vars = list(weights.keys())
 
         for variable, weight in weights.items():
-            self.register_buffer(
-                f"weights_{variable}", torch.from_numpy(weight.astype("float32"))
-            )  # N, C
+            self.register_buffer(f"weights_{variable}", torch.from_numpy(weight.astype("float32")))  # N, C
 
     def forward(self, preds, batch):
         loss = 0
@@ -44,6 +42,7 @@ class MAE(nn.Module):
 
         return loss, losses
 
+
 class FlowMatchingMSE(nn.Module):
     def __init__(self, target_var="co2massmix"):
         super().__init__()
@@ -52,13 +51,14 @@ class FlowMatchingMSE(nn.Module):
     def forward(self, preds, batch):
         loss = 0
         losses = {}
-        se = (preds[self.target_var] - preds["dx_t"])**2
+        se = (preds[self.target_var] - preds["dx_t"]) ** 2
         mse = torch.mean(se)
 
         loss += mse
         losses["Loss_FlowMatching/mse"] = mse
 
         return loss, losses
+
 
 class MSE(nn.Module):
     def __init__(
@@ -78,9 +78,7 @@ class MSE(nn.Module):
         self.normalize_batch = normalize_batch
 
         for variable, weight in weights.items():
-            self.register_buffer(
-                f"weights_{variable}", torch.from_numpy(weight.astype("float32"))
-            )  # N, C
+            self.register_buffer(f"weights_{variable}", torch.from_numpy(weight.astype("float32")))  # N, C
         self.massconserve_weight = massconserve_weight
 
         self.spectral_power_weight = spectral_power_weight
@@ -131,7 +129,6 @@ class MSE(nn.Module):
             loss = loss + wmse
 
             if ("massmix" in v) and (self.massconserve_weight > 0):
-
                 mass_pred = (preds[v] / 1e6) * batch["airmass_next"]
                 mass_targ = (batch[f"{v}_next"] / 1e6) * batch["airmass_next"]
 
@@ -147,19 +144,15 @@ class MSE(nn.Module):
             if self.spectral_power_weight > 0:
                 B, T, N, C = preds[v].shape
                 sh_pred = torch.view_as_real(
-                    self.sht(
-                        preds[v]
-                        .permute(0, 1, 3, 2)
-                        .reshape(B, T, C, self.sht.nlat, self.sht.nlon)
-                    )[..., : self.cutoff, : self.cutoff]
+                    self.sht(preds[v].permute(0, 1, 3, 2).reshape(B, T, C, self.sht.nlat, self.sht.nlon))[
+                        ..., : self.cutoff, : self.cutoff
+                    ]
                 )
 
                 sh_targ = torch.view_as_real(
-                    self.sht(
-                        batch[f"{v}_next"]
-                        .permute(0, 1, 3, 2)
-                        .reshape(B, T, C, self.sht.nlat, self.sht.nlon)
-                    )[..., : self.cutoff, : self.cutoff]
+                    self.sht(batch[f"{v}_next"].permute(0, 1, 3, 2).reshape(B, T, C, self.sht.nlat, self.sht.nlon))[
+                        ..., : self.cutoff, : self.cutoff
+                    ]
                 )
 
                 power_pred = (sh_pred**2).sum([-1, -2])

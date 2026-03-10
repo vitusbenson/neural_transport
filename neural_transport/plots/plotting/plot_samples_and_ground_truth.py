@@ -12,11 +12,16 @@ import torch
 import xarray as xr
 from matplotlib import gridspec
 
-from neural_transport.plots.utilities.plot_utils import (
-    decorate_earth, load_carbontracker_tests, normalize_minmax,
-    normalize_tests, save_figure, PROJECTION_MAP, parse_projections
-)
 from neural_transport.plots.utilities.cmaps import get_cmap_list
+from neural_transport.plots.utilities.plot_utils import (
+    PROJECTION_MAP,
+    decorate_earth,
+    load_carbontracker_tests,
+    normalize_minmax,
+    normalize_tests,
+    parse_projections,
+    save_figure,
+)
 
 sns.set_theme()
 sns.color_palette("crest", as_cmap=True)
@@ -25,17 +30,21 @@ sns.color_palette("crest", as_cmap=True)
 def plot_samples_and_ground_truth(
     traj: xr.DataArray,
     tests: torch.Tensor,
-    projection: ccrs.Projection | None=ccrs.Robinson(),
-    terrain: bool=False,
-    grid: bool=True,
-    land: bool=False, ocean: bool=False, borders: bool=False, lakes: bool=False, rivers: bool=False,
-    n_samples: int=2,
-    sample_indices: list[int] | None=None,
-    level_idx: int | None=None,
-    cmap: str="bone_r",
-    seed: int=42,
-    bias_hidden: bool=False,
-    title: str="Generated Samples vs. Ground Truth",
+    projection: ccrs.Projection | None = ccrs.Robinson(),
+    terrain: bool = False,
+    grid: bool = True,
+    land: bool = False,
+    ocean: bool = False,
+    borders: bool = False,
+    lakes: bool = False,
+    rivers: bool = False,
+    n_samples: int = 2,
+    sample_indices: list[int] | None = None,
+    level_idx: int | None = None,
+    cmap: str = "bone_r",
+    seed: int = 42,
+    bias_hidden: bool = False,
+    title: str = "Generated Samples vs. Ground Truth",
 ) -> plt.Figure:
     """Plot trajectory predictions against ground truth samples."""
     if bias_hidden:
@@ -48,7 +57,7 @@ def plot_samples_and_ground_truth(
     B, N, C = tests_norm.shape
     lat, lon = traj.sizes["lat"], traj.sizes["lon"]
     if N != lat * lon:
-        raise ValueError(f"Expected N={lat*lon}, got N={N}")
+        raise ValueError(f"Expected N={lat * lon}, got N={N}")
 
     last_time = traj.sizes["time"] - 1
 
@@ -69,8 +78,10 @@ def plot_samples_and_ground_truth(
     fig = plt.figure(figsize=figsize)
     gs = gridspec.GridSpec(nrow, ncol, figure=fig, width_ratios=[1, 1], wspace=0.15, hspace=0.25)
 
-    axes = [[fig.add_subplot(gs[i, j], projection=projection if projection else None) for j in range(2)]
-            for i in range(nrow)]
+    axes = [
+        [fig.add_subplot(gs[i, j], projection=projection if projection else None) for j in range(2)]
+        for i in range(nrow)
+    ]
     mapable = None
 
     for i, sample_idx in enumerate(sample_indices):
@@ -93,15 +104,21 @@ def plot_samples_and_ground_truth(
             gt_field = tests_norm[sample_idx, :, :].mean(axis=1).cpu().numpy().reshape(lat, lon)
         else:
             gt_field = tests_norm[sample_idx, :, level_idx].cpu().numpy().reshape(lat, lon)
-        gt_da = xr.DataArray(gt_field, dims=("lat", "lon"),
-                             coords={"lat": traj["lat"], "lon": traj["lon"]})
+        gt_da = xr.DataArray(gt_field, dims=("lat", "lon"), coords={"lat": traj["lat"], "lon": traj["lon"]})
 
         # --- Plot prediction ---
         if projection:
-            decorate_earth(ax_pred, terrain=terrain, grid=grid, land=land, ocean=ocean,
-                           borders=borders, lakes=lakes, rivers=rivers)
-            map_pred = da_sample.plot(ax=ax_pred, cmap=cmap, add_colorbar=False, add_labels=False,
-                                      transform=ccrs.PlateCarree(), rasterized=True)
+            decorate_earth(
+                ax_pred, terrain=terrain, grid=grid, land=land, ocean=ocean, borders=borders, lakes=lakes, rivers=rivers
+            )
+            map_pred = da_sample.plot(
+                ax=ax_pred,
+                cmap=cmap,
+                add_colorbar=False,
+                add_labels=False,
+                transform=ccrs.PlateCarree(),
+                rasterized=True,
+            )
         else:
             map_pred = da_sample.plot(ax=ax_pred, cmap=cmap, add_colorbar=False, add_labels=False, rasterized=True)
             ax_pred.set_aspect("equal", adjustable="box")
@@ -111,10 +128,17 @@ def plot_samples_and_ground_truth(
 
         # --- Plot ground truth ---
         if projection:
-            decorate_earth(ax_true, terrain=terrain, grid=grid, land=land, ocean=ocean,
-                           borders=borders, lakes=lakes, rivers=rivers)
-            gt_da.plot(ax=ax_true, cmap=cmap, add_colorbar=False, add_labels=False,
-                                  transform=ccrs.PlateCarree(), rasterized=True)
+            decorate_earth(
+                ax_true, terrain=terrain, grid=grid, land=land, ocean=ocean, borders=borders, lakes=lakes, rivers=rivers
+            )
+            gt_da.plot(
+                ax=ax_true,
+                cmap=cmap,
+                add_colorbar=False,
+                add_labels=False,
+                transform=ccrs.PlateCarree(),
+                rasterized=True,
+            )
         else:
             gt_da.plot(ax=ax_true, cmap=cmap, add_colorbar=False, add_labels=False, rasterized=True)
             ax_true.set_aspect("equal", adjustable="box")
@@ -124,14 +148,17 @@ def plot_samples_and_ground_truth(
         mapable = map_pred
 
     # Column titles
-    axes[0][0].text(0.5, 1.25, "Prediction", fontsize=13, fontweight="bold",
-                    ha="center", transform=axes[0][0].transAxes)
-    axes[0][1].text(0.5, 1.25, "Ground Truth", fontsize=13, fontweight="bold",
-                    ha="center", transform=axes[0][1].transAxes)
+    axes[0][0].text(
+        0.5, 1.25, "Prediction", fontsize=13, fontweight="bold", ha="center", transform=axes[0][0].transAxes
+    )
+    axes[0][1].text(
+        0.5, 1.25, "Ground Truth", fontsize=13, fontweight="bold", ha="center", transform=axes[0][1].transAxes
+    )
 
     # Shared horizontal colorbar
-    cbar = fig.colorbar(mapable, ax=[ax for row in axes for ax in row],
-                        orientation="horizontal", fraction=0.04, pad=0.08, aspect=25)
+    cbar = fig.colorbar(
+        mapable, ax=[ax for row in axes for ax in row], orientation="horizontal", fraction=0.04, pad=0.08, aspect=25
+    )
     cbar.ax.set_xlabel(label_bar, labelpad=10, fontsize=12)
 
     fig.suptitle(title, fontsize=16, fontweight="bold", y=1.05)
@@ -140,21 +167,28 @@ def plot_samples_and_ground_truth(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Compare predicted vs. ground truth CO₂ samples.")
-    parser.add_argument("--samples_path", type=str, required=True,
-                        help="Path to .zarr or .nc file containing trajectory predictions.")
-    parser.add_argument("--data_path", type=str, required=True,
-                        help="Path to CarbonTracker data directory.")
-    parser.add_argument("--out_dir", type=str, required=True,
-                        help="Output directory for saved plots.")
-    parser.add_argument("--projections", nargs="*", default=["Robinson"],
-                        help=f"List of projections. Available: {', '.join(PROJECTION_MAP.keys())}")
+    parser.add_argument(
+        "--samples_path", type=str, required=True, help="Path to .zarr or .nc file containing trajectory predictions."
+    )
+    parser.add_argument("--data_path", type=str, required=True, help="Path to CarbonTracker data directory.")
+    parser.add_argument("--out_dir", type=str, required=True, help="Output directory for saved plots.")
+    parser.add_argument(
+        "--projections",
+        nargs="*",
+        default=["Robinson"],
+        help=f"List of projections. Available: {', '.join(PROJECTION_MAP.keys())}",
+    )
     parser.add_argument("--grid", action="store_true", help="Draw gridlines on maps.")
     parser.add_argument("--n_samples", type=int, default=2, help="Number of samples to compare.")
     parser.add_argument("--level_idx", type=int, default=None, help="Vertical level index to plot.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for sample selection.")
-    parser.add_argument("--use_selected", action="store_true", help="Use the full cmap_selected list instead of default_cmap.")
+    parser.add_argument(
+        "--use_selected", action="store_true", help="Use the full cmap_selected list instead of default_cmap."
+    )
     parser.add_argument("--use_ipcc", action="store_true", help="Use IPCC colormaps instead of default or selected.")
-    parser.add_argument("--bias_hidden", action="store_true", help="Use min-max normalization instead of bias-variance normalization.")
+    parser.add_argument(
+        "--bias_hidden", action="store_true", help="Use min-max normalization instead of bias-variance normalization."
+    )
     args = parser.parse_args()
 
     # Load predictions and ground truth
@@ -164,7 +198,7 @@ if __name__ == "__main__":
 
     # Colormap selection
     cmaps = get_cmap_list(args.use_ipcc, args.use_selected)
-    cmaps = cmaps[:args.n_samples]
+    cmaps = cmaps[: args.n_samples]
 
     projections = parse_projections(args.projections)
 

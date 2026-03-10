@@ -1,8 +1,8 @@
 """Prepare MIP OCO-2 dataset: download, filter, regrid, write, stats."""
 
-from pathlib import Path
-import urllib.request
 import tarfile
+import urllib.request
+from pathlib import Path
 
 import dask
 import numpy as np
@@ -33,15 +33,9 @@ def download_data(save_dir: str):
     save_dir.mkdir(parents=True, exist_ok=True)
 
     datasets = {
-        "OCO2MIP_OCO2": [
-            "https://gml.noaa.gov/aftp/user/andy/OCO-2/OCO2_b11.2_10sec_GOOD_r2.nc4"
-        ],
-        "OCO2MIP_OCO3": [
-            "https://gml.noaa.gov/aftp/user/andy/OCO-2/OCO3_b11_10sec_GOOD_r2.nc4"
-        ],
-        "OCO2MIP_TCCON": [
-            "https://data.caltech.edu/records/zr28z-s4y31/files/tccon_timeaverages_R20250609.tgz"
-        ],
+        "OCO2MIP_OCO2": ["https://gml.noaa.gov/aftp/user/andy/OCO-2/OCO2_b11.2_10sec_GOOD_r2.nc4"],
+        "OCO2MIP_OCO3": ["https://gml.noaa.gov/aftp/user/andy/OCO-2/OCO3_b11_10sec_GOOD_r2.nc4"],
+        "OCO2MIP_TCCON": ["https://data.caltech.edu/records/zr28z-s4y31/files/tccon_timeaverages_R20250609.tgz"],
         # Uncomment and fill when access is granted
         # "ObsPack": [
         #     "<YOUR_PRIVATE_OBSPACK_URL>"
@@ -116,9 +110,13 @@ def filter_mip_oco2(save_dir: str) -> xr.Dataset:
     ds_filtered = ds.where(flag == 1, drop=True)
 
     drop_vars = [
-        "date", "assimilate_flag", "data_type",
-        "xco2_quality_flag", "operation_mode",
-        "land_water_indicator", "surface_type"
+        "date",
+        "assimilate_flag",
+        "data_type",
+        "xco2_quality_flag",
+        "operation_mode",
+        "land_water_indicator",
+        "surface_type",
     ]
     ds_filtered = ds_filtered.drop_vars([v for v in drop_vars if v in ds_filtered])
 
@@ -130,7 +128,7 @@ def filter_mip_oco2(save_dir: str) -> xr.Dataset:
 
 def reconstruct_pressure_levels(ds: xr.Dataset) -> xr.Dataset:
     """
-    Reconstructs vertical pressure levels for each OCO-2 sounding 
+    Reconstructs vertical pressure levels for each OCO-2 sounding
     using sigma_levels * psurf.
 
     Returns
@@ -146,7 +144,7 @@ def reconstruct_pressure_levels(ds: xr.Dataset) -> xr.Dataset:
     ds["pressure_levels"] = p_levels
     ds["pressure_levels"].attrs = {
         "units": "hPa",
-        "long_name": "Pressure levels reconstructed from sigma_levels * psurf"
+        "long_name": "Pressure levels reconstructed from sigma_levels * psurf",
     }
     return ds
 
@@ -162,7 +160,9 @@ def _parse_freq(freq: str) -> np.timedelta64:
     return np.timedelta64(num, unit)
 
 
-def _aligned_time_bins(t_min: np.datetime64, t_max: np.datetime64, delta_t: np.timedelta64) -> tuple[np.ndarray, np.ndarray]:
+def _aligned_time_bins(
+    t_min: np.datetime64, t_max: np.datetime64, delta_t: np.timedelta64
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Align center datetimes to regular multiples of delta_t (e.g. 3h, 6h)
     and return bin edges + labels.
@@ -177,15 +177,10 @@ def _aligned_time_bins(t_min: np.datetime64, t_max: np.datetime64, delta_t: np.t
     t_min_center = (t_min_int // step_int + 1) * step_int
     t_max_center = (t_max_int // step_int + 1) * step_int
 
-    time_labels = np.arange(
-        np.datetime64(t_min_center, unit),
-        np.datetime64(t_max_center, unit),
-        delta_t
-    )
+    time_labels = np.arange(np.datetime64(t_min_center, unit), np.datetime64(t_max_center, unit), delta_t)
 
     half_step = delta_t / 2
-    time_bins = np.concatenate(([time_labels[0] - half_step],
-                                time_labels + half_step))
+    time_bins = np.concatenate(([time_labels[0] - half_step], time_labels + half_step))
 
     time_bins = time_bins.astype("datetime64[ns]")
     time_labels = time_labels.astype("datetime64[ns]")
@@ -194,16 +189,12 @@ def _aligned_time_bins(t_min: np.datetime64, t_max: np.datetime64, delta_t: np.t
 
 def _align_spatial_bins(centers: np.ndarray) -> np.ndarray:
     step = centers[1] - centers[0]
-    edges = np.concatenate(([centers[0] - step/2],
-                            centers + step/2))
+    edges = np.concatenate(([centers[0] - step / 2], centers + step / 2))
     return edges
 
 
 def regrid_temporal(
-    ds: xr.Dataset,
-    variables: list[str] | None = None,
-    freq: str | None = "3h",
-    weights: np.ndarray | None = None
+    ds: xr.Dataset, variables: list[str] | None = None, freq: str | None = "3h", weights: np.ndarray | None = None
 ) -> xr.Dataset:
     """
     Temporally regrid OCO-2 soundings into regular time bins (default 3-hourly).
@@ -213,7 +204,7 @@ def regrid_temporal(
     ds : xr.Dataset
         Input dataset containing 'time' and the specified variables.
     variables : list[str] | None, optional
-        List of variable names to regrid. If None, all numeric variables 
+        List of variable names to regrid. If None, all numeric variables
         containing 'sounding_id' are included.
     freq : str | None, optional
         Target frequency for regridding (default "3h").
@@ -228,8 +219,20 @@ def regrid_temporal(
     # Determine which variables to regrid
     if variables is None:
         variables = [
-            var for var in ds.data_vars
-            if "sounding_id" in ds[var].dims and var not in ["time", "date", "assimilate_flag", "data_type", "xco2_quality_flag", "operation_mode", "land_water_indicator", "surface_type"]
+            var
+            for var in ds.data_vars
+            if "sounding_id" in ds[var].dims
+            and var
+            not in [
+                "time",
+                "date",
+                "assimilate_flag",
+                "data_type",
+                "xco2_quality_flag",
+                "operation_mode",
+                "land_water_indicator",
+                "surface_type",
+            ]
         ]
 
     # Compute time bin edges and labels
@@ -273,21 +276,22 @@ def regrid_temporal(
 
     ds_temporal = xr.merge(out_vars.values()).sortby("time")
 
-    ds_temporal.attrs.update({
-        "title": f"OCO-2 regridded to {freq}",
-        "temporal_frequency": freq,
-        "time_method": "mean" if weights is None else "weighted mean",
-        "time_range": f"{str(t_min)} to {str(t_max)}",
-        "source": "NOAA GML / Caltech MIP OCO-2 products",
-    })
+    ds_temporal.attrs.update(
+        {
+            "title": f"OCO-2 regridded to {freq}",
+            "temporal_frequency": freq,
+            "time_method": "mean" if weights is None else "weighted mean",
+            "time_range": f"{str(t_min)} to {str(t_max)}",
+            "source": "NOAA GML / Caltech MIP OCO-2 products",
+        }
+    )
 
     return ds_temporal
 
 
-def regrid_spatial(ds: xr.Dataset,
-                   variables: list[str] | None = None,
-                   gridname: str = "latlon2x3",
-                   weights: np.ndarray | None = None) -> xr.Dataset:
+def regrid_spatial(
+    ds: xr.Dataset, variables: list[str] | None = None, gridname: str = "latlon2x3", weights: np.ndarray | None = None
+) -> xr.Dataset:
     """
     Spatially regrid OCO-2 soundings to a regular lat-lon grid.
 
@@ -309,8 +313,22 @@ def regrid_spatial(ds: xr.Dataset,
     """
     if variables is None:
         variables = [
-            var for var in ds.data_vars
-            if "sounding_id" in ds[var].dims and var not in ["lat", "lon", "time", "date", "assimilate_flag", "data_type", "xco2_quality_flag", "operation_mode", "land_water_indicator", "surface_type"]
+            var
+            for var in ds.data_vars
+            if "sounding_id" in ds[var].dims
+            and var
+            not in [
+                "lat",
+                "lon",
+                "time",
+                "date",
+                "assimilate_flag",
+                "data_type",
+                "xco2_quality_flag",
+                "operation_mode",
+                "land_water_indicator",
+                "surface_type",
+            ]
         ]
 
     coords = LATLON_PROTOTYPE_COORDS[gridname]
@@ -332,59 +350,51 @@ def regrid_spatial(ds: xr.Dataset,
             regridded_levels = []
             for lev in da.level:
                 values = da.sel(level=lev)
-                tmp_ds = xr.Dataset({
-                    "lat": (("obs",), ds["lat"].values),
-                    "lon": (("obs",), ds["lon"].values),
-                    var: (("obs",), values.values)
-                })
+                tmp_ds = xr.Dataset(
+                    {
+                        "lat": (("obs",), ds["lat"].values),
+                        "lon": (("obs",), ds["lon"].values),
+                        var: (("obs",), values.values),
+                    }
+                )
                 if weights is not None:
                     tmp_ds["weights"] = (("obs",), weights)
 
                 if weights is None:
                     out = tmp_ds.groupby(lat=lat_grouper, lon=lon_grouper).mean()[var]
                 else:
-                    weighted_sum = (tmp_ds[var] * tmp_ds["weights"]).groupby(
-                        lat=lat_grouper, lon=lon_grouper
-                    ).sum()
-                    sum_weights = tmp_ds["weights"].groupby(
-                        lat=lat_grouper, lon=lon_grouper
-                    ).sum()
+                    weighted_sum = (tmp_ds[var] * tmp_ds["weights"]).groupby(lat=lat_grouper, lon=lon_grouper).sum()
+                    sum_weights = tmp_ds["weights"].groupby(lat=lat_grouper, lon=lon_grouper).sum()
                     out = weighted_sum / sum_weights
 
                 out = out.expand_dims("level")
                 out = out.rename({"lat_bins": "lat", "lon_bins": "lon"})
                 out = out.assign_coords(
                     level=[lev],
-                    lat=[(i.left + i.right)/2 for i in out["lat"].values],
-                    lon=[(i.left + i.right)/2 for i in out["lon"].values],
+                    lat=[(i.left + i.right) / 2 for i in out["lat"].values],
+                    lon=[(i.left + i.right) / 2 for i in out["lon"].values],
                 )
                 regridded_levels.append(out)
 
             out_vars[var] = xr.concat(regridded_levels, dim="level")
         else:
-            tmp_ds = xr.Dataset({
-                "lat": (("obs",), ds["lat"].values),
-                "lon": (("obs",), ds["lon"].values),
-                var: (("obs",), da.values)
-            })
+            tmp_ds = xr.Dataset(
+                {"lat": (("obs",), ds["lat"].values), "lon": (("obs",), ds["lon"].values), var: (("obs",), da.values)}
+            )
             if weights is not None:
                 tmp_ds["weights"] = (("obs",), weights)
 
             if weights is None:
                 out = tmp_ds.groupby(lat=lat_grouper, lon=lon_grouper).mean()[var]
             else:
-                weighted_sum = (tmp_ds[var] * tmp_ds["weights"]).groupby(
-                    lat=lat_grouper, lon=lon_grouper
-                ).sum()
-                sum_weights = tmp_ds["weights"].groupby(
-                    lat=lat_grouper, lon=lon_grouper
-                ).sum()
+                weighted_sum = (tmp_ds[var] * tmp_ds["weights"]).groupby(lat=lat_grouper, lon=lon_grouper).sum()
+                sum_weights = tmp_ds["weights"].groupby(lat=lat_grouper, lon=lon_grouper).sum()
                 out = weighted_sum / sum_weights
 
             out = out.rename({"lat_bins": "lat", "lon_bins": "lon"})
             out = out.assign_coords(
-                lat=[(i.left + i.right)/2 for i in out["lat"].values],
-                lon=[(i.left + i.right)/2 for i in out["lon"].values],
+                lat=[(i.left + i.right) / 2 for i in out["lat"].values],
+                lon=[(i.left + i.right) / 2 for i in out["lon"].values],
             )
             out_vars[var] = out
 
@@ -392,12 +402,14 @@ def regrid_spatial(ds: xr.Dataset,
     # ds_spatial = ds_spatial.assign_coords(lon=((ds_spatial["lon"] + 180) % 360) - 180)
     # ds_spatial = ds_spatial.sortby("lon")
 
-    ds_spatial.attrs.update({
-        "title": f"OCO-2 regridded to {gridname}",
-        "grid": gridname,
-        "grid_method": "mean" if weights is None else "weighted mean",
-        "source": "NOAA GML / Caltech MIP OCO-2 products",
-    })
+    ds_spatial.attrs.update(
+        {
+            "title": f"OCO-2 regridded to {gridname}",
+            "grid": gridname,
+            "grid_method": "mean" if weights is None else "weighted mean",
+            "source": "NOAA GML / Caltech MIP OCO-2 products",
+        }
+    )
 
     return ds_spatial
 
@@ -422,12 +434,8 @@ def _agg_1d(
         out = grouped[var]
     else:
         tmp["weights"] = weights
-        num = (tmp[var] * tmp["weights"]).groupby(
-            time=time_grouper, lat=lat_grouper, lon=lon_grouper
-        ).sum()
-        den = tmp["weights"].groupby(
-            time=time_grouper, lat=lat_grouper, lon=lon_grouper
-        ).sum()
+        num = (tmp[var] * tmp["weights"]).groupby(time=time_grouper, lat=lat_grouper, lon=lon_grouper).sum()
+        den = tmp["weights"].groupby(time=time_grouper, lat=lat_grouper, lon=lon_grouper).sum()
         out = num / den
 
     out = out.chunk({"time_bins": 1500, "lat_bins": -1, "lon_bins": -1})
@@ -470,16 +478,19 @@ def regrid_spatiotemporal(
           - for level vars: (time, level, lat, lon)
     """
     exclude_vars = [
-        "lat", "lon", "time", "date",
-        "assimilate_flag", "xco2_quality_flag",
-        "data_type", "operation_mode",
-        "land_water_indicator", "surface_type"
+        "lat",
+        "lon",
+        "time",
+        "date",
+        "assimilate_flag",
+        "xco2_quality_flag",
+        "data_type",
+        "operation_mode",
+        "land_water_indicator",
+        "surface_type",
     ]  # First row are aggregation coords. Rest are categorical.
     if variables is None:
-        variables = [
-            var for var in ds.data_vars
-            if "sounding_id" in ds[var].dims and var not in exclude_vars
-        ]
+        variables = [var for var in ds.data_vars if "sounding_id" in ds[var].dims and var not in exclude_vars]
 
     ds = ds.chunk({"sounding_id": min(ds.sounding_id.size, 64121)})
 
@@ -508,9 +519,9 @@ def regrid_spatiotemporal(
         if "level" in da.dims:
             agg_levels = []
             for lev in da["level"].values:
-                agg = _agg_1d(ds, var, da.sel(level=lev), time_labels,
-                              time_grouper, lat_grouper, lon_grouper,
-                              weights=weights)  # [time, lat, lon]
+                agg = _agg_1d(
+                    ds, var, da.sel(level=lev), time_labels, time_grouper, lat_grouper, lon_grouper, weights=weights
+                )  # [time, lat, lon]
                 agg = agg.expand_dims("level")  # [time, lat, lon, level=1]
                 agg = agg.assign_coords(level=[lev])
                 agg_levels.append(agg)
@@ -519,9 +530,9 @@ def regrid_spatiotemporal(
             stacked.name = var
             out_vars[var] = stacked
         else:
-            agg = _agg_1d(ds, var, da, time_labels,
-                          time_grouper, lat_grouper, lon_grouper,
-                          weights=weights)  # [time, lat, lon]
+            agg = _agg_1d(
+                ds, var, da, time_labels, time_grouper, lat_grouper, lon_grouper, weights=weights
+            )  # [time, lat, lon]
             agg.name = var
             out_vars[var] = agg
 
@@ -549,35 +560,73 @@ def regrid_spatiotemporal(
 
 
 MIP_OCO2_HEIGHT = [
-    0.0984, 52.6136, 105.2272, 156.4836, 210.4544, 256.2101, 312.9672, 370.0722, 420.9087, 472.6453, 512.4202, 578.6387, 625.9344, 663.7776, 740.1443, 770.1723, 841.8174, 884.8869, 945.2906, 997.8886
+    0.0984,
+    52.6136,
+    105.2272,
+    156.4836,
+    210.4544,
+    256.2101,
+    312.9672,
+    370.0722,
+    420.9087,
+    472.6453,
+    512.4202,
+    578.6387,
+    625.9344,
+    663.7776,
+    740.1443,
+    770.1723,
+    841.8174,
+    884.8869,
+    945.2906,
+    997.8886,
 ]  # mean of pressure levels in hPa obtained from "sigmal_levels" * "psurf" where assimilate_flag==1, rounded to 4 significant digits
 
 
 MIP_OCO2_HEIGHT_STD = [
-    0.0061, 3.2340, 6.4680, 9.6270, 12.9360, 16.5816, 19.2540, 22.9676, 25.8719, 29.0186, 33.1632, 35.5519, 38.5080, 43.7764, 45.9353, 49.3767, 51.7438, 54.5112, 58.0373, 61.2261
+    0.0061,
+    3.2340,
+    6.4680,
+    9.6270,
+    12.9360,
+    16.5816,
+    19.2540,
+    22.9676,
+    25.8719,
+    29.0186,
+    33.1632,
+    35.5519,
+    38.5080,
+    43.7764,
+    45.9353,
+    49.3767,
+    51.7438,
+    54.5112,
+    58.0373,
+    61.2261,
 ]  # std dev of pressure levels in hPa obtained from "sigmal_levels" * "psurf" where assimilate_flag==1, rounded to 4 significant digits
 
 
 MIP_OCO2_LEVEL_AGG = dict(
     l20=[[i] for i in range(20)],  # native resolution
     l10=[
-        [19],                   # 998 hPa (near surface)
-        [18],                   # 945 (near surface)
-        [17],                   # 885 (upper troposphere)
-        [16],                   # 841 (upper troposphere)
-        [15],                   # 770 (lower troposphere)
-        [14],                   # 740 (lower troposphere)
-        [13, 12, 11, 10, 9, 8], # 663-421 hPa (mid troposphere)
-        [7, 6],                 # 370–312 hPa (mid troposphere)
-        [5, 4, 3],              # 256–156 hPa (mid-upper troposphere)
-        [2, 1, 0],              # 105-0.1 hPa (upper stratosphere)
+        [19],  # 998 hPa (near surface)
+        [18],  # 945 (near surface)
+        [17],  # 885 (upper troposphere)
+        [16],  # 841 (upper troposphere)
+        [15],  # 770 (lower troposphere)
+        [14],  # 740 (lower troposphere)
+        [13, 12, 11, 10, 9, 8],  # 663-421 hPa (mid troposphere)
+        [7, 6],  # 370–312 hPa (mid troposphere)
+        [5, 4, 3],  # 256–156 hPa (mid-upper troposphere)
+        [2, 1, 0],  # 105-0.1 hPa (upper stratosphere)
     ][::-1],  # ordered such that averaging_kernel behaves linearly and somewhat resembles the Carbontracker l10 levels
     l5=[
-        [0, 1, 2, 3, 4],      # upper stratosphere
-        [5, 6, 7, 8],         # upper/mid-troposphere
-        [9, 10, 11, 12],      # mid-troposphere
-        [13, 14, 15],         # lower-mid troposphere
-        [16, 17, 18, 19],     # near-surface
+        [0, 1, 2, 3, 4],  # upper stratosphere
+        [5, 6, 7, 8],  # upper/mid-troposphere
+        [9, 10, 11, 12],  # mid-troposphere
+        [13, 14, 15],  # lower-mid troposphere
+        [16, 17, 18, 19],  # near-surface
     ][::-1],
     l3=[[19], list(range(10, 19)), list(range(9))][::-1],  # ordered such that averaging_kernel behaves linearly
     l1=[list(range(20))],
@@ -586,19 +635,25 @@ MIP_OCO2_LEVEL_AGG = dict(
 
 VERTICAL_LAYERS_OCO2MIP_COORDS = {
     "l20": dict(level=MIP_OCO2_HEIGHT),
-    "l10": dict(level=[
-        997.8886, 945.2906, 884.8869, 841.8174, 770.1723, 740.1443,
-    ] + [
-        np.mean([MIP_OCO2_HEIGHT[i] for i in group]) for group in MIP_OCO2_LEVEL_AGG["l10"][6:]
-    ]),
-    "l5": dict(level=[
-        np.mean([MIP_OCO2_HEIGHT[i] for i in group]) for group in MIP_OCO2_LEVEL_AGG["l5"]
-    ]),
-    "l3": dict(level=[
-        997.8886,
-        np.mean([MIP_OCO2_HEIGHT[i] for i in range(10, 19)]),
-        np.mean([MIP_OCO2_HEIGHT[i] for i in range(9)]),
-    ]),
+    "l10": dict(
+        level=[
+            997.8886,
+            945.2906,
+            884.8869,
+            841.8174,
+            770.1723,
+            740.1443,
+        ]
+        + [np.mean([MIP_OCO2_HEIGHT[i] for i in group]) for group in MIP_OCO2_LEVEL_AGG["l10"][6:]]
+    ),
+    "l5": dict(level=[np.mean([MIP_OCO2_HEIGHT[i] for i in group]) for group in MIP_OCO2_LEVEL_AGG["l5"]]),
+    "l3": dict(
+        level=[
+            997.8886,
+            np.mean([MIP_OCO2_HEIGHT[i] for i in range(10, 19)]),
+            np.mean([MIP_OCO2_HEIGHT[i] for i in range(9)]),
+        ]
+    ),
     "l1": dict(level=[np.mean(MIP_OCO2_HEIGHT)]),
 }
 
@@ -646,10 +701,7 @@ def vertical_aggregation_oco2(ds: xr.Dataset, levels: list[list[int]]) -> xr.Dat
 
 
 def regrid_mip_oco2(
-        save_dir: str,
-        gridname: str | None = "latlon2x3",
-        vertical_levels: str | None = "l34",
-        freq: str | None = "3h"
+    save_dir: str, gridname: str | None = "latlon2x3", vertical_levels: str | None = "l34", freq: str | None = "3h"
 ) -> xr.Dataset:
     """
     Regrid MIP OCO-2 data to the specified grid and vertical levels.
@@ -716,10 +768,7 @@ def regrid_mip_oco2(
     )
 
     print(f"Aggregating vertically OCO-2 to {vertical_levels}")
-    ds_full_regrid = vertical_aggregation_oco2(
-        ds_spatiotemporal,
-        levels=MIP_OCO2_LEVEL_AGG[vertical_levels]
-    )
+    ds_full_regrid = vertical_aggregation_oco2(ds_spatiotemporal, levels=MIP_OCO2_LEVEL_AGG[vertical_levels])
     ds_full_regrid["level"] = VERTICAL_LAYERS_OCO2MIP_COORDS[vertical_levels]["level"]
 
     # --- Write to disk ---
@@ -738,17 +787,12 @@ def regrid_mip_oco2(
 
 
 def write_mip_oco2(
-        save_dir: str,
-        gridname: str | None = "latlon2x3",
-        vertical_levels: str | None = "l34",
-        freq: str | None = "3h"
+    save_dir: str, gridname: str | None = "latlon2x3", vertical_levels: str | None = "l34", freq: str | None = "3h"
 ) -> None:
     """Separate OCO-2 regridded data into train/val/test splits and write to disk."""
     save_dir = Path(save_dir)
     oco2_dir = save_dir / "OCO2MIP_OCO2"
-    ds = xr.open_zarr(
-        oco2_dir / "OCO2_regrid" / f"OCO2_regrid_{gridname}_{vertical_levels}_{freq}.zarr"
-    )
+    ds = xr.open_zarr(oco2_dir / "OCO2_regrid" / f"OCO2_regrid_{gridname}_{vertical_levels}_{freq}.zarr")
 
     for split, timeslice in zip(
         ["val", "test", "train"],
@@ -771,10 +815,7 @@ def write_mip_oco2(
 
 
 def stats_mip_oco2(
-        save_dir: str, 
-        gridname: str | None = "latlon2x3", 
-        vertical_levels: str | None = "l34", 
-        freq: str | None = "3h"
+    save_dir: str, gridname: str | None = "latlon2x3", vertical_levels: str | None = "l34", freq: str | None = "3h"
 ) -> None:
     """
     Compute and save statistics for MIP OCO-2 data (train/val/test).
@@ -786,9 +827,7 @@ def stats_mip_oco2(
     val_dir = oco2_dir / "val"
     test_dir = oco2_dir / "test"
 
-    ds = xr.open_zarr(
-        train_dir / f"mip_oco2_{gridname}_{vertical_levels}_{freq}.zarr"
-    )
+    ds = xr.open_zarr(train_dir / f"mip_oco2_{gridname}_{vertical_levels}_{freq}.zarr")
 
     ds_stats = compute_stats(ds)
 
@@ -812,29 +851,10 @@ if __name__ == "__main__":
 
     download_data(args.save_dir)
 
-
     filter_mip_oco2(args.save_dir)
 
+    regrid_mip_oco2(args.save_dir, gridname=args.gridname, vertical_levels=args.vertical_levels, freq=args.freq)
 
-    regrid_mip_oco2(
-        args.save_dir,
-        gridname=args.gridname,
-        vertical_levels=args.vertical_levels,
-        freq=args.freq
-    )
+    write_mip_oco2(args.save_dir, gridname=args.gridname, vertical_levels=args.vertical_levels, freq=args.freq)
 
-
-    write_mip_oco2(
-        args.save_dir,
-        gridname=args.gridname,
-        vertical_levels=args.vertical_levels,
-        freq=args.freq
-    )
-
-
-    stats_mip_oco2(
-        args.save_dir,
-        gridname=args.gridname,
-        vertical_levels=args.vertical_levels,
-        freq=args.freq
-    )
+    stats_mip_oco2(args.save_dir, gridname=args.gridname, vertical_levels=args.vertical_levels, freq=args.freq)

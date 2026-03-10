@@ -20,7 +20,7 @@ import scipy
 import trimesh
 import xarray as xr
 
-from neural_transport.datasets.grids import CARBOSCOPE_79_LONLAT, OBSPACK_287_LONLAT, LATLON_PROTOTYPE_COORDS
+from neural_transport.datasets.grids import CARBOSCOPE_79_LONLAT, LATLON_PROTOTYPE_COORDS, OBSPACK_287_LONLAT
 
 
 def xyz_to_latlon(x, y, z):
@@ -90,9 +90,7 @@ def z_rotation(vector, theta):
 def pos_in_local_grid(lat_receiver, lon_receiver, lat_sender, lon_sender):
     """Returns the position of the sender in a relative local grid of the receiver"""
     pos = y_rotation(
-        z_rotation(
-            np.stack(latlon_to_xyz(90 - lat_sender, lon_sender), axis=-1), -lon_receiver
-        ),
+        z_rotation(np.stack(latlon_to_xyz(90 - lat_sender, lon_sender), axis=-1), -lon_receiver),
         90 - lat_receiver,
     )
     return pos[:, 0], pos[:, 1], pos[:, 2]
@@ -110,10 +108,7 @@ def great_circle_distance(lat_receiver, lon_receiver, lat_sender, lon_sender, ra
     cos_delta_lng, sin_delta_lng = np.cos(delta_lng), np.sin(delta_lng)
 
     d = np.arctan2(
-        np.sqrt(
-            (cos_lat2 * sin_delta_lng) ** 2
-            + (cos_lat1 * sin_lat2 - sin_lat1 * cos_lat2 * cos_delta_lng) ** 2
-        ),
+        np.sqrt((cos_lat2 * sin_delta_lng) ** 2 + (cos_lat1 * sin_lat2 - sin_lat1 * cos_lat2 * cos_delta_lng) ** 2),
         sin_lat1 * sin_lat2 + cos_lat1 * cos_lat2 * cos_delta_lng,
     )
 
@@ -143,11 +138,7 @@ class ICONGrid:
         """
         self.min_level = min_level
         self.max_level = max_level
-        self.resolved_locations = (
-            np.array(sorted(resolved_locations))
-            if resolved_locations is not None
-            else None
-        )
+        self.resolved_locations = np.array(sorted(resolved_locations)) if resolved_locations is not None else None
         self.flexible_grid = resolved_locations is not None
 
         self.hex_vertices = []
@@ -167,12 +158,8 @@ class ICONGrid:
 
     def to_netcdf(self, path=None):
         """Writes the triangular grid to a netcdf file that can be used by CDO for regridding"""
-        clon_vertices = np.array(
-            [[self.hex_vertices[i][0] for i in triangle] for triangle in self.tri_faces]
-        )
-        clat_vertices = np.array(
-            [[self.hex_vertices[i][1] for i in triangle] for triangle in self.tri_faces]
-        )
+        clon_vertices = np.array([[self.hex_vertices[i][0] for i in triangle] for triangle in self.tri_faces])
+        clat_vertices = np.array([[self.hex_vertices[i][1] for i in triangle] for triangle in self.tri_faces])
 
         cell_area = self._compute_tri_area()
 
@@ -230,9 +217,7 @@ class ICONGrid:
 
         node_features = np.stack([cell_area, cos_lat, cos_lon, sin_lon], axis=-1)
 
-        edge_idxs = self._faces_to_edges(
-            self.tri_faces if hex_not_tri else self.hex_faces
-        )
+        edge_idxs = self._faces_to_edges(self.tri_faces if hex_not_tri else self.hex_faces)
 
         edge_length = great_circle_distance(
             nodes[edge_idxs[:, 1], 1],
@@ -242,17 +227,13 @@ class ICONGrid:
             radius=1 / np.pi,
         )
 
-        dual_edge_length = self._compute_dual_edge_length(
-            edge_idxs, hex_not_tri=hex_not_tri
-        )
+        dual_edge_length = self._compute_dual_edge_length(edge_idxs, hex_not_tri=hex_not_tri)
 
         # dual_edge_idxs = self._faces_to_edges(self.hex_faces)
 
         x_rel, y_rel, z_rel = self._compute_rel_pos(nodes, edge_idxs)
 
-        edge_features = np.stack(
-            [edge_length, dual_edge_length, x_rel, y_rel, z_rel], axis=-1
-        )
+        edge_features = np.stack([edge_length, dual_edge_length, x_rel, y_rel, z_rel], axis=-1)
 
         ds = xr.Dataset(
             {
@@ -291,16 +272,10 @@ class ICONGrid:
             grid_latitude = grid.lat.values
             grid_longitude = grid.lon.values
 
-        grid_positions = _grid_lat_lon_to_coordinates(
-            grid_latitude, grid_longitude
-        ).reshape([-1, 3])
+        grid_positions = _grid_lat_lon_to_coordinates(grid_latitude, grid_longitude).reshape([-1, 3])
 
-        mesh_latitude = np.array(
-            self.hex_vertices if hex_not_tri else self.tri_vertices
-        )[:, 1]
-        mesh_longitude = np.array(
-            self.hex_vertices if hex_not_tri else self.tri_vertices
-        )[:, 0]
+        mesh_latitude = np.array(self.hex_vertices if hex_not_tri else self.tri_vertices)[:, 1]
+        mesh_longitude = np.array(self.hex_vertices if hex_not_tri else self.tri_vertices)[:, 0]
 
         grid_edge_indices, mesh_edge_indices = radius_query_indices(
             grid_positions=grid_positions,
@@ -310,9 +285,7 @@ class ICONGrid:
         )
 
         grid_nodes = np.stack(
-            xyz_to_latlon(
-                grid_positions[:, 0], grid_positions[:, 1], grid_positions[:, 2]
-            ),
+            xyz_to_latlon(grid_positions[:, 0], grid_positions[:, 1], grid_positions[:, 2]),
             axis=-1,
         )
 
@@ -332,9 +305,7 @@ class ICONGrid:
             * grid_lon_res
         )
 
-        grid_node_features = np.stack(
-            [grid_cell_area, grid_cos_lat, grid_cos_lon, grid_sin_lon], axis=-1
-        )
+        grid_node_features = np.stack([grid_cell_area, grid_cos_lat, grid_cos_lon, grid_sin_lon], axis=-1)
 
         edge_idxs = np.stack([grid_edge_indices, mesh_edge_indices], axis=-1)
 
@@ -348,9 +319,7 @@ class ICONGrid:
             radius=1 / np.pi,
         )
 
-        x_rel, y_rel, z_rel = self._compute_rel_pos(
-            grid_nodes, edge_idxs, receiver_nodes=mesh_nodes
-        )
+        x_rel, y_rel, z_rel = self._compute_rel_pos(grid_nodes, edge_idxs, receiver_nodes=mesh_nodes)
 
         edge_features = np.stack([edge_length, x_rel, y_rel, z_rel], axis=-1)
 
@@ -397,18 +366,12 @@ class ICONGrid:
             grid_latitude = grid.lat.values
             grid_longitude = grid.lon.values
 
-        grid_positions = _grid_lat_lon_to_coordinates(
-            grid_latitude, grid_longitude
-        ).reshape([-1, 3])
+        grid_positions = _grid_lat_lon_to_coordinates(grid_latitude, grid_longitude).reshape([-1, 3])
 
-        grid_edge_indices, mesh_edge_indices = in_mesh_triangle_indices(
-            grid_positions=grid_positions, mesh=self
-        )
+        grid_edge_indices, mesh_edge_indices = in_mesh_triangle_indices(grid_positions=grid_positions, mesh=self)
 
         grid_nodes = np.stack(
-            xyz_to_latlon(
-                grid_positions[:, 0], grid_positions[:, 1], grid_positions[:, 2]
-            ),
+            xyz_to_latlon(grid_positions[:, 0], grid_positions[:, 1], grid_positions[:, 2]),
             axis=-1,
         )
 
@@ -428,9 +391,7 @@ class ICONGrid:
             * grid_lon_res
         )
 
-        grid_node_features = np.stack(
-            [grid_cell_area, grid_cos_lat, grid_cos_lon, grid_sin_lon], axis=-1
-        )
+        grid_node_features = np.stack([grid_cell_area, grid_cos_lat, grid_cos_lon, grid_sin_lon], axis=-1)
 
         edge_idxs = np.stack([mesh_edge_indices, grid_edge_indices], axis=-1)
 
@@ -444,9 +405,7 @@ class ICONGrid:
             radius=1 / np.pi,
         )
 
-        x_rel, y_rel, z_rel = self._compute_rel_pos(
-            mesh_nodes, edge_idxs, receiver_nodes=grid_nodes
-        )
+        x_rel, y_rel, z_rel = self._compute_rel_pos(mesh_nodes, edge_idxs, receiver_nodes=grid_nodes)
 
         edge_features = np.stack([edge_length, x_rel, y_rel, z_rel], axis=-1)
 
@@ -488,9 +447,7 @@ class ICONGrid:
         for i, face in enumerate(self.hex_faces):
             area = 0
             for f1, f2 in zip(face, face[1:] + face[:1]):
-                area += self._compute_triangle_area(
-                    self.hex_vertices[i], self.tri_vertices[f1], self.tri_vertices[f2]
-                )
+                area += self._compute_triangle_area(self.hex_vertices[i], self.tri_vertices[f1], self.tri_vertices[f2])
 
             hex_areas.append(area)
 
@@ -500,9 +457,7 @@ class ICONGrid:
         """Computes the area of each triangle in the grid"""
         tri_areas = []
         for face in self.tri_faces:
-            tri_areas.append(
-                self._compute_triangle_area(*[self.hex_vertices[i] for i in face])
-            )
+            tri_areas.append(self._compute_triangle_area(*[self.hex_vertices[i] for i in face]))
 
         return np.array(tri_areas)
 
@@ -546,16 +501,8 @@ class ICONGrid:
                         else np.array(self.hex_vertices)[candidates]
                     )
 
-                    c1 = (
-                        self.hex_vertices[edge[0]]
-                        if hex_not_tri
-                        else self.tri_vertices[edge[0]]
-                    )
-                    c2 = (
-                        self.hex_vertices[edge[1]]
-                        if hex_not_tri
-                        else self.tri_vertices[edge[1]]
-                    )
+                    c1 = self.hex_vertices[edge[0]] if hex_not_tri else self.tri_vertices[edge[0]]
+                    c2 = self.hex_vertices[edge[1]] if hex_not_tri else self.tri_vertices[edge[1]]
 
                     dist1 = great_circle_distance(v[:, 1], v[:, 0], c1[1], c1[0])
                     dist2 = great_circle_distance(v[:, 1], v[:, 0], c2[1], c2[0])
@@ -571,16 +518,8 @@ class ICONGrid:
                         else np.array(self.hex_vertices)[candidates]
                     )
 
-                    c1 = (
-                        self.hex_vertices[edge[0]]
-                        if hex_not_tri
-                        else self.tri_vertices[edge[0]]
-                    )
-                    c2 = (
-                        self.hex_vertices[edge[1]]
-                        if hex_not_tri
-                        else self.tri_vertices[edge[1]]
-                    )
+                    c1 = self.hex_vertices[edge[0]] if hex_not_tri else self.tri_vertices[edge[0]]
+                    c2 = self.hex_vertices[edge[1]] if hex_not_tri else self.tri_vertices[edge[1]]
 
                     dist1 = great_circle_distance(v[:, 1], v[:, 0], c1[1], c1[0])
                     dist2 = great_circle_distance(v[:, 1], v[:, 0], c2[1], c2[0])
@@ -591,20 +530,10 @@ class ICONGrid:
 
                 dual_edge = [i1, i2]
 
-            v1 = (
-                self.tri_vertices[dual_edge[0]]
-                if hex_not_tri
-                else self.hex_vertices[dual_edge[0]]
-            )
-            v2 = (
-                self.tri_vertices[dual_edge[1]]
-                if hex_not_tri
-                else self.hex_vertices[dual_edge[1]]
-            )
+            v1 = self.tri_vertices[dual_edge[0]] if hex_not_tri else self.hex_vertices[dual_edge[0]]
+            v2 = self.tri_vertices[dual_edge[1]] if hex_not_tri else self.hex_vertices[dual_edge[1]]
 
-            dual_edge_length.append(
-                great_circle_distance(v1[1], v1[0], v2[1], v2[0], radius=1 / np.pi)
-            )
+            dual_edge_length.append(great_circle_distance(v1[1], v1[0], v2[1], v2[0], radius=1 / np.pi))
 
         return np.array(dual_edge_length)
 
@@ -625,11 +554,7 @@ class ICONGrid:
         #     z_rel.append(z)
 
         v1 = nodes[edge_idxs[:, 0]]
-        v2 = (
-            nodes[edge_idxs[:, 1]]
-            if receiver_nodes is None
-            else receiver_nodes[edge_idxs[:, 1]]
-        )
+        v2 = nodes[edge_idxs[:, 1]] if receiver_nodes is None else receiver_nodes[edge_idxs[:, 1]]
 
         x_rel, y_rel, z_rel = pos_in_local_grid(v2[:, 1], v2[:, 0], v1[:, 1], v1[:, 0])
 
@@ -641,9 +566,7 @@ class ICONGrid:
         self._get_icosahedron()
 
         for l in range(self.max_level):
-            self._refine(
-                refine_only_resolved=(self.flexible_grid and l >= self.min_level)
-            )
+            self._refine(refine_only_resolved=(self.flexible_grid and l >= self.min_level))
 
     def _get_icosahedron(self):
         """Creates the initial icosahedron"""
@@ -709,8 +632,7 @@ class ICONGrid:
         ]
 
         self.tri_vertices = [
-            self._calc_midpoint([self.hex_vertices[i] for i in triangle])
-            for triangle in self.tri_faces
+            self._calc_midpoint([self.hex_vertices[i] for i in triangle]) for triangle in self.tri_faces
         ]
 
         self.hex_faces = [
@@ -798,7 +720,7 @@ class ICONGrid:
         # print(c, self.tri_vertices[i])
         # if not np.isclose(c, self.tri_vertices[i]).all():
         #     print(c, self.tri_vertices[i], i)
-        c = self.tri_vertices[i]
+        c = self.tri_vertices[i]  # noqa: F841
 
         # THEN GET NEW TRI VERTEX IDXS (register)
 
@@ -872,11 +794,7 @@ class ICONGrid:
             left_hex_face = self.hex_faces[i1]
             right_hex_face = self.hex_faces[i2]
 
-            inter_i = [
-                i
-                for i in set(left_hex_face).intersection(set(right_hex_face))
-                if i != ic
-            ][0]
+            inter_i = [i for i in set(left_hex_face).intersection(set(right_hex_face)) if i != ic][0]
 
             self.hex_faces.append([inter_i, ic2, ic, ic1])
 
@@ -942,17 +860,13 @@ class ICONGrid:
 # %%
 
 
-def _grid_lat_lon_to_coordinates(
-    grid_latitude: np.ndarray, grid_longitude: np.ndarray
-) -> np.ndarray:
+def _grid_lat_lon_to_coordinates(grid_latitude: np.ndarray, grid_longitude: np.ndarray) -> np.ndarray:
     """Lat [num_lat] lon [num_lon] to 3d coordinates [num_lat, num_lon, 3]."""
     # Copyright 2023 DeepMind Technologies Limited.
 
     # Convert to spherical coordinates phi and theta defined in the grid.
     # Each [num_latitude_points, num_longitude_points]
-    phi_grid, theta_grid = np.meshgrid(
-        np.deg2rad(grid_longitude), np.deg2rad(90 - grid_latitude)
-    )
+    phi_grid, theta_grid = np.meshgrid(np.deg2rad(grid_longitude), np.deg2rad(90 - grid_latitude))
 
     # [num_latitude_points, num_longitude_points, 3]
     # Note this assumes unit radius, since for now we model the earth as a
@@ -1016,9 +930,7 @@ def radius_query_indices(
     return grid_edge_indices, mesh_edge_indices
 
 
-def in_mesh_triangle_indices(
-    *, grid_positions: np.ndarray, mesh: ICONGrid
-) -> tuple[np.ndarray, np.ndarray]:
+def in_mesh_triangle_indices(*, grid_positions: np.ndarray, mesh: ICONGrid) -> tuple[np.ndarray, np.ndarray]:
     """Returns mesh-grid edge indices for grid points contained in mesh triangles.
 
     Args:
@@ -1044,9 +956,7 @@ def in_mesh_triangle_indices(
     mesh_trimesh = trimesh.Trimesh(vertices=vertices, faces=mesh.tri_faces)
 
     # [num_grid_points] with mesh face indices for each grid point.
-    _, _, query_face_indices = trimesh.proximity.closest_point(
-        mesh_trimesh, grid_positions
-    )
+    _, _, query_face_indices = trimesh.proximity.closest_point(mesh_trimesh, grid_positions)
 
     # [num_grid_points, 3] with mesh node indices for each grid point.
     mesh_edge_indices = np.array(mesh.tri_faces)[query_face_indices]

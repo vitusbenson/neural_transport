@@ -8,8 +8,7 @@ from ecmwfapi import ECMWFService
 from tqdm import tqdm
 from tqdm.contrib.concurrent import process_map
 
-from neural_transport.tools.conversion import massmix_to_density, massmix_to_molemix, M_CH4, M_CO
-
+from neural_transport.tools.conversion import M_CH4, M_CO, massmix_to_density, massmix_to_molemix
 
 CAMS_MODEL_RUNS = [
     {
@@ -124,7 +123,6 @@ months = [
 
 
 def download_data(save_dir):
-
     save_dir = Path(save_dir)
 
     server = ECMWFService("mars")
@@ -132,9 +130,7 @@ def download_data(save_dir):
     for model_run in CAMS_MODEL_RUNS[::-1]:
         start_date, end_date = model_run["date_sel"].split("/")
         expver = model_run["expver"]
-        resolution = model_run["resolution"]
         stream = model_run["stream"]
-        cycle = model_run["IFS cycle"]
 
         print(f"Downloading {expver} {start_date} to {end_date}")
 
@@ -153,9 +149,7 @@ def download_data(save_dir):
         ):
             pbar1.set_postfix({"year": year})
 
-            for month, month_start, month_end in (
-                pbar2 := tqdm(months, position=2, desc="Month", leave=False)
-            ):
+            for month, month_start, month_end in (pbar2 := tqdm(months, position=2, desc="Month", leave=False)):
                 if month == "02" and year in [2004, 2008, 2012, 2016, 2020, 2024]:
                     month_end = "02-29"
 
@@ -176,7 +170,6 @@ def download_data(save_dir):
                 end_day = int(month_end[3:5])
 
                 for day in range(start_day, end_day + 1):
-
                     curr_date = f"{year}-{month}-{day:02}"
 
                     pl_file_path = pl_dir / f"{curr_date}.nc"
@@ -203,7 +196,7 @@ def download_data(save_dir):
                             )
                         except KeyboardInterrupt:
                             return
-                        except:
+                        except Exception:
                             print(f"{expver} {year} {month} pl not working")
 
                     if not sfc_file_path.is_file():
@@ -226,7 +219,7 @@ def download_data(save_dir):
                             )
                         except KeyboardInterrupt:
                             return
-                        except:
+                        except Exception:
                             print(f"{expver} {year} {month} sfc not working")
 
     print("Done!")
@@ -237,65 +230,69 @@ def latlon_to_zarr(save_dir, expver="hueu"):
 
     ds_pl = xr.open_mfdataset(
         (save_dir / "CAMS_CO2_forecast" / "pl" / expver).glob("*.nc"),
-        preprocess=lambda dstemp: dstemp.rename({"time": "step"})
-        .assign_coords({"time": dstemp.time[:1]})
-        .assign_coords({"step": (dstemp.time - dstemp.time[0]).values})
-        .isel(
-            step=[
-                0,
-                2,
-                4,
-                6,
-                8,
-                9,
-                10,
-                11,
-                12,
-                13,
-                14,
-                15,
-                16,
-                17,
-                18,
-                19,
-                20,
-                21,
-                22,
-                23,
-                24,
-            ]
+        preprocess=lambda dstemp: (
+            dstemp.rename({"time": "step"})
+            .assign_coords({"time": dstemp.time[:1]})
+            .assign_coords({"step": (dstemp.time - dstemp.time[0]).values})
+            .isel(
+                step=[
+                    0,
+                    2,
+                    4,
+                    6,
+                    8,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13,
+                    14,
+                    15,
+                    16,
+                    17,
+                    18,
+                    19,
+                    20,
+                    21,
+                    22,
+                    23,
+                    24,
+                ]
+            )
         ),
     )
 
     ds_sfc = xr.open_mfdataset(
         (save_dir / "CAMS_CO2_forecast" / "sfc" / expver).glob("*.nc"),
-        preprocess=lambda dstemp: dstemp.rename({"time": "step"})
-        .assign_coords({"time": dstemp.time[:1]})
-        .assign_coords({"step": (dstemp.time - dstemp.time[0]).values})
-        .isel(
-            step=[
-                0,
-                2,
-                4,
-                6,
-                8,
-                9,
-                10,
-                11,
-                12,
-                13,
-                14,
-                15,
-                16,
-                17,
-                18,
-                19,
-                20,
-                21,
-                22,
-                23,
-                24,
-            ]
+        preprocess=lambda dstemp: (
+            dstemp.rename({"time": "step"})
+            .assign_coords({"time": dstemp.time[:1]})
+            .assign_coords({"step": (dstemp.time - dstemp.time[0]).values})
+            .isel(
+                step=[
+                    0,
+                    2,
+                    4,
+                    6,
+                    8,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13,
+                    14,
+                    15,
+                    16,
+                    17,
+                    18,
+                    19,
+                    20,
+                    21,
+                    22,
+                    23,
+                    24,
+                ]
+            )
         ),
     ).ffill("step")
 
@@ -309,20 +306,8 @@ def latlon_to_zarr(save_dir, expver="hueu"):
                 np.pi
                 * 6.375e6**2
                 * (
-                    np.sin(
-                        np.radians(
-                            np.concatenate(
-                                [[-90], np.linspace(-89.5, 89.5, 180), [90]]
-                            )[1:]
-                        )
-                    )
-                    - np.sin(
-                        np.radians(
-                            np.concatenate(
-                                [[-90], np.linspace(-89.5, 89.5, 180), [90]]
-                            )[:-1]
-                        )
-                    )
+                    np.sin(np.radians(np.concatenate([[-90], np.linspace(-89.5, 89.5, 180), [90]])[1:]))
+                    - np.sin(np.radians(np.concatenate([[-90], np.linspace(-89.5, 89.5, 180), [90]])[:-1]))
                 )
                 * 1
                 / 180
@@ -333,23 +318,18 @@ def latlon_to_zarr(save_dir, expver="hueu"):
         dims=("latitude", "longitude"),
     )
     T_celsius = T - 273.15
-    Psat = 0.61121 * np.exp(
-        (18.678 - T_celsius / 234.5) * (T_celsius / (257.14 + T_celsius))
-    )
+    Psat = 0.61121 * np.exp((18.678 - T_celsius / 234.5) * (T_celsius / (257.14 + T_celsius)))
 
     Pv = RH / 100 * Psat
     Pd = gph.level - 10 * Pv
     rho = 100 * Pd / (287.050676 * T)
     midpoints = (
-        gph.isel(level=slice(-1)).assign_coords(
-            {"level": gph.level.isel(level=slice(1, None))}
-        )
+        gph.isel(level=slice(-1)).assign_coords({"level": gph.level.isel(level=slice(1, None))})
         + gph.isel(level=slice(1, None))
     ) / 2
     V = dxyp * xr.concat(
         [
-            120000
-            - midpoints.isel(level=0).assign_coords({"level": gph.level.isel(level=0)}),
+            120000 - midpoints.isel(level=0).assign_coords({"level": gph.level.isel(level=0)}),
             -midpoints.diff("level", label="lower"),
             -midpoints.isel(level=-1) + ds_sfc.z / 9.80665,
         ],
@@ -435,17 +415,11 @@ def stats_dataset(save_dir):
         ]
     )
 
-    ds["co2density"] = massmix_to_density(
-        ds.co2massmix, ds.airdensity, ppm=False, eps=1e-12
-    )
+    ds["co2density"] = massmix_to_density(ds.co2massmix, ds.airdensity, ppm=False, eps=1e-12)
     ds["co2molemix"] = massmix_to_molemix(ds.co2massmix)
-    ds["ch4density"] = massmix_to_density(
-        ds.ch4massmix, ds.airdensity, ppm=False, eps=1e-12
-    )
+    ds["ch4density"] = massmix_to_density(ds.ch4massmix, ds.airdensity, ppm=False, eps=1e-12)
     ds["ch4molemix"] = massmix_to_molemix(ds.ch4massmix, M=M_CH4)
-    ds["codensity"] = massmix_to_density(
-        ds.comassmix, ds.airdensity, ppm=False, eps=1e-12
-    )
+    ds["codensity"] = massmix_to_density(ds.comassmix, ds.airdensity, ppm=False, eps=1e-12)
     ds["comolemix"] = massmix_to_molemix(ds.comassmix, M=M_CO)
 
     all_stats = process_map(
@@ -479,12 +453,11 @@ def stats_dataset(save_dir):
 
 
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser(description="CAMS Forecast.")
     parser.add_argument("save_dir", type=str)
 
     args = parser.parse_args()
 
-    #download_data(args.save_dir)
+    # download_data(args.save_dir)
     latlon_to_zarr(args.save_dir)
     stats_dataset(args.save_dir)

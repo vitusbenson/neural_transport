@@ -1,15 +1,11 @@
-from pathlib import Path
-
 import numpy as np
 import torch
 import torch.nn as nn
-import xarray as xr
 from torch_geometric.utils import scatter
 
-from neural_transport.models.gnn.mesh import *
-from neural_transport.models.layers import ACTIVATIONS, MLP
+from neural_transport.models.gnn.mesh import ICONGrid, latlon_to_xyz
+from neural_transport.models.layers import MLP
 from neural_transport.models.regulargrid import RegularGridModel
-from neural_transport.tools.conversion import *
 
 
 class MessagePassing(nn.Module):
@@ -25,11 +21,7 @@ class MessagePassing(nn.Module):
 
         self.edge_mlp = MLP(3 * n_hid, n_hid, n_hid, layer_norm=layer_norm, act=act)
         self.receiver_mlp = MLP(2 * n_hid, n_hid, n_hid, layer_norm=layer_norm, act=act)
-        self.sender_mlp = (
-            MLP(n_hid, n_hid, n_hid, layer_norm=layer_norm, act=act)
-            if update_sender
-            else None
-        )
+        self.sender_mlp = MLP(n_hid, n_hid, n_hid, layer_norm=layer_norm, act=act) if update_sender else None
 
         self.edge_reduction = edge_reduction
 
@@ -37,19 +29,11 @@ class MessagePassing(nn.Module):
         if x_receiver is None:
             x_receiver = x_sender
 
-        edge_update = self.edge_mlp(
-            torch.cat(
-                [edge_attr, x_sender[:, idx_sender], x_receiver[:, idx_receiver]], dim=2
-            )
-        )
+        edge_update = self.edge_mlp(torch.cat([edge_attr, x_sender[:, idx_sender], x_receiver[:, idx_receiver]], dim=2))
 
-        edges_collated = scatter(
-            edge_update, idx_receiver, dim=1, reduce=self.edge_reduction
-        )
+        edges_collated = scatter(edge_update, idx_receiver, dim=1, reduce=self.edge_reduction)
 
-        node_update_receiver = self.receiver_mlp(
-            torch.cat([x_receiver, edges_collated], dim=2)
-        )
+        node_update_receiver = self.receiver_mlp(torch.cat([x_receiver, edges_collated], dim=2))
 
         edge_attr = edge_attr + edge_update
         x_receiver = x_receiver + node_update_receiver
@@ -78,12 +62,8 @@ class GraphCastGNN(nn.Module):
     ):
         super().__init__()
 
-        self.embed_grid_nodes = MLP(
-            n_grid, n_hid, n_hid, layer_norm=layer_norm, act=act
-        )
-        self.embed_mesh_nodes = MLP(
-            n_mesh, n_hid, n_hid, layer_norm=layer_norm, act=act
-        )
+        self.embed_grid_nodes = MLP(n_grid, n_hid, n_hid, layer_norm=layer_norm, act=act)
+        self.embed_mesh_nodes = MLP(n_mesh, n_hid, n_hid, layer_norm=layer_norm, act=act)
         self.embed_g2m_edges = MLP(n_g2m, n_hid, n_hid, layer_norm=layer_norm, act=act)
         self.embed_mm_edges = MLP(n_mm, n_hid, n_hid, layer_norm=layer_norm, act=act)
         self.embed_m2g_edges = MLP(n_m2g, n_hid, n_hid, layer_norm=layer_norm, act=act)
@@ -141,19 +121,14 @@ class GraphCastGNN(nn.Module):
         )
 
         for processor_layer in self.processor_layers:
-            x_mesh, mm_edge_attr = processor_layer(
-                mm_edge_attr, mm_edge_index[0], mm_edge_index[1], x_mesh
-            )
+            x_mesh, mm_edge_attr = processor_layer(mm_edge_attr, mm_edge_index[0], mm_edge_index[1], x_mesh)
 
-        x_grid, m2g_edge_attr = self.decoder(
-            m2g_edge_attr, m2g_edge_index[0], m2g_edge_index[1], x_mesh, x_grid
-        )
+        x_grid, m2g_edge_attr = self.decoder(m2g_edge_attr, m2g_edge_index[0], m2g_edge_index[1], x_mesh, x_grid)
 
         return x_grid
 
 
 class GraphCast(RegularGridModel):
-
     def init_model(
         self,
         in_chans=1,
@@ -166,7 +141,6 @@ class GraphCast(RegularGridModel):
         gridname="latlon5.625",
         g2m_radius_fraction=0.6,
     ) -> None:
-
         self.init_mesh(
             mesh_min_level=mesh_min_level,
             mesh_max_level=mesh_max_level,
@@ -196,9 +170,7 @@ class GraphCast(RegularGridModel):
             act="swish",
         )
 
-    def init_mesh(
-        self, mesh_min_level, mesh_max_level, multimesh, gridname, g2m_radius_fraction
-    ) -> None:
+    def init_mesh(self, mesh_min_level, mesh_max_level, multimesh, gridname, g2m_radius_fraction) -> None:
         if multimesh:
             edge_features = []
             edge_idxs = []
@@ -212,9 +184,7 @@ class GraphCast(RegularGridModel):
             edge_features = np.concatenate(edge_features, axis=0)
             edge_idxs = np.concatenate(edge_idxs, axis=0)
         else:
-            grid = ICONGrid.create(
-                mesh_min_level, mesh_max_level, resolved_locations=None
-            )
+            grid = ICONGrid.create(mesh_min_level, mesh_max_level, resolved_locations=None)
             ds = grid.to_mesh(hex_not_tri=True)
             edge_features = ds.edge_features.values
             edge_idxs = ds.edge_idxs.values
@@ -240,9 +210,7 @@ class GraphCast(RegularGridModel):
             nodes[ds.edge_idxs.values[:, 0]] - nodes[ds.edge_idxs.values[:, 1]],
             axis=-1,
         )
-        max_edge_length = (
-            edge_distances.max()
-        )  # grid.to_mesh(hex_not_tri=hex_not_tri).edge_features.values[:, 0].max()
+        max_edge_length = edge_distances.max()  # grid.to_mesh(hex_not_tri=hex_not_tri).edge_features.values[:, 0].max()
 
         g2m = grid.generate_g2m_mesh(
             gridname,
@@ -275,7 +243,6 @@ class GraphCast(RegularGridModel):
         )
 
     def model(self, x_in):
-
         B, C, n_lat, n_lon = x_in.shape
 
         x_grid = torch.cat(

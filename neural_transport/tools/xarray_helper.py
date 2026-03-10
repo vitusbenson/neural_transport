@@ -1,12 +1,10 @@
 import xarray as xr
 
-from neural_transport.datasets.grids import *
+from neural_transport.datasets.grids import LATLON_PROTOTYPE_COORDS, VERTICAL_LAYERS_PROTOTYPE_COORDS
 from neural_transport.models.gnn.mesh import get_gridnc_from_grid
 
 
-def tensor_to_xarray(
-    arr, dataset="egg4", grid="latlon1", vertical_levels="l10", gridnc=None
-):
+def tensor_to_xarray(arr, dataset="egg4", grid="latlon1", vertical_levels="l10", gridnc=None):
     coords = {}
 
     if len(arr.shape) == 5:
@@ -20,9 +18,7 @@ def tensor_to_xarray(
     coords["batch"] = range(B)
     coords["vari"] = range(C)
     coords["level"] = (
-        VERTICAL_LAYERS_PROTOTYPE_COORDS[vertical_levels]["level"]
-        if n_lev > 1
-        else range(1)
+        VERTICAL_LAYERS_PROTOTYPE_COORDS[vertical_levels]["level"] if n_lev > 1 else range(1)
     )  # HEIGHTS[dataset] if n_lev > 1 else range(1)
 
     if grid.startswith("latlon"):

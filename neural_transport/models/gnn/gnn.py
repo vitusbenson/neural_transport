@@ -1,13 +1,11 @@
-from pathlib import Path
-
 import numpy as np
 import torch
 import torch.nn as nn
 import xarray as xr
 from torch_geometric.utils import scatter
 
-from neural_transport.models.gnn.mesh import *
-from neural_transport.tools.conversion import *
+from neural_transport.models.gnn.mesh import ICONGrid, latlon_to_xyz
+from neural_transport.tools.conversion import density_to_massmix, mass_to_density, massmix_to_density
 
 ACTIVATIONS = {
     "none": nn.Identity,
@@ -52,11 +50,7 @@ class MessagePassing(nn.Module):
 
         self.edge_mlp = MLP(3 * n_hid, n_hid, n_hid, layer_norm=layer_norm, act=act)
         self.receiver_mlp = MLP(2 * n_hid, n_hid, n_hid, layer_norm=layer_norm, act=act)
-        self.sender_mlp = (
-            MLP(n_hid, n_hid, n_hid, layer_norm=layer_norm, act=act)
-            if update_sender
-            else None
-        )
+        self.sender_mlp = MLP(n_hid, n_hid, n_hid, layer_norm=layer_norm, act=act) if update_sender else None
 
         self.edge_reduction = edge_reduction
 
@@ -64,19 +58,11 @@ class MessagePassing(nn.Module):
         if x_receiver is None:
             x_receiver = x_sender
 
-        edge_update = self.edge_mlp(
-            torch.cat(
-                [edge_attr, x_sender[:, idx_sender], x_receiver[:, idx_receiver]], dim=2
-            )
-        )
+        edge_update = self.edge_mlp(torch.cat([edge_attr, x_sender[:, idx_sender], x_receiver[:, idx_receiver]], dim=2))
 
-        edges_collated = scatter(
-            edge_update, idx_receiver, dim=1, reduce=self.edge_reduction
-        )
+        edges_collated = scatter(edge_update, idx_receiver, dim=1, reduce=self.edge_reduction)
 
-        node_update_receiver = self.receiver_mlp(
-            torch.cat([x_receiver, edges_collated], dim=2)
-        )
+        node_update_receiver = self.receiver_mlp(torch.cat([x_receiver, edges_collated], dim=2))
 
         edge_attr = edge_attr + edge_update
         x_receiver = x_receiver + node_update_receiver
@@ -105,12 +91,8 @@ class GraphCastGNN(nn.Module):
     ):
         super().__init__()
 
-        self.embed_grid_nodes = MLP(
-            n_grid, n_hid, n_hid, layer_norm=layer_norm, act=act
-        )
-        self.embed_mesh_nodes = MLP(
-            n_mesh, n_hid, n_hid, layer_norm=layer_norm, act=act
-        )
+        self.embed_grid_nodes = MLP(n_grid, n_hid, n_hid, layer_norm=layer_norm, act=act)
+        self.embed_mesh_nodes = MLP(n_mesh, n_hid, n_hid, layer_norm=layer_norm, act=act)
         self.embed_g2m_edges = MLP(n_g2m, n_hid, n_hid, layer_norm=layer_norm, act=act)
         self.embed_mm_edges = MLP(n_mm, n_hid, n_hid, layer_norm=layer_norm, act=act)
         self.embed_m2g_edges = MLP(n_m2g, n_hid, n_hid, layer_norm=layer_norm, act=act)
@@ -168,13 +150,9 @@ class GraphCastGNN(nn.Module):
         )
 
         for processor_layer in self.processor_layers:
-            x_mesh, mm_edge_attr = processor_layer(
-                mm_edge_attr, mm_edge_index[0], mm_edge_index[1], x_mesh
-            )
+            x_mesh, mm_edge_attr = processor_layer(mm_edge_attr, mm_edge_index[0], mm_edge_index[1], x_mesh)
 
-        x_grid, m2g_edge_attr = self.decoder(
-            m2g_edge_attr, m2g_edge_index[0], m2g_edge_index[1], x_mesh, x_grid
-        )
+        x_grid, m2g_edge_attr = self.decoder(m2g_edge_attr, m2g_edge_index[0], m2g_edge_index[1], x_mesh, x_grid)
 
         return x_grid
 
@@ -244,9 +222,7 @@ class MassFixer(nn.Module):
         edge_index,
     ):
         if not self.density_not_massmix:
-            x_density_next = massmix_to_density(
-                x_density_delta + x_density, airdensity_next, ppm=True
-            )
+            x_density_next = massmix_to_density(x_density_delta + x_density, airdensity_next, ppm=True)
             x_density = massmix_to_density(x_density, airdensity, ppm=True)
             x_density_delta = x_density_next - x_density
 
@@ -262,14 +238,10 @@ class MassFixer(nn.Module):
 
         elif self.mass_correction == "shift":
             volume_weights = volume_next / volume_next.sum((1, 2), keepdim=True)
-            x_density_delta = x_density_delta - (x_density_delta * volume_weights).sum(
-                (1, 2), keepdim=True
-            )
+            x_density_delta = x_density_delta - (x_density_delta * volume_weights).sum((1, 2), keepdim=True)
 
         if not self.density_not_massmix:
-            x_density_next = density_to_massmix(
-                x_density_delta + x_density, airdensity_next, ppm=True
-            )
+            x_density_next = density_to_massmix(x_density_delta + x_density, airdensity_next, ppm=True)
             x_density = density_to_massmix(x_density, airdensity, ppm=True)
             x_density_delta = x_density_next - x_density
 
@@ -379,12 +351,8 @@ class GraphCastHead(nn.Module):
         return x_out
 
 
-def GraphCastStep(
-    x_grid, x_grid_offset, x_grid_scale, x_aux, gnn, head, gnn_inputs, head_inputs
-):
-    x_feats = gnn(
-        torch.cat([(x_grid - x_grid_offset) / x_grid_scale, x_aux], dim=-1), *gnn_inputs
-    )
+def GraphCastStep(x_grid, x_grid_offset, x_grid_scale, x_aux, gnn, head, gnn_inputs, head_inputs):
+    x_feats = gnn(torch.cat([(x_grid - x_grid_offset) / x_grid_scale, x_aux], dim=-1), *gnn_inputs)
     x_out = head(x_feats, x_grid, *head_inputs)
 
     return x_out
@@ -484,9 +452,7 @@ class GraphTM(nn.Module):
             edge_idxs = []
 
             for i in range(mesh_min_level, mesh_max_level + 1):
-                grid = ICONGrid.create(
-                    mesh_min_level, i, resolved_locations=resolved_locations
-                )
+                grid = ICONGrid.create(mesh_min_level, i, resolved_locations=resolved_locations)
                 ds = grid.to_mesh(hex_not_tri=hex_not_tri)
                 edge_features.append(ds.edge_features.values)
                 edge_idxs.append(ds.edge_idxs.values)
@@ -494,9 +460,7 @@ class GraphTM(nn.Module):
             edge_features = np.concatenate(edge_features, axis=0)
             edge_idxs = np.concatenate(edge_idxs, axis=0)
         else:
-            grid = ICONGrid.create(
-                mesh_min_level, mesh_max_level, resolved_locations=resolved_locations
-            )
+            grid = ICONGrid.create(mesh_min_level, mesh_max_level, resolved_locations=resolved_locations)
             ds = grid.to_mesh(hex_not_tri=hex_not_tri)
             edge_features = ds.edge_features.values
             edge_idxs = ds.edge_idxs.values
@@ -547,9 +511,7 @@ class GraphTM(nn.Module):
             )
             self.register_buffer(
                 "g2m_edge_attr",
-                torch.from_numpy(
-                    g2m.edge_features.values.astype("float32")
-                ).contiguous(),
+                torch.from_numpy(g2m.edge_features.values.astype("float32")).contiguous(),
             )
 
             m2g = grid.generate_m2g_mesh(ds, hex_not_tri=hex_not_tri)
@@ -560,9 +522,7 @@ class GraphTM(nn.Module):
             )
             self.register_buffer(
                 "m2g_edge_attr",
-                torch.from_numpy(
-                    m2g.edge_features.values.astype("float32")
-                ).contiguous(),
+                torch.from_numpy(m2g.edge_features.values.astype("float32")).contiguous(),
             )
 
             self.gnn = GraphCastGNN(**gnn_kwargs)
@@ -570,9 +530,7 @@ class GraphTM(nn.Module):
         if self.v2:
             self.head = ProjectionHead(**head_kwargs)
         else:
-            head_kwargs["error_correction_kwargs"][
-                "density_not_massmix"
-            ] = density_not_massmix
+            head_kwargs["error_correction_kwargs"]["density_not_massmix"] = density_not_massmix
             self.head = GraphCastHead(**head_kwargs)
 
         self.integrator = {
@@ -594,17 +552,11 @@ class GraphTM(nn.Module):
                 dim=-1,
             )
             x_grid_delta_offset = torch.cat(
-                [
-                    (batch[f"{v}_delta_offset"]).expand_as(batch[v])
-                    for v in self.target_vars
-                ],
+                [(batch[f"{v}_delta_offset"]).expand_as(batch[v]) for v in self.target_vars],
                 dim=-1,
             )
             x_grid_delta_scale = torch.cat(
-                [
-                    (batch[f"{v}_delta_scale"]).expand_as(batch[v])
-                    for v in self.target_vars
-                ],
+                [(batch[f"{v}_delta_scale"]).expand_as(batch[v]) for v in self.target_vars],
                 dim=-1,
             )
 
@@ -612,16 +564,9 @@ class GraphTM(nn.Module):
 
             x_aux = torch.cat(
                 [
-                    (
-                        self.mm_x.expand(B, -1, -1)
-                        if self.mesh_is_grid
-                        else self.grid_x.expand(B, -1, -1)
-                    ),
+                    (self.mm_x.expand(B, -1, -1) if self.mesh_is_grid else self.grid_x.expand(B, -1, -1)),
                 ]
-                + [
-                    (batch[v] - batch[f"{v}_offset"]) / batch[f"{v}_scale"]
-                    for v in self.forcing_vars
-                ],
+                + [(batch[v] - batch[f"{v}_offset"]) / batch[f"{v}_scale"] for v in self.forcing_vars],
                 dim=-1,
             )
 
@@ -679,34 +624,24 @@ class GraphTM(nn.Module):
 
             for molecule in ["co2", "ch4"]:
                 if (
-                    f"{molecule}density" in preds
-                    and (f"{molecule}massmix" not in preds)
+                    f"{molecule}density" in preds and (f"{molecule}massmix" not in preds)
                     # v.endswith("density")
                     # and v != "airdensity"
                     # and v.replace("density", "massmix") not in self.target_vars
                 ):
                     preds[f"{molecule}massmix"] = density_to_massmix(
                         preds[f"{molecule}density"],
-                        (
-                            batch["airdensity_next"]
-                            if not "airdensity" in self.target_vars
-                            else preds["airdensity"]
-                        ),
+                        (batch["airdensity_next"] if "airdensity" not in self.target_vars else preds["airdensity"]),
                         ppm=True,
                     )
                 if (
-                    f"{molecule}massmix" in preds
-                    and (f"{molecule}density" not in preds)
+                    f"{molecule}massmix" in preds and (f"{molecule}density" not in preds)
                     # v.endswith("massmix")
                     # and v.replace("massmix", "density") not in self.target_vars
                 ):
                     preds[f"{molecule}density"] = massmix_to_density(
                         preds[f"{molecule}massmix"],
-                        (
-                            batch["airdensity_next"]
-                            if not "airdensity" in self.target_vars
-                            else preds["airdensity"]
-                        ),
+                        (batch["airdensity_next"] if "airdensity" not in self.target_vars else preds["airdensity"]),
                         ppm=True,
                     )
 
@@ -717,9 +652,7 @@ class GraphTM(nn.Module):
             massmix_prev = batch["co2massmix"]  # b n h
 
             surfflux_as_densitysource_prev = mass_to_density(
-                (batch["co2flux_land"] + batch["co2flux_ocean"] + batch["co2flux_subt"])
-                * batch["cell_area"]
-                * self.dt,
+                (batch["co2flux_land"] + batch["co2flux_ocean"] + batch["co2flux_subt"]) * batch["cell_area"] * self.dt,
                 batch["volume"][..., :1],
             )  # b n h
 
@@ -732,10 +665,7 @@ class GraphTM(nn.Module):
                 )
 
             meteo_norm_prev = torch.stack(
-                [
-                    (batch[v] - batch[f"{v}_offset"]) / batch[f"{v}_scale"]
-                    for v in self.meteo_vars
-                ],
+                [(batch[v] - batch[f"{v}_offset"]) / batch[f"{v}_scale"] for v in self.meteo_vars],
                 dim=-1,
             )  # b n h c
 
@@ -761,11 +691,7 @@ class GraphTM(nn.Module):
             x_grid = density_prev if self.density_not_massmix else massmix_prev
             x_aux = torch.cat(
                 [
-                    (
-                        self.mm_x.expand(B, -1, -1)
-                        if self.mesh_is_grid
-                        else self.grid_x.expand(B, -1, -1)
-                    ),
+                    (self.mm_x.expand(B, -1, -1) if self.mesh_is_grid else self.grid_x.expand(B, -1, -1)),
                     meteo_norm_prev.reshape(B, n_cells, n_lev * C),
                 ],
                 dim=2,
@@ -811,16 +737,8 @@ class GraphTM(nn.Module):
 
             head_inputs = [
                 surfflux_as_densitysource_prev,
-                (
-                    batch["co2density_delta_offset"]
-                    if self.density_not_massmix
-                    else batch["co2massmix_delta_offset"]
-                ),
-                (
-                    batch["co2density_delta_scale"]
-                    if self.density_not_massmix
-                    else batch["co2massmix_delta_scale"]
-                ),
+                (batch["co2density_delta_offset"] if self.density_not_massmix else batch["co2massmix_delta_offset"]),
+                (batch["co2density_delta_scale"] if self.density_not_massmix else batch["co2massmix_delta_scale"]),
                 batch["volume"],
                 batch["volume_next"],
                 batch["airdensity"],
@@ -829,16 +747,8 @@ class GraphTM(nn.Module):
             ]
 
             step_inputs = [
-                (
-                    batch["co2density_offset"]
-                    if self.density_not_massmix
-                    else batch["co2massmix_offset"]
-                ),
-                (
-                    batch["co2density_scale"]
-                    if self.density_not_massmix
-                    else batch["co2massmix_scale"]
-                ),
+                (batch["co2density_offset"] if self.density_not_massmix else batch["co2massmix_offset"]),
+                (batch["co2density_scale"] if self.density_not_massmix else batch["co2massmix_scale"]),
                 x_aux,
                 self.gnn,
                 self.head,
@@ -850,13 +760,9 @@ class GraphTM(nn.Module):
 
             if self.density_not_massmix:
                 density_pred = x_grid
-                massmix_pred = density_to_massmix(
-                    density_pred, batch["airdensity_next"], ppm=True
-                )
+                massmix_pred = density_to_massmix(density_pred, batch["airdensity_next"], ppm=True)
             else:
                 massmix_pred = x_grid
-                density_pred = massmix_to_density(
-                    massmix_pred, batch["airdensity_next"], ppm=True
-                )
+                density_pred = massmix_to_density(massmix_pred, batch["airdensity_next"], ppm=True)
 
             return density_pred, massmix_pred

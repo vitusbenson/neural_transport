@@ -18,6 +18,7 @@ def save_figure(fig, out_dir, filename, imgformats=["svg", "png", "pdf"], dpi=30
         fig.savefig(out_dir / f"{filename}.{fmt}", dpi=dpi, bbox_inches="tight")
     plt.close(fig)
 
+
 mpl_rc_params = {
     "xtick.labelsize": 8,
     "ytick.labelsize": 8,
@@ -28,19 +29,13 @@ mpl_rc_params = {
     "legend.title_fontsize": 8,
 }
 
-def decorate_earth(ax,
-                   terrain=False,
-                   grid=False,
-                   land=False, ocean=False,
-                   borders=False, lakes=False, rivers=False):
+
+def decorate_earth(ax, terrain=False, grid=False, land=False, ocean=False, borders=False, lakes=False, rivers=False):
     """Add optional geographic features to an axis."""
     ax.coastlines()
 
     if grid:
-        gl = ax.gridlines(
-            draw_labels=True, linewidth=0.5, color="dimgray",
-            alpha=0.4, zorder=2
-        )
+        gl = ax.gridlines(draw_labels=True, linewidth=0.5, color="dimgray", alpha=0.4, zorder=2)
         gl.xlabel_style = {"size": 8, "color": "dimgray"}
         gl.ylabel_style = {"size": 8, "color": "dimgray"}
         gl.bottom_labels = False
@@ -59,6 +54,7 @@ def decorate_earth(ax,
     if rivers:
         ax.add_feature(cfeature.RIVERS)
 
+
 PROJECTION_MAP = {
     "PlateCarree": ccrs.PlateCarree,
     "Robinson": ccrs.Robinson,
@@ -70,6 +66,7 @@ PROJECTION_MAP = {
     "LambertCylindrical": ccrs.LambertCylindrical,
 }
 
+
 def parse_projections(names):
     """Convert list of projection names to ccrs projection instances."""
     if not names:
@@ -77,8 +74,7 @@ def parse_projections(names):
     projections = []
     for name in names:
         if name not in PROJECTION_MAP:
-            raise ValueError(f"Unknown projection: {name}. "
-                             f"Available: {', '.join(PROJECTION_MAP.keys())}")
+            raise ValueError(f"Unknown projection: {name}. Available: {', '.join(PROJECTION_MAP.keys())}")
         projections.append(PROJECTION_MAP[name]())
     return projections
 
@@ -123,9 +119,7 @@ def load_carbontracker_tests(data_path=None) -> torch.Tensor:
         data_path: Path to CarbonTracker data directory. Must be provided.
     """
     if data_path is None:
-        raise ValueError(
-            "data_path must be provided. Pass the path to the CarbonTracker data directory."
-        )
+        raise ValueError("data_path must be provided. Pass the path to the CarbonTracker data directory.")
 
     data_kwargs = dict(
         data_path=data_path,

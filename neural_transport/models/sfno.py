@@ -39,7 +39,7 @@ import torch.fft
 import torch.nn as nn
 from torch.cuda import amp
 from torch.utils.checkpoint import checkpoint
-from torch_harmonics import *
+from torch_harmonics import InverseRealSHT, RealSHT
 
 from neural_transport.models.regulargrid import RegularGridModel
 
@@ -110,9 +110,7 @@ def _contract_cp(x, cp_weight, separable=False, operator_type="diagonal"):
     else:
         raise ValueError(f"Unkonw operator type {operator_type}")
 
-    eq = (
-        x_syms + "," + rank_sym + "," + ",".join(factor_syms) + "->" + "".join(out_syms)
-    )
+    eq = x_syms + "," + rank_sym + "," + ",".join(factor_syms) + "->" + "".join(out_syms)
 
     return tl.einsum(eq, x, cp_weight.weights, *cp_weight.factors)
 
@@ -135,28 +133,16 @@ def _contract_tucker(x, tucker_weight, separable=False, operator_type="diagonal"
             einsum_symbols[1] + core_syms[0],
             out_sym + core_syms[1],
         ]  # out, in
-        factor_syms += [
-            xs + rs for (xs, rs) in zip(x_syms[2:], core_syms[2:])
-        ]  # x, y, ...
+        factor_syms += [xs + rs for (xs, rs) in zip(x_syms[2:], core_syms[2:])]  # x, y, ...
 
     if operator_type == "diagonal":
         pass
     elif operator_type == "block-diagonal":
-        raise NotImplementedError(
-            f"Operator type {operator_type} not implemented for Tucker"
-        )
+        raise NotImplementedError(f"Operator type {operator_type} not implemented for Tucker")
     else:
         raise ValueError(f"Unkonw operator type {operator_type}")
 
-    eq = (
-        x_syms
-        + ","
-        + core_syms
-        + ","
-        + ",".join(factor_syms)
-        + "->"
-        + "".join(out_syms)
-    )
+    eq = x_syms + "," + core_syms + "," + ",".join(factor_syms) + "->" + "".join(out_syms)
 
     return tl.einsum(eq, x, tucker_weight.core, *tucker_weight.factors)
 
@@ -188,13 +174,7 @@ def _contract_tt(x, tt_weight, separable=False, operator_type="diagonal"):
     tt_syms = []
     for i, s in enumerate(weight_syms):
         tt_syms.append([rank_syms[i], s, rank_syms[i + 1]])
-    eq = (
-        "".join(x_syms)
-        + ","
-        + ",".join("".join(f) for f in tt_syms)
-        + "->"
-        + "".join(out_syms)
-    )
+    eq = "".join(x_syms) + "," + ",".join("".join(f) for f in tt_syms) + "->" + "".join(out_syms)
 
     return tl.einsum(eq, x, *tt_weight.factors)
 
@@ -230,13 +210,9 @@ def get_contract_fun(weight, implementation="reconstructed", separable=False):
             else:
                 raise ValueError(f"Got unexpected factorized weight type {weight.name}")
         else:
-            raise ValueError(
-                f"Got unexpected weight type of class {weight.__class__.__name__}"
-            )
+            raise ValueError(f"Got unexpected weight type of class {weight.__class__.__name__}")
     else:
-        raise ValueError(
-            f'Got {implementation=}, expected "reconstructed" or "factorized"'
-        )
+        raise ValueError(f'Got {implementation=}, expected "reconstructed" or "factorized"')
 
 
 @torch.jit.script
@@ -267,9 +243,7 @@ def contract_blockdiag(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 @torch.jit.script
 def compl_mul1d_fwd(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     tmp = torch.einsum("bixs,ior->srbox", a, b)
-    res = torch.stack(
-        [tmp[0, 0, ...] - tmp[1, 1, ...], tmp[1, 0, ...] + tmp[0, 1, ...]], dim=-1
-    )
+    res = torch.stack([tmp[0, 0, ...] - tmp[1, 1, ...], tmp[1, 0, ...] + tmp[0, 1, ...]], dim=-1)
     return res
 
 
@@ -283,17 +257,13 @@ def compl_mul1d_fwd_c(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 
 @torch.jit.script
-def compl_muladd1d_fwd(
-    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor
-) -> torch.Tensor:
+def compl_muladd1d_fwd(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
     res = compl_mul1d_fwd(a, b) + c
     return res
 
 
 @torch.jit.script
-def compl_muladd1d_fwd_c(
-    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor
-) -> torch.Tensor:
+def compl_muladd1d_fwd_c(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
     tmpcc = torch.view_as_complex(compl_mul1d_fwd_c(a, b))
     cc = torch.view_as_complex(c)
     return torch.view_as_real(tmpcc + cc)
@@ -305,9 +275,7 @@ def compl_muladd1d_fwd_c(
 @torch.jit.script
 def compl_mul2d_fwd(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     tmp = torch.einsum("bixys,ior->srboxy", a, b)
-    res = torch.stack(
-        [tmp[0, 0, ...] - tmp[1, 1, ...], tmp[1, 0, ...] + tmp[0, 1, ...]], dim=-1
-    )
+    res = torch.stack([tmp[0, 0, ...] - tmp[1, 1, ...], tmp[1, 0, ...] + tmp[0, 1, ...]], dim=-1)
     return res
 
 
@@ -321,17 +289,13 @@ def compl_mul2d_fwd_c(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 
 @torch.jit.script
-def compl_muladd2d_fwd(
-    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor
-) -> torch.Tensor:
+def compl_muladd2d_fwd(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
     res = compl_mul2d_fwd(a, b) + c
     return res
 
 
 @torch.jit.script
-def compl_muladd2d_fwd_c(
-    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor
-) -> torch.Tensor:
+def compl_muladd2d_fwd_c(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
     tmpcc = torch.view_as_complex(compl_mul2d_fwd_c(a, b))
     cc = torch.view_as_complex(c)
     return torch.view_as_real(tmpcc + cc)
@@ -344,9 +308,7 @@ def real_mul2d_fwd(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 
 @torch.jit.script
-def real_muladd2d_fwd(
-    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor
-) -> torch.Tensor:
+def real_muladd2d_fwd(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
     return compl_mul2d_fwd_c(a, b) + c
 
 
@@ -356,7 +318,7 @@ class ComplexCardioid(nn.Module):
     """
 
     def __init__(self):
-        super(ComplexCardioid, self).__init__()
+        super().__init__()
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         out = 0.5 * (1.0 + torch.cos(z.angle())) * z
@@ -369,15 +331,13 @@ class ComplexReLU(nn.Module):
     """
 
     def __init__(self, negative_slope=0.0, mode="real", bias_shape=None, scale=1.0):
-        super(ComplexReLU, self).__init__()
+        super().__init__()
 
         # store parameters
         self.mode = mode
         if self.mode in ["modulus", "halfplane"]:
             if bias_shape is not None:
-                self.bias = nn.Parameter(
-                    scale * torch.ones(bias_shape, dtype=torch.float32)
-                )
+                self.bias = nn.Parameter(scale * torch.ones(bias_shape, dtype=torch.float32))
             else:
                 self.bias = nn.Parameter(scale * torch.ones((1), dtype=torch.float32))
         else:
@@ -387,7 +347,6 @@ class ComplexReLU(nn.Module):
         self.act = nn.LeakyReLU(negative_slope=negative_slope)
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
-
         if self.mode == "cartesian":
             zr = torch.view_as_real(z)
             za = self.act(zr)
@@ -476,9 +435,7 @@ def trunc_normal_(tensor, mean=0.0, std=1.0, a=-2.0, b=2.0):
 
 
 @torch.jit.script
-def drop_path(
-    x: torch.Tensor, drop_prob: float = 0.0, training: bool = False
-) -> torch.Tensor:
+def drop_path(x: torch.Tensor, drop_prob: float = 0.0, training: bool = False) -> torch.Tensor:
     """Drop paths (Stochastic Depth) per sample (when applied in main path of residual blocks).
     This is the same as the DropConnect impl I created for EfficientNet, etc networks, however,
     the original name is misleading as 'Drop Connect' is a different form of dropout in a separate paper...
@@ -489,9 +446,7 @@ def drop_path(
     if drop_prob == 0.0 or not training:
         return x
     keep_prob = 1.0 - drop_prob
-    shape = (x.shape[0],) + (1,) * (
-        x.ndim - 1
-    )  # work with diff dim tensors, not just 2d ConvNets
+    shape = (x.shape[0],) + (1,) * (x.ndim - 1)  # work with diff dim tensors, not just 2d ConvNets
     random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
     random_tensor.floor_()  # binarize
     output = x.div(keep_prob) * random_tensor
@@ -502,7 +457,7 @@ class DropPath(nn.Module):
     """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks)."""
 
     def __init__(self, drop_prob=None):
-        super(DropPath, self).__init__()
+        super().__init__()
         self.drop_prob = drop_prob
 
     def forward(self, x):
@@ -521,7 +476,7 @@ class MLP(nn.Module):
         checkpointing=False,
         gain=1.0,
     ):
-        super(MLP, self).__init__()
+        super().__init__()
         self.checkpointing = checkpointing
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
@@ -568,7 +523,7 @@ class RealFFT2(nn.Module):
     """
 
     def __init__(self, nlat, nlon, lmax=None, mmax=None):
-        super(RealFFT2, self).__init__()
+        super().__init__()
 
         self.nlat = nlat
         self.nlon = nlon
@@ -593,7 +548,7 @@ class InverseRealFFT2(nn.Module):
     """
 
     def __init__(self, nlat, nlon, lmax=None, mmax=None):
-        super(InverseRealFFT2, self).__init__()
+        super().__init__()
 
         self.nlat = nlat
         self.nlon = nlon
@@ -622,7 +577,7 @@ class SpectralConvS2(nn.Module):
         lr_scale_exponent=0,
         bias=False,
     ):
-        super(SpectralConvS2, self).__init__()
+        super().__init__()
 
         self.forward_transform = forward_transform
         self.inverse_transform = inverse_transform
@@ -630,9 +585,9 @@ class SpectralConvS2(nn.Module):
         self.modes_lat = self.inverse_transform.lmax
         self.modes_lon = self.inverse_transform.mmax
 
-        self.scale_residual = (
-            self.forward_transform.nlat != self.inverse_transform.nlat
-        ) or (self.forward_transform.nlon != self.inverse_transform.nlon)
+        self.scale_residual = (self.forward_transform.nlat != self.inverse_transform.nlat) or (
+            self.forward_transform.nlon != self.inverse_transform.nlon
+        )
 
         # remember factorization details
         self.operator_type = operator_type
@@ -657,10 +612,7 @@ class SpectralConvS2(nn.Module):
         # form weight tensors
         scale = math.sqrt(gain / in_channels) * torch.ones(self.modes_lat, 2)
         scale[0] *= math.sqrt(2)
-        self.weight = nn.Parameter(
-            scale
-            * torch.view_as_real(torch.randn(*weight_shape, dtype=torch.complex64))
-        )
+        self.weight = nn.Parameter(scale * torch.view_as_real(torch.randn(*weight_shape, dtype=torch.complex64)))
         # self.weight = nn.Parameter(scale * torch.randn(*weight_shape, 2))
 
         # get the right contraction function
@@ -670,7 +622,6 @@ class SpectralConvS2(nn.Module):
             self.bias = nn.Parameter(torch.zeros(1, out_channels, 1, 1))
 
     def forward(self, x):
-
         dtype = x.dtype
         x = x.float()
         residual = x
@@ -722,9 +673,9 @@ class FactorizedSpectralConvS2(nn.Module):
         self.modes_lat = self.inverse_transform.lmax
         self.modes_lon = self.inverse_transform.mmax
 
-        self.scale_residual = (
-            self.forward_transform.nlat != self.inverse_transform.nlat
-        ) or (self.forward_transform.nlon != self.inverse_transform.nlon)
+        self.scale_residual = (self.forward_transform.nlat != self.inverse_transform.nlat) or (
+            self.forward_transform.nlon != self.inverse_transform.nlon
+        )
 
         # Make sure we are using a Complex Factorized Tensor
         if factorization is None:
@@ -769,15 +720,12 @@ class FactorizedSpectralConvS2(nn.Module):
         self.weight.normal_(0, scale)
 
         # get the right contraction function
-        self._contract = get_contract_fun(
-            self.weight, implementation=implementation, separable=separable
-        )
+        self._contract = get_contract_fun(self.weight, implementation=implementation, separable=separable)
 
         if bias:
             self.bias = nn.Parameter(torch.zeros(1, out_channels, 1, 1))
 
     def forward(self, x):
-
         dtype = x.dtype
         x = x.float()
         residual = x
@@ -787,9 +735,7 @@ class FactorizedSpectralConvS2(nn.Module):
             if self.scale_residual:
                 residual = self.inverse_transform(x)
 
-        x = self._contract(
-            x, self.weight, separable=self.separable, operator_type=self.operator_type
-        )
+        x = self._contract(x, self.weight, separable=self.separable, operator_type=self.operator_type)
 
         with amp.autocast(enabled=False):
             x = self.inverse_transform(x)
@@ -820,7 +766,7 @@ class SpectralFilterLayer(nn.Module):
         rank=1e-2,
         bias=True,
     ):
-        super(SpectralFilterLayer, self).__init__()
+        super().__init__()
 
         if factorization is None:
             self.filter = SpectralConvS2(
@@ -879,7 +825,7 @@ class SphericalFourierNeuralOperatorBlock(nn.Module):
         use_mlp=True,
         bias=True,
     ):
-        super(SphericalFourierNeuralOperatorBlock, self).__init__()
+        super().__init__()
 
         if act_layer == nn.Identity:
             gain_factor = 1.0
@@ -906,9 +852,7 @@ class SphericalFourierNeuralOperatorBlock(nn.Module):
 
         if inner_skip == "linear":
             self.inner_skip = nn.Conv2d(input_dim, output_dim, 1, 1)
-            nn.init.normal_(
-                self.inner_skip.weight, std=math.sqrt(gain_factor / input_dim)
-            )
+            nn.init.normal_(self.inner_skip.weight, std=math.sqrt(gain_factor / input_dim))
         elif inner_skip == "identity":
             assert input_dim == output_dim
             self.inner_skip = nn.Identity()
@@ -929,7 +873,7 @@ class SphericalFourierNeuralOperatorBlock(nn.Module):
         if outer_skip == "linear" or inner_skip == "identity":
             gain_factor /= 2.0
 
-        if use_mlp == True:
+        if use_mlp:
             mlp_hidden_dim = int(output_dim * mlp_ratio)
             self.mlp = MLP(
                 in_features=output_dim,
@@ -943,9 +887,7 @@ class SphericalFourierNeuralOperatorBlock(nn.Module):
 
         if outer_skip == "linear":
             self.outer_skip = nn.Conv2d(input_dim, input_dim, 1, 1)
-            torch.nn.init.normal_(
-                self.outer_skip.weight, std=math.sqrt(gain_factor / input_dim)
-            )
+            torch.nn.init.normal_(self.outer_skip.weight, std=math.sqrt(gain_factor / input_dim))
         elif outer_skip == "identity":
             assert input_dim == output_dim
             self.outer_skip = nn.Identity()
@@ -969,7 +911,6 @@ class SphericalFourierNeuralOperatorBlock(nn.Module):
     #         self.filter.filter.init_weights(scale)
 
     def forward(self, x):
-
         x, residual = self.filter(x)
 
         x = self.norm0(x)
@@ -1084,11 +1025,10 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
         separable=False,
         rank=128,
         pos_embed=False,
-        outer_skip = "identity",
+        outer_skip="identity",
         bias=True,
     ):
-
-        super(SphericalFourierNeuralOperatorNet, self).__init__()
+        super().__init__()
 
         self.spectral_transform = spectral_transform
         self.operator_type = operator_type
@@ -1134,9 +1074,7 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
                 normalized_shape=(self.img_size[0], self.img_size[1]),
                 eps=1e-6,
             )
-            norm_layer1 = partial(
-                nn.LayerNorm, normalized_shape=(self.h, self.w), eps=1e-6
-            )
+            norm_layer1 = partial(nn.LayerNorm, normalized_shape=(self.h, self.w), eps=1e-6)
         elif self.normalization_layer == "instance_norm":
             norm_layer0 = partial(
                 nn.InstanceNorm2d,
@@ -1156,19 +1094,13 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
             norm_layer0 = nn.Identity
             norm_layer1 = norm_layer0
         else:
-            raise NotImplementedError(
-                f"Error, normalization {self.normalization_layer} not implemented."
-            )
+            raise NotImplementedError(f"Error, normalization {self.normalization_layer} not implemented.")
 
-        if pos_embed == "latlon" or pos_embed == True:
-            self.pos_embed = nn.Parameter(
-                torch.zeros(1, self.embed_dim, self.img_size[0], self.img_size[1])
-            )
+        if pos_embed == "latlon" or pos_embed is True:
+            self.pos_embed = nn.Parameter(torch.zeros(1, self.embed_dim, self.img_size[0], self.img_size[1]))
             nn.init.constant_(self.pos_embed, 0.0)
         elif pos_embed == "lat":
-            self.pos_embed = nn.Parameter(
-                torch.zeros(1, self.embed_dim, self.img_size[0], 1)
-            )
+            self.pos_embed = nn.Parameter(torch.zeros(1, self.embed_dim, self.img_size[0], 1))
             nn.init.constant_(self.pos_embed, 0.0)
         elif pos_embed == "const":
             self.pos_embed = nn.Parameter(torch.zeros(1, self.embed_dim, 1, 1))
@@ -1210,48 +1142,29 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
 
         # prepare the spectral transform
         if self.spectral_transform == "sht":
-
             modes_lat = int(self.h * self.hard_thresholding_fraction)
             modes_lon = int(self.w // 2 * self.hard_thresholding_fraction)
             modes_lat = modes_lon = min(modes_lat, modes_lon)
 
-            self.trans_down = RealSHT(
-                *self.img_size, lmax=modes_lat, mmax=modes_lon, grid=self.grid
-            ).float()
-            self.itrans_up = InverseRealSHT(
-                *self.img_size, lmax=modes_lat, mmax=modes_lon, grid=self.grid
-            ).float()
-            self.trans = RealSHT(
-                self.h, self.w, lmax=modes_lat, mmax=modes_lon, grid="legendre-gauss"
-            ).float()
-            self.itrans = InverseRealSHT(
-                self.h, self.w, lmax=modes_lat, mmax=modes_lon, grid="legendre-gauss"
-            ).float()
+            self.trans_down = RealSHT(*self.img_size, lmax=modes_lat, mmax=modes_lon, grid=self.grid).float()
+            self.itrans_up = InverseRealSHT(*self.img_size, lmax=modes_lat, mmax=modes_lon, grid=self.grid).float()
+            self.trans = RealSHT(self.h, self.w, lmax=modes_lat, mmax=modes_lon, grid="legendre-gauss").float()
+            self.itrans = InverseRealSHT(self.h, self.w, lmax=modes_lat, mmax=modes_lon, grid="legendre-gauss").float()
 
         elif self.spectral_transform == "fft":
-
             modes_lat = int(self.h * self.hard_thresholding_fraction)
             modes_lon = int((self.w // 2 + 1) * self.hard_thresholding_fraction)
 
-            self.trans_down = RealFFT2(
-                *self.img_size, lmax=modes_lat, mmax=modes_lon
-            ).float()
-            self.itrans_up = InverseRealFFT2(
-                *self.img_size, lmax=modes_lat, mmax=modes_lon
-            ).float()
-            self.trans = RealFFT2(
-                self.h, self.w, lmax=modes_lat, mmax=modes_lon
-            ).float()
-            self.itrans = InverseRealFFT2(
-                self.h, self.w, lmax=modes_lat, mmax=modes_lon
-            ).float()
+            self.trans_down = RealFFT2(*self.img_size, lmax=modes_lat, mmax=modes_lon).float()
+            self.itrans_up = InverseRealFFT2(*self.img_size, lmax=modes_lat, mmax=modes_lon).float()
+            self.trans = RealFFT2(self.h, self.w, lmax=modes_lat, mmax=modes_lon).float()
+            self.itrans = InverseRealFFT2(self.h, self.w, lmax=modes_lat, mmax=modes_lon).float()
 
         else:
             raise (ValueError("Unknown spectral transform"))
 
         self.blocks = nn.ModuleList([])
         for i in range(self.num_layers):
-
             first_layer = i == 0
             last_layer = i == self.num_layers - 1
 
@@ -1259,7 +1172,6 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
             inverse_transform = self.itrans_up if last_layer else self.itrans
 
             inner_skip = "none"
-            
 
             if first_layer:
                 norm_layer = norm_layer1
@@ -1326,7 +1238,6 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
         return {"pos_embed", "cls_token"}
 
     def forward_features(self, x):
-
         x = self.pos_drop(x)
 
         for blk in self.blocks:
@@ -1335,7 +1246,6 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
         return x
 
     def forward(self, x):
-
         if self.big_skip:
             residual = x
 
@@ -1355,7 +1265,6 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
 
 
 class SFNO(RegularGridModel):
-
     def init_model(
         self,
         embed_dim=256,
@@ -1371,7 +1280,6 @@ class SFNO(RegularGridModel):
         bias=True,
         num_encoder_layers=1,
     ) -> None:
-
         self.sfnonet = SphericalFourierNeuralOperatorNet(
             embed_dim=embed_dim,
             num_layers=num_layers,
@@ -1389,7 +1297,6 @@ class SFNO(RegularGridModel):
         )
 
     def model(self, x_in):
-
         x_out = self.sfnonet(x_in)
 
         return x_out

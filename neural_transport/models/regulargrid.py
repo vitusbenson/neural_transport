@@ -6,8 +6,8 @@ from neural_transport.models.layers import (
     MultiScaleEncoder,
 )
 
-class RegularGridModel(nn.Module):
 
+class RegularGridModel(nn.Module):
     def __init__(
         self,
         model_kwargs={},
@@ -47,7 +47,6 @@ class RegularGridModel(nn.Module):
         self.massfixer = massfixer
         self.molecules = molecules
         self.targshift = targshift
-
 
         if self.horizontal_interpolation == "multiscale_encoder":
             self.multiscale_encoder = MultiScaleEncoder(
@@ -92,7 +91,7 @@ class RegularGridModel(nn.Module):
                     f"Expected keys: {v}_offset, {v}_scale. "
                     f"Available keys: {list(batch.keys())}"
                 )
-            
+
             x_in_curr = (batch[v] - offset) / scale
 
             if self.targshift and (v in self.target_vars):
@@ -103,16 +102,13 @@ class RegularGridModel(nn.Module):
         return batch_normalized
 
     def preprocess_inputs(self, batch):
-
         batch_normalized = self.normalize_batch(batch)
 
         x_in = torch.cat(list(batch_normalized.values()), dim=-1)
 
         B, _, C = x_in.shape
 
-        x_in = x_in.reshape(B, self.in_nlat, self.in_nlon, C).permute(
-            0, 3, 1, 2
-        )  # b c h w
+        x_in = x_in.reshape(B, self.in_nlat, self.in_nlon, C).permute(0, 3, 1, 2)  # b c h w
 
         if self.horizontal_interpolation == "multiscale_encoder":
             x_in = self.multiscale_encoder(x_in)
@@ -128,7 +124,6 @@ class RegularGridModel(nn.Module):
         return x_in
 
     def normalize_batch_target_vars(self, batch):
-        
         batch_normalized = {}
         for v in self.target_vars:
             for suffix in ['', '_next']:
@@ -143,7 +138,6 @@ class RegularGridModel(nn.Module):
                     batch_normalized[key] = x_in_curr
 
         return batch_normalized
-    
 
     def normalize_observations(self, obs_values, batch, target_var, targshift=None):
         mean = batch[f"{target_var}_offset"]
@@ -167,11 +161,10 @@ class RegularGridModel(nn.Module):
 
         return obs_norm
 
-    
     def denormalize_tensor(self, x_out, batch):
         x_grid_offset = torch.cat(
-                [(batch[f"{v}_offset"]).expand_as(batch[v]) for v in self.target_vars],
-                dim=-1,
+            [(batch[f"{v}_offset"]).expand_as(batch[v]) for v in self.target_vars],
+            dim=-1,
         )
         x_grid_scale = torch.cat(
             [(batch[f"{v}_scale"]).expand_as(batch[v]) for v in self.target_vars],
@@ -183,10 +176,7 @@ class RegularGridModel(nn.Module):
             dim=-1,
         )
         x_grid_delta_offset = torch.cat(
-            [
-                (batch[f"{v}_delta_offset"]).expand_as(batch[v])
-                for v in self.target_vars
-            ],
+            [(batch[f"{v}_delta_offset"]).expand_as(batch[v]) for v in self.target_vars],
             dim=-1,
         )
         x_grid_delta_scale = torch.cat(
@@ -213,7 +203,6 @@ class RegularGridModel(nn.Module):
         return x_out_next
 
     def postprocess_outputs(self, x_out, batch, denormalize=True):
-
         if self.horizontal_interpolation == "multiscale_encoder":
             x_out = self.multiscale_decoder(x_out)
         elif self.horizontal_interpolation is not None:
@@ -226,12 +215,12 @@ class RegularGridModel(nn.Module):
 
         B, N, _ = batch[self.target_vars[0]].shape
         x_out = x_out.permute(0, 2, 3, 1).reshape(B, N, -1)
-        
+
         if denormalize:
             x_out_next = self.denormalize_tensor(x_out, batch)
         else:
             x_out_next = x_out
-        
+
         preds = {}
         i = 0
         for v in self.target_vars:
@@ -240,9 +229,7 @@ class RegularGridModel(nn.Module):
             i += C
 
         for molecule in self.molecules:
-
             if self.massfixer and (not self.training):
-
                 mass_pred = (preds[f"{molecule}massmix"]) * batch["airmass_next"]
 
                 mass_old = (batch[f"{molecule}massmix"]) * batch["airmass"]
@@ -258,47 +245,34 @@ class RegularGridModel(nn.Module):
                         / 1e6  # / 1e12  # PgCO2
                     )
                     B, N, C = mass_old.shape
-                    mass_old = mass_old + (
-                        surfflux_as_masssource.sum((1, 2), keepdim=True) / (N * C)
-                    )
+                    mass_old = mass_old + (surfflux_as_masssource.sum((1, 2), keepdim=True) / (N * C))
                 if self.massfixer == "shift":
-
                     preds[f"{molecule}massmix"] = (
-                        (
-                            mass_pred
-                            - mass_pred.mean((1, 2), keepdim=True)
-                            + mass_old.mean((1, 2), keepdim=True)
-                        )
+                        mass_pred - mass_pred.mean((1, 2), keepdim=True) + mass_old.mean((1, 2), keepdim=True)
                     ) / batch["airmass_next"]
 
                 elif self.massfixer == "scale":
-
                     preds[f"{molecule}massmix"] = (
-                        (
-                            mass_pred
-                            * mass_old.mean((1, 2), keepdim=True)
-                            / mass_pred.mean((1, 2), keepdim=True)
-                        )
+                        mass_pred * mass_old.mean((1, 2), keepdim=True) / mass_pred.mean((1, 2), keepdim=True)
                     ) / batch["airmass_next"]
 
             if self.add_surfflux:
-
                 surfflux_as_massmixsource_prev = (
                     (
-                        batch[f"{molecule}flux_land"]
-                        + batch[f"{molecule}flux_ocean"]
-                        + batch[f"{molecule}flux_anthro"]
+                        (
+                            batch[f"{molecule}flux_land"]
+                            + batch[f"{molecule}flux_ocean"]
+                            + batch[f"{molecule}flux_anthro"]
+                        )
+                        * batch["cell_area"]
+                        * self.dt
+                        / 1e6  # / 1e12  # PgCO2
                     )
-                    * batch["cell_area"]
-                    * self.dt
-                    / 1e6  # / 1e12  # PgCO2
-                ) / batch["airmass_next"][
-                    ..., :1
-                ]  # * 1e6
+                    / batch["airmass_next"][..., :1]
+                )  # * 1e6
 
                 preds[f"{molecule}massmix"][..., :1] = (
-                    preds[f"{molecule}massmix"][..., :1]
-                    + surfflux_as_massmixsource_prev
+                    preds[f"{molecule}massmix"][..., :1] + surfflux_as_massmixsource_prev
                 )
 
         return preds

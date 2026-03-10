@@ -14,24 +14,17 @@ from dask.diagnostics import ProgressBar
 from tqdm import tqdm
 from tqdm.contrib.concurrent import process_map
 
-from neural_transport.datasets.grids import (
-    CARBOSCOPE_79_LOCATIONS,
-    CARBOSCOPE_79_LONLAT,
-    OBSPACK_287_LONLAT,
-)
+from neural_transport.models.gnn.mesh import ICONGrid
 from neural_transport.neural_transport.datasets.solar_radiation import (
     get_toa_incident_solar_radiation_for_xarray,
 )
-from neural_transport.models.gnn.mesh import ICONGrid
-from neural_transport.tools.conversion import *
+from neural_transport.tools.conversion import density_to_massmix
 
 
 def download_data(save_dir):
     save_dir = Path(save_dir)
 
-    BASEPATH = (
-        "https://psl.noaa.gov/thredds/fileServer/Datasets/ncep.reanalysis/pressure/"
-    )
+    BASEPATH = "https://psl.noaa.gov/thredds/fileServer/Datasets/ncep.reanalysis/pressure/"
 
     print("Downloading NCEP Meteo")
     for var in tqdm(
@@ -154,9 +147,7 @@ def aggregate_fluxes(save_dir):
     ds = xr.open_dataset(save_dir / "Carboscope/surfflux/s93oc_v2022_daily.nc")
     fluxes = xr.Dataset(
         {
-            v: (
-                ds[v] / ds.dxyp / (365 * 24 * 60 * 60) * 1e12 * 44.009e-3 / 12.011e-3
-            ).assign_attrs(
+            v: (ds[v] / ds.dxyp / (365 * 24 * 60 * 60) * 1e12 * 44.009e-3 / 12.011e-3).assign_attrs(
                 {
                     "long_name": {
                         "co2flux_land": "Flux of Carbon Dioxide Net Ecosystem Exchange",
@@ -176,9 +167,7 @@ def aggregate_fluxes(save_dir):
 
     fluxes = xr.Dataset(
         {
-            v: (
-                ds[v] / ds.dxyp / (365 * 24 * 60 * 60) * 1e12 * 44.009e-3 / 12.011e-3
-            ).assign_attrs(
+            v: (ds[v] / ds.dxyp / (365 * 24 * 60 * 60) * 1e12 * 44.009e-3 / 12.011e-3).assign_attrs(
                 {
                     "long_name": {
                         "co2flux_land": "Flux of Carbon Dioxide Net Ecosystem Exchange",
@@ -207,17 +196,11 @@ def remap_one(gridpath, inpath, outpath):
     cdo.remapcon(str(gridpath), input=str(inpath), output=str(outpath))
 
 
-def remap_to_icosa(
-    save_dir, level="L5", min_level=None, resolved_locations=None, gridname=None
-):
+def remap_to_icosa(save_dir, level="L5", min_level=None, resolved_locations=None, gridname=None):
     save_dir = Path(save_dir)
 
-    cdo = Cdo()
-
     if min_level is not None:
-        L5Grid = ICONGrid.create(
-            min_level, int(level[-1]), resolved_locations=resolved_locations
-        )
+        L5Grid = ICONGrid.create(min_level, int(level[-1]), resolved_locations=resolved_locations)
         if gridname is None:
             gridname = f"icosa{level}-L{min_level}a{len(resolved_locations)}"
     else:
@@ -235,12 +218,7 @@ def remap_to_icosa(
     print("Remapping Carboscope Train set to ICON")
     for year in tqdm(range(1957, 2017), position=0, leave=True, desc="Year"):
         inpath = save_dir / "Carboscope" / "mixratio" / f"sEXTocNEET_v4.3_mix_{year}.nc"
-        outpath = (
-            save_dir
-            / "Carboscope"
-            / f"{gridname}_mixratio"
-            / f"sEXTocNEET_v4.3_mix_{year}.nc"
-        )
+        outpath = save_dir / "Carboscope" / f"{gridname}_mixratio" / f"sEXTocNEET_v4.3_mix_{year}.nc"
         outpath.parent.mkdir(parents=True, exist_ok=True)
         gridpaths.append(gridpath)
         inpaths.append(inpath)
@@ -248,10 +226,8 @@ def remap_to_icosa(
         # cdo.remapcon(str(gridpath), input=str(inpath), output=str(outpath))
     # process_map(remap_one, gridpaths, inpaths, outpaths, max_workers=64, desc="Year")
 
-    inpath = save_dir / "Carboscope" / "surfflux" / f"sEXTocNEET_co2flux.nc"
-    outpath = (
-        save_dir / "Carboscope" / f"{gridname}_surfflux" / f"sEXTocNEET_co2flux.nc"
-    )
+    inpath = save_dir / "Carboscope" / "surfflux" / "sEXTocNEET_co2flux.nc"
+    outpath = save_dir / "Carboscope" / f"{gridname}_surfflux" / "sEXTocNEET_co2flux.nc"
     outpath.parent.mkdir(parents=True, exist_ok=True)
 
     gridpaths.append(gridpath)
@@ -264,12 +240,7 @@ def remap_to_icosa(
     print("Remapping Carboscope Test set to ICON")
     for year in tqdm(range(2018, 2022), position=0, leave=True, desc="Year"):
         inpath = save_dir / "Carboscope" / "mixratio" / f"s93oc_v2022_mix_{year}.nc"
-        outpath = (
-            save_dir
-            / "Carboscope"
-            / f"{gridname}_mixratio"
-            / f"s93oc_v2022_mix_{year}.nc"
-        )
+        outpath = save_dir / "Carboscope" / f"{gridname}_mixratio" / f"s93oc_v2022_mix_{year}.nc"
         outpath.parent.mkdir(parents=True, exist_ok=True)
 
         gridpaths.append(gridpath)
@@ -278,8 +249,8 @@ def remap_to_icosa(
         # cdo.remapcon(str(gridpath), input=str(inpath), output=str(outpath))
     # process_map(remap_one, gridpaths, inpaths, outpaths, max_workers=64, desc="Year")
 
-    inpath = save_dir / "Carboscope" / "surfflux" / f"s93oc_co2flux.nc"
-    outpath = save_dir / "Carboscope" / f"{gridname}_surfflux" / f"s93oc_co2flux.nc"
+    inpath = save_dir / "Carboscope" / "surfflux" / "s93oc_co2flux.nc"
+    outpath = save_dir / "Carboscope" / f"{gridname}_surfflux" / "s93oc_co2flux.nc"
     outpath.parent.mkdir(parents=True, exist_ok=True)
 
     gridpaths.append(gridpath)
@@ -298,9 +269,7 @@ def remap_to_icosa(
     ):
         for year in tqdm(range(1957, 2022), position=0, leave=False, desc="Year"):
             inpath = save_dir / "NCEP_NCAR_Reanalysis" / "latlon" / f"{var}.{year}.nc"
-            outpath = (
-                save_dir / "NCEP_NCAR_Reanalysis" / f"{gridname}" / f"{var}.{year}.nc"
-            )
+            outpath = save_dir / "NCEP_NCAR_Reanalysis" / f"{gridname}" / f"{var}.{year}.nc"
             outpath.parent.mkdir(parents=True, exist_ok=True)
 
             # cdo.remapcon(str(gridpath), input=str(inpath), output=str(outpath))
@@ -308,9 +277,7 @@ def remap_to_icosa(
             inpaths.append(inpath)
             outpaths.append(outpath)
         # cdo.remapcon(str(gridpath), input=str(inpath), output=str(outpath))
-    process_map(
-        remap_one, gridpaths, inpaths, outpaths, max_workers=64, desc="All_Jobs"
-    )
+    process_map(remap_one, gridpaths, inpaths, outpaths, max_workers=64, desc="All_Jobs")
 
     print("Done!")
 
@@ -329,8 +296,8 @@ def remap_to_icon(save_dir):
 
     #     cdo.remapcon(str(gridpath),input=str(inpath),output=str(outpath))
 
-    inpath = save_dir / "Carboscope" / "surfflux" / f"sEXTocNEET_co2flux.nc"
-    outpath = save_dir / "Carboscope" / "icon_surfflux" / f"sEXTocNEET_co2flux.nc"
+    inpath = save_dir / "Carboscope" / "surfflux" / "sEXTocNEET_co2flux.nc"
+    outpath = save_dir / "Carboscope" / "icon_surfflux" / "sEXTocNEET_co2flux.nc"
 
     cdo.remapcon(str(gridpath), input=str(inpath), output=str(outpath))
 
@@ -343,8 +310,8 @@ def remap_to_icon(save_dir):
 
     #     cdo.remapcon(str(gridpath),input=str(inpath),output=str(outpath))
 
-    inpath = save_dir / "Carboscope" / "surfflux" / f"s93oc_co2flux.nc"
-    outpath = save_dir / "Carboscope" / "icon_surfflux" / f"s93oc_co2flux.nc"
+    inpath = save_dir / "Carboscope" / "surfflux" / "s93oc_co2flux.nc"
+    outpath = save_dir / "Carboscope" / "icon_surfflux" / "s93oc_co2flux.nc"
 
     cdo.remapcon(str(gridpath), input=str(inpath), output=str(outpath))
 
@@ -371,28 +338,20 @@ def icon_to_zarr(save_dir, gridtype="icon"):
     test_dir.mkdir(parents=True, exist_ok=True)
 
     if gridtype == "icon":
-        grid = xr.open_dataset(save_dir / f"icon_grid" / "R02B04_G.nc")
+        grid = xr.open_dataset(save_dir / "icon_grid" / "R02B04_G.nc")
     else:
-        grid = xr.open_dataset(save_dir / f"icosa_grid" / f"{gridtype}.nc")
+        grid = xr.open_dataset(save_dir / "icosa_grid" / f"{gridtype}.nc")
 
-    mixing_ratios_train = xr.open_mfdataset(
-        (save_dir / "Carboscope" / f"{gridtype}_mixratio").glob("sEXTocNEET_*.nc")
-    )
+    mixing_ratios_train = xr.open_mfdataset((save_dir / "Carboscope" / f"{gridtype}_mixratio").glob("sEXTocNEET_*.nc"))
     mixing_ratios_test = xr.open_mfdataset(
-        [
-            save_dir
-            / "Carboscope"
-            / f"{gridtype}_mixratio"
-            / f"s93oc_v2022_mix_{year}.nc"
-            for year in range(2018, 2022)
-        ]
+        [save_dir / "Carboscope" / f"{gridtype}_mixratio" / f"s93oc_v2022_mix_{year}.nc" for year in range(2018, 2022)]
     )
-    fluxes_train = xr.open_dataset(
-        save_dir / "Carboscope" / f"{gridtype}_surfflux" / "sEXTocNEET_co2flux.nc"
-    ).sel(mtime=slice("1957-01-01", "2017-12-31"))
-    fluxes_test = xr.open_dataset(
-        save_dir / "Carboscope" / f"{gridtype}_surfflux" / "s93oc_co2flux.nc"
-    ).sel(mtime=slice("2018-01-01", "2022-01-01"))
+    fluxes_train = xr.open_dataset(save_dir / "Carboscope" / f"{gridtype}_surfflux" / "sEXTocNEET_co2flux.nc").sel(
+        mtime=slice("1957-01-01", "2017-12-31")
+    )
+    fluxes_test = xr.open_dataset(save_dir / "Carboscope" / f"{gridtype}_surfflux" / "s93oc_co2flux.nc").sel(
+        mtime=slice("2018-01-01", "2022-01-01")
+    )
 
     all_vars_train = {}
     all_vars_test = {}
@@ -419,12 +378,8 @@ def icon_to_zarr(save_dir, gridtype="icon"):
     co2_train = mixing_ratios_train.co2mix + 312.788
     co2_test = mixing_ratios_test.co2mix + 310.052
 
-    all_vars_train["gp"] = mixing_ratios_train.gph.assign_attrs(
-        {"long_name": "Geopotential Height", "units": "m"}
-    )
-    all_vars_test["gp"] = mixing_ratios_test.gph.assign_attrs(
-        {"long_name": "Geopotential Height", "units": "m"}
-    )
+    all_vars_train["gp"] = mixing_ratios_train.gph.assign_attrs({"long_name": "Geopotential Height", "units": "m"})
+    all_vars_test["gp"] = mixing_ratios_test.gph.assign_attrs({"long_name": "Geopotential Height", "units": "m"})
 
     for v in ["air", "omega", "rhum", "shum", "uwnd", "vwnd"]:
         varname = {
@@ -443,9 +398,7 @@ def icon_to_zarr(save_dir, gridtype="icon"):
             "u": {"long_name": "U wind", "units": "m/s"},
             "v": {"long_name": "V wind", "units": "m/s"},
         }[varname]
-        ncep = xr.open_mfdataset(
-            (save_dir / "NCEP_NCAR_Reanalysis" / f"{gridtype}").glob(f"{v}*.nc")
-        )[v]
+        ncep = xr.open_mfdataset((save_dir / "NCEP_NCAR_Reanalysis" / f"{gridtype}").glob(f"{v}*.nc"))[v]
         new_levels = ncep.level.values
         new_levels[np.argmax(new_levels)] = 1013
         ncep["level"] = new_levels
@@ -481,9 +434,7 @@ def icon_to_zarr(save_dir, gridtype="icon"):
 
         T_celsius = T - 273.15
 
-        Psat = 0.61121 * np.exp(
-            (18.678 - T_celsius / 234.5) * (T_celsius / (257.14 + T_celsius))
-        )
+        Psat = 0.61121 * np.exp((18.678 - T_celsius / 234.5) * (T_celsius / (257.14 + T_celsius)))
 
         Pv = RH / 100 * Psat
         Pd = gph.height - 10 * Pv
@@ -491,17 +442,12 @@ def icon_to_zarr(save_dir, gridtype="icon"):
         rho = 100 * Pd / (287.050676 * T)
 
         midpoints = (
-            gph.isel(height=slice(-1)).assign_coords(
-                {"height": gph.height.isel(height=slice(1, None))}
-            )
+            gph.isel(height=slice(-1)).assign_coords({"height": gph.height.isel(height=slice(1, None))})
             + gph.isel(height=slice(1, None))
         ) / 2
         V = dxyp * xr.concat(
             [
-                midpoints.isel(height=0).assign_coords(
-                    {"height": gph.height.isel(height=0)}
-                )
-                - gph.isel(height=0),
+                midpoints.isel(height=0).assign_coords({"height": gph.height.isel(height=0)}) - gph.isel(height=0),
                 midpoints.diff("height", label="lower"),
                 -midpoints.isel(height=-1) + gph.isel(height=-1),
             ],
@@ -538,10 +484,8 @@ def icon_to_zarr(save_dir, gridtype="icon"):
 
     try:
         ds = xr.Dataset(all_vars_train).chunk({"time": 10, "height": -1, "cell": -1})
-        ds_test = xr.Dataset(all_vars_test).chunk(
-            {"time": 10, "height": -1, "cell": -1}
-        )
-    except:
+        ds_test = xr.Dataset(all_vars_test).chunk({"time": 10, "height": -1, "cell": -1})
+    except Exception:
         breakpoint()
 
     print("To Zarr")
@@ -591,9 +535,7 @@ def latlon_to_zarr(save_dir, higher_res=False):
     test_dir.mkdir(parents=True, exist_ok=True)
 
     if higher_res:
-        grid = xr.open_dataset(
-            save_dir / "Carboscope" / "surfflux" / "s93oc_v2022_daily.nc"
-        )[["dxyp"]]
+        grid = xr.open_dataset(save_dir / "Carboscope" / "surfflux" / "s93oc_v2022_daily.nc")[["dxyp"]]
 
         ds_out = xr.Dataset(
             {
@@ -603,9 +545,7 @@ def latlon_to_zarr(save_dir, higher_res=False):
         )
 
     else:
-        grid = xr.open_dataset(
-            save_dir / "Carboscope" / "surfflux" / "sEXTocNEET_v4.3_daily.nc"
-        )[["dxyp"]]
+        grid = xr.open_dataset(save_dir / "Carboscope" / "surfflux" / "sEXTocNEET_v4.3_daily.nc")[["dxyp"]]
 
         lat = np.linspace(-88, 88, 45)
         ds_out = xr.Dataset(
@@ -616,16 +556,7 @@ def latlon_to_zarr(save_dir, higher_res=False):
                     ["lat", "lon"],
                     np.stack(
                         len(grid.lon.values)
-                        * [
-                            np.pi
-                            * 6.375e6**2
-                            * (
-                                np.sin(np.radians(lat + 2))
-                                - np.sin(np.radians(lat - 2))
-                            )
-                            * 5
-                            / 180
-                        ],
+                        * [np.pi * 6.375e6**2 * (np.sin(np.radians(lat + 2)) - np.sin(np.radians(lat - 2))) * 5 / 180],
                         axis=-1,
                     ),
                 ),
@@ -633,45 +564,28 @@ def latlon_to_zarr(save_dir, higher_res=False):
         )
         grid = ds_out
 
-    mixing_ratios_train = xr.open_mfdataset(
-        (save_dir / "Carboscope" / "mixratio").glob("sEXTocNEET_*.nc")
-    )
+    mixing_ratios_train = xr.open_mfdataset((save_dir / "Carboscope" / "mixratio").glob("sEXTocNEET_*.nc"))
     mixing_ratios_test = xr.open_mfdataset(
-        [
-            save_dir / "Carboscope" / "mixratio" / f"s93oc_v2022_mix_{year}.nc"
-            for year in range(2018, 2022)
-        ]
+        [save_dir / "Carboscope" / "mixratio" / f"s93oc_v2022_mix_{year}.nc" for year in range(2018, 2022)]
     )
-    fluxes_train = xr.open_dataset(
-        save_dir / "Carboscope" / "surfflux" / "sEXTocNEET_co2flux.nc"
-    ).sel(mtime=slice("1957-01-01", "2017-12-31"))
-    fluxes_test = xr.open_dataset(
-        save_dir / "Carboscope" / "surfflux" / "s93oc_co2flux.nc"
-    ).sel(mtime=slice("2018-01-01", "2022-01-01"))
-
-    regridder = xe.Regridder(
-        mixing_ratios_train, ds_out, "conservative_normed", periodic=True
+    fluxes_train = xr.open_dataset(save_dir / "Carboscope" / "surfflux" / "sEXTocNEET_co2flux.nc").sel(
+        mtime=slice("1957-01-01", "2017-12-31")
     )
-    mixing_ratios_train = regridder(
-        mixing_ratios_train[["co2mix", "gph"]], keep_attrs=True
+    fluxes_test = xr.open_dataset(save_dir / "Carboscope" / "surfflux" / "s93oc_co2flux.nc").sel(
+        mtime=slice("2018-01-01", "2022-01-01")
     )
 
-    regridder = xe.Regridder(
-        mixing_ratios_test, ds_out, "conservative_normed", periodic=True
-    )
-    mixing_ratios_test = regridder(
-        mixing_ratios_test[["co2mix", "gph"]], keep_attrs=True
-    )
+    regridder = xe.Regridder(mixing_ratios_train, ds_out, "conservative_normed", periodic=True)
+    mixing_ratios_train = regridder(mixing_ratios_train[["co2mix", "gph"]], keep_attrs=True)
+
+    regridder = xe.Regridder(mixing_ratios_test, ds_out, "conservative_normed", periodic=True)
+    mixing_ratios_test = regridder(mixing_ratios_test[["co2mix", "gph"]], keep_attrs=True)
 
     regridder = xe.Regridder(fluxes_train, ds_out, "conservative_normed", periodic=True)
-    fluxes_train = regridder(
-        fluxes_train[["co2flux_land", "co2flux_ocean", "co2flux_subt"]], keep_attrs=True
-    )
+    fluxes_train = regridder(fluxes_train[["co2flux_land", "co2flux_ocean", "co2flux_subt"]], keep_attrs=True)
 
     regridder = xe.Regridder(fluxes_test, ds_out, "conservative_normed", periodic=True)
-    fluxes_test = regridder(
-        fluxes_test[["co2flux_land", "co2flux_ocean", "co2flux_subt"]], keep_attrs=True
-    )
+    fluxes_test = regridder(fluxes_test[["co2flux_land", "co2flux_ocean", "co2flux_subt"]], keep_attrs=True)
 
     all_vars_train = {}
     all_vars_test = {}
@@ -698,12 +612,8 @@ def latlon_to_zarr(save_dir, higher_res=False):
     co2_train = mixing_ratios_train.co2mix + 312.788
     co2_test = mixing_ratios_test.co2mix + 310.052
 
-    all_vars_train["gp"] = mixing_ratios_train.gph.assign_attrs(
-        {"long_name": "Geopotential Height", "units": "m"}
-    )
-    all_vars_test["gp"] = mixing_ratios_test.gph.assign_attrs(
-        {"long_name": "Geopotential Height", "units": "m"}
-    )
+    all_vars_train["gp"] = mixing_ratios_train.gph.assign_attrs({"long_name": "Geopotential Height", "units": "m"})
+    all_vars_test["gp"] = mixing_ratios_test.gph.assign_attrs({"long_name": "Geopotential Height", "units": "m"})
 
     for v in ["air", "omega", "rhum", "shum", "uwnd", "vwnd"]:
         varname = {
@@ -722,9 +632,7 @@ def latlon_to_zarr(save_dir, higher_res=False):
             "u": {"long_name": "U wind", "units": "m/s"},
             "v": {"long_name": "V wind", "units": "m/s"},
         }[varname]
-        ncep = xr.open_mfdataset(
-            (save_dir / "NCEP_NCAR_Reanalysis" / "latlon").glob(f"{v}*.nc")
-        )
+        ncep = xr.open_mfdataset((save_dir / "NCEP_NCAR_Reanalysis" / "latlon").glob(f"{v}*.nc"))
 
         regridder = xe.Regridder(ncep, ds_out, "conservative_normed", periodic=True)
         ncep = regridder(ncep[[v]], keep_attrs=True)[v]
@@ -764,27 +672,20 @@ def latlon_to_zarr(save_dir, higher_res=False):
 
         T_celsius = T - 273.15
 
-        Psat = 0.61121 * np.exp(
-            (18.678 - T_celsius / 234.5) * (T_celsius / (257.14 + T_celsius))
-        )
+        Psat = 0.61121 * np.exp((18.678 - T_celsius / 234.5) * (T_celsius / (257.14 + T_celsius)))
 
         Pv = RH / 100 * Psat
         Pd = gph.height - 10 * Pv
 
-        rho = 100 * Pd / (287.050676 * T) # THIS USES THE WRONG PRESSURE FIELD !
+        rho = 100 * Pd / (287.050676 * T)  # THIS USES THE WRONG PRESSURE FIELD !
 
         midpoints = (
-            gph.isel(height=slice(-1)).assign_coords(
-                {"height": gph.height.isel(height=slice(1, None))}
-            )
+            gph.isel(height=slice(-1)).assign_coords({"height": gph.height.isel(height=slice(1, None))})
             + gph.isel(height=slice(1, None))
         ) / 2
         V = dxyp * xr.concat(
             [
-                midpoints.isel(height=0).assign_coords(
-                    {"height": gph.height.isel(height=0)}
-                )
-                - gph.isel(height=0),
+                midpoints.isel(height=0).assign_coords({"height": gph.height.isel(height=0)}) - gph.isel(height=0),
                 midpoints.diff("height", label="lower"),
                 -midpoints.isel(height=-1) + gph.isel(height=-1),
             ],
@@ -816,13 +717,9 @@ def latlon_to_zarr(save_dir, higher_res=False):
             }
         )
 
-    ds = xr.Dataset(all_vars_train).chunk(
-        {"time": 1, "height": -1, "lat": -1, "lon": -1}
-    )
+    ds = xr.Dataset(all_vars_train).chunk({"time": 1, "height": -1, "lat": -1, "lon": -1})
     ds["tisr"] = get_toa_incident_solar_radiation_for_xarray(ds)
-    ds_test = xr.Dataset(all_vars_test).chunk(
-        {"time": 1, "height": -1, "lat": -1, "lon": -1}
-    )
+    ds_test = xr.Dataset(all_vars_test).chunk({"time": 1, "height": -1, "lat": -1, "lon": -1})
     ds_test["tisr"] = get_toa_incident_solar_radiation_for_xarray(ds_test)
 
     ds_train = ds.sel(time=slice(None, "2014-12-31"))
@@ -923,9 +820,7 @@ def stats_dataset(save_dir):
     train_dir = save_dir / "Carboscope" / "train"
     test_dir = save_dir / "Carboscope" / "test"
 
-    ds = xr.open_zarr(train_dir / "carboscope_latlon4.zarr").sel(
-        time=slice(None, "2015-12-31")
-    )
+    ds = xr.open_zarr(train_dir / "carboscope_latlon4.zarr").sel(time=slice(None, "2015-12-31"))
 
     # ds_min = ds.min().to_array("var")
     # ds_mean = ds.mean().to_array("var")
@@ -1020,7 +915,7 @@ def stats_dataset(save_dir):
     #     #     .to_dataset("var")
     #     #     .compute()
     #     # ).rename({v: f"{v}_delta" for v in ds.data_vars})
-    ds_delta_stats.to_netcdf(train_dir / f"carboscope_delta_stats.nc")
+    ds_delta_stats.to_netcdf(train_dir / "carboscope_delta_stats.nc")
 
     ds_stats = ds_delta_stats.merge(ds_stats, compat="override")
 
@@ -1044,32 +939,22 @@ def stddev_weights(save_dir):
     train_dir = save_dir / "Carboscope" / "train"
     test_dir = save_dir / "Carboscope" / "test"
 
-    ds = xr.open_zarr(train_dir / "carboscope_icon.zarr").sel(
-        time=slice(None, "2015-12-31")
-    )
+    ds = xr.open_zarr(train_dir / "carboscope_icon.zarr").sel(time=slice(None, "2015-12-31"))
 
     co2density_per_cell = ds.co2density.std("time")
-    co2massmix_per_cell = density_to_massmix(
-        ds.co2density, ds.airdensity, ppm=True, eps=1e-12
-    ).std("time")
+    co2massmix_per_cell = density_to_massmix(ds.co2density, ds.airdensity, ppm=True, eps=1e-12).std("time")
 
     co2density_delta_per_cell = ds.co2density.diff("time").std("time")
     co2massmix_delta_per_cell = (
-        density_to_massmix(ds.co2density, ds.airdensity, ppm=True, eps=1e-12)
-        .diff("time")
-        .std("time")
+        density_to_massmix(ds.co2density, ds.airdensity, ppm=True, eps=1e-12).diff("time").std("time")
     )
 
     co2density_per_level = ds.co2density.std(["time", "cell"])
-    co2massmix_per_level = density_to_massmix(
-        ds.co2density, ds.airdensity, ppm=True, eps=1e-12
-    ).std(["time", "cell"])
+    co2massmix_per_level = density_to_massmix(ds.co2density, ds.airdensity, ppm=True, eps=1e-12).std(["time", "cell"])
 
     co2density_delta_per_level = ds.co2density.diff("time").std(["time", "cell"])
     co2massmix_delta_per_level = (
-        density_to_massmix(ds.co2density, ds.airdensity, ppm=True, eps=1e-12)
-        .diff("time")
-        .std(["time", "cell"])
+        density_to_massmix(ds.co2density, ds.airdensity, ppm=True, eps=1e-12).diff("time").std(["time", "cell"])
     )
 
     with ProgressBar():
@@ -1124,9 +1009,7 @@ def latlon_to_xyz(lat, lon):
 
 
 def pos_in_local_grid(lat_receiver, lon_receiver, lat_sender, lon_sender):
-    x, y, z = y_rotation(
-        z_rotation(latlon_to_xyz(lat_sender, lon_sender), -lon_receiver), lat_receiver
-    )
+    x, y, z = y_rotation(z_rotation(latlon_to_xyz(lat_sender, lon_sender), -lon_receiver), lat_receiver)
     return x, y, z
 
 
@@ -1165,35 +1048,21 @@ def multimesh_from_icon(save_dir):
         }
     )  # .to_dataframe()
 
-    lat_receiver = np.degrees(
-        grid.lat_cell_centre.isel(cell=mm_edge_index.receiver_idx.values)
-    )
-    lon_receiver = np.degrees(
-        grid.lon_cell_centre.isel(cell=mm_edge_index.receiver_idx.values)
-    )
-    lat_sender = np.degrees(
-        grid.lat_cell_centre.isel(cell=mm_edge_index.sender_idx.values)
-    )
-    lon_sender = np.degrees(
-        grid.lon_cell_centre.isel(cell=mm_edge_index.sender_idx.values)
-    )
+    lat_receiver = np.degrees(grid.lat_cell_centre.isel(cell=mm_edge_index.receiver_idx.values))
+    lon_receiver = np.degrees(grid.lon_cell_centre.isel(cell=mm_edge_index.receiver_idx.values))
+    lat_sender = np.degrees(grid.lat_cell_centre.isel(cell=mm_edge_index.sender_idx.values))
+    lon_sender = np.degrees(grid.lon_cell_centre.isel(cell=mm_edge_index.sender_idx.values))
 
     rel_pos = np.stack(
         [
-            np.array(
-                pos_in_local_grid(
-                    lat_receiver[i], lon_receiver[i], lat_sender[i], lon_sender[i]
-                )
-            )
+            np.array(pos_in_local_grid(lat_receiver[i], lon_receiver[i], lat_sender[i], lon_sender[i]))
             for i in range(len(lat_receiver))
         ]
     )
 
     mm_edge_attr = xr.Dataset(
         {
-            "dual_edge_length": xr.concat(
-                [grid.dual_edge_length, grid.dual_edge_length], dim="edge"
-            ),
+            "dual_edge_length": xr.concat([grid.dual_edge_length, grid.dual_edge_length], dim="edge"),
             "edge_length": xr.concat([grid.edge_length, grid.edge_length], dim="edge"),
         }
     )
@@ -1212,19 +1081,14 @@ def regrid_data(save_dir):
     save_dir = Path(save_dir)
 
     if False:
-        mixing_ratios_train = xr.open_mfdataset(
-            (save_dir / "carboscope_mixingratios").glob("s76_*.nc")
-        )
+        mixing_ratios_train = xr.open_mfdataset((save_dir / "carboscope_mixingratios").glob("s76_*.nc"))
         mixing_ratios_test = xr.open_mfdataset(
-            [
-                save_dir / "carboscope_mixingratios" / f"s93oc_v2022_mix_{year}.nc"
-                for year in range(2018, 2022)
-            ]
+            [save_dir / "carboscope_mixingratios" / f"s93oc_v2022_mix_{year}.nc" for year in range(2018, 2022)]
         )
         fluxes_train = xr.open_dataset(save_dir / "carboscope_flux/s76_v4.1_daily.nc")
-        fluxes_test = xr.open_dataset(
-            save_dir / "carboscope_flux/s93oc_v2022_daily.nc"
-        ).sel(mtime=slice("2018-01-01", "2022-01-01"))
+        fluxes_test = xr.open_dataset(save_dir / "carboscope_flux/s93oc_v2022_daily.nc").sel(
+            mtime=slice("2018-01-01", "2022-01-01")
+        )
 
         ds_out = xr.Dataset(
             {
@@ -1234,25 +1098,15 @@ def regrid_data(save_dir):
         )
 
         print("Regridding Carboscope")
-        regridder = xe.Regridder(
-            mixing_ratios_train, ds_out, "conservative_normed", periodic=True
-        )
+        regridder = xe.Regridder(mixing_ratios_train, ds_out, "conservative_normed", periodic=True)
 
-        mixing_ratios_train_regrid = regridder(
-            mixing_ratios_train[["co2mix", "gph"]], keep_attrs=True
-        )
+        mixing_ratios_train_regrid = regridder(mixing_ratios_train[["co2mix", "gph"]], keep_attrs=True)
 
-        regridder = xe.Regridder(
-            mixing_ratios_test, ds_out, "conservative_normed", periodic=True
-        )
+        regridder = xe.Regridder(mixing_ratios_test, ds_out, "conservative_normed", periodic=True)
 
-        mixing_ratios_test_regrid = regridder(
-            mixing_ratios_test[["co2mix", "gph"]], keep_attrs=True
-        )
+        mixing_ratios_test_regrid = regridder(mixing_ratios_test[["co2mix", "gph"]], keep_attrs=True)
 
-        regridder = xe.Regridder(
-            fluxes_train, ds_out, "conservative_normed", periodic=True
-        )
+        regridder = xe.Regridder(fluxes_train, ds_out, "conservative_normed", periodic=True)
 
         fluxes_train_regrid = regridder(fluxes_train, keep_attrs=True)
 
@@ -1264,10 +1118,7 @@ def regrid_data(save_dir):
         )
 
         fluxes_test["co2flux"] = (
-            fluxes_test.co2flux_land
-            + fluxes_test.co2flux_excl
-            + fluxes_test.co2flux_ocean
-            + fluxes_test.co2flux_subt
+            fluxes_test.co2flux_land + fluxes_test.co2flux_excl + fluxes_test.co2flux_ocean + fluxes_test.co2flux_subt
         )
 
         # Interpolate Flux in Time to 6-hourly
@@ -1321,16 +1172,12 @@ def regrid_data(save_dir):
         co2_test = xr.open_zarr(test_dir / "co2.zarr")
 
         for var in tqdm(["air", "omega", "rhum", "shum", "uwnd", "vwnd"]):
-            ncep = xr.open_mfdataset(
-                (save_dir / "ncep_meteo").glob(f"{var}*.nc")
-            )  # .compute()
+            ncep = xr.open_mfdataset((save_dir / "ncep_meteo").glob(f"{var}*.nc"))  # .compute()
             print(f"Regridding NCEP {var}")
             new_levels = ncep.level.values
             new_levels[np.argmax(new_levels)] = 1013
             ncep["level"] = new_levels
-            ncep = ncep.rename({"level": "height"}).chunk(
-                {"time": 10, "height": -1, "lat": -1, "lon": -1}
-            )
+            ncep = ncep.rename({"level": "height"}).chunk({"time": 10, "height": -1, "lat": -1, "lon": -1})
 
             regridder = xe.Regridder(ncep, ds_out, "bilinear", periodic=True)
             ncep_regrid = regridder(ncep, keep_attrs=True)
@@ -1370,9 +1217,7 @@ def regrid_data(save_dir):
 
         T_celsius = T - 273.15
 
-        Psat = 0.61121 * np.exp(
-            (18.678 - T_celsius / 234.5) * (T_celsius / (257.14 + T_celsius))
-        )
+        Psat = 0.61121 * np.exp((18.678 - T_celsius / 234.5) * (T_celsius / (257.14 + T_celsius)))
 
         Pv = RH / 100 * Psat
         Pd = gph.height - 10 * Pv
@@ -1390,9 +1235,7 @@ def regrid_data(save_dir):
         dryairmass.dryairmass.attrs = {"var_desc": "Dry Air Mass", "units": "t"}
 
         with ProgressBar():
-            dryairmass.chunk({"time": 10, "height": -1, "lat": -1, "lon": -1}).to_zarr(
-                curr_dir / f"dryairmass.zarr"
-            )
+            dryairmass.chunk({"time": 10, "height": -1, "lat": -1, "lon": -1}).to_zarr(curr_dir / "dryairmass.zarr")
 
 
 # def compute_weights(save_dir):
@@ -1523,7 +1366,7 @@ def open_one_obspack(obspack_path):
         obspack_obs["time"] = obspack_obs.get_index("time") + offset
 
         return {obspack_path.stem: obspack_obs.to_array("vari")}
-    except:
+    except Exception:
         print(f"Error with {obspack_path}")
         return None
 
@@ -1533,14 +1376,10 @@ def prepare_obspack_for_carboscope(data_dir):
 
     obspack_dir = data_dir / "Obspack"
 
-    obspack_paths = sorted(
-        list((data_dir / "Obspack").glob("obspack_co2_*/data/nc/*.nc"))
-    )
+    obspack_paths = sorted(list((data_dir / "Obspack").glob("obspack_co2_*/data/nc/*.nc")))
 
     all_obs = process_map(open_one_obspack, obspack_paths, max_workers=32, chunksize=1)
-    all_obs = sorted(
-        [a for a in all_obs if a is not None], key=lambda x: list(x.keys())[0]
-    )
+    all_obs = sorted([a for a in all_obs if a is not None], key=lambda x: list(x.keys())[0])
 
     obs = xr.merge(all_obs, join="outer")
     obs = obs.to_array("cell").to_dataset("vari")

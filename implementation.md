@@ -27,9 +27,9 @@ The core issue is a **distribution mismatch**: column-level constraints create u
 
 ### What Doesn't Work
 - [ ] Column conditioning: spatial artifacts, weak effect, or worse than unconditional
-- [ ] 9+ near-duplicate masking methods
-- [ ] `compute_xco2` fallback uses heuristic normalization
-- [ ] Guidance: uniform correction instead of Jacobian transpose
+- [x] 9+ near-duplicate masking methods (removed 8, kept 4)
+- [x] `compute_xco2` fallback missing targshift correction (fixed)
+- [x] Guidance: uniform correction instead of Jacobian transpose (fixed)
 - [ ] No spatial smoothing of guidance (TODO in code)
 
 ### Key Files
@@ -70,19 +70,20 @@ Build reusable evaluation so every subsequent phase auto-produces full diagnosti
 ## Phase 2: Code Cleanup & Bug Fixes
 
 ### 2a: Remove dead masking methods
-- [ ] **Keep**: `masking_simple`, `masking_interpolate`, `masking_total_column_average_simple`, `masking_total_column_average_mult`
-- [ ] **Remove** 8 others (4 are identical to `_simple`, rest are experimental dead ends)
-- [ ] **File**: `flowmatching.py` lines 247-544
+- [x] **Keep**: `masking_simple`, `masking_interpolate`, `masking_total_column_average_simple`, `masking_total_column_average_mult`
+- [x] **Remove** 8 others (4 are identical to `_simple`, rest are experimental dead ends)
+- [x] **File**: `flowmatching.py`
 
 ### 2b: Fix `compute_xco2` fallback
-- [ ] Replace heuristic (line 90-98) with: convert to physical, compute XCO2, re-normalize
-- [ ] **File**: `flowmatching.py` lines 89-98
+- [x] Add targshift correction to fallback path (`+ targshift_mean * h_ak_sum`)
+- [x] Add `ak is not None` guard in fallback
+- [x] **File**: `flowmatching.py`
 
 ### 2c: Fix guidance gradient
-- [ ] Current: `column_error / h_ak_sum` (uniform). Fix: `h_k * a_k * column_error` (Jacobian transpose)
-- [ ] **File**: `flowmatching.py` lines 147-168
+- [x] Current: `column_error / h_ak_sum` (uniform). Fix: `h_k * a_k * column_error` (Jacobian transpose)
+- [x] **File**: `flowmatching.py`
 
-**Deliverable**: Unit tests in `tests/test_forward_model.py`. Roundtrip error < 1e-5.
+**Deliverable**: Unit tests in `tests/test_forward_model.py` (17 tests, all passing). Roundtrip error < 1e-5.
 
 ---
 

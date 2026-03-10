@@ -16,15 +16,11 @@ DIMS = {
     "latlon2x3": dict(lat=90, lon=120, height=34),
 }
 
-DEFAULT_GRIDS = dict(
-    carboscope="latlon4", egg4="latlon1", camsfc="latlon1", carbontracker="latlon2x3"
-)
+DEFAULT_GRIDS = dict(carboscope="latlon4", egg4="latlon1", camsfc="latlon1", carbontracker="latlon2x3")
 
 LATLON_PROTOTYPE_COORDS = {
     "latlon4x5": dict(lat=np.linspace(-88, 88, 45), lon=np.linspace(-180, 175, 72)),
-    "latlon2x2.5": dict(
-        lat=np.linspace(-89, 89, 90), lon=np.linspace(-180, 180, 144, endpoint=False)
-    ),
+    "latlon2x2.5": dict(lat=np.linspace(-89, 89, 90), lon=np.linspace(-180, 180, 144, endpoint=False)),
     "latlon1": dict(lat=np.linspace(-90, 90, 181), lon=np.linspace(0, 359, 360)),
     "latlon11.25": dict(
         lat=np.linspace(-90 + 90 / 16, 90 - 90 / 16, 16),
@@ -42,9 +38,7 @@ LATLON_PROTOTYPE_COORDS = {
         lat=np.linspace(-90 + 90 / 120, 90 - 90 / 120, 120),
         lon=np.linspace(0, 360, 240, endpoint=False),
     ),
-    "latlon2x3": dict(
-        lat=np.linspace(-89, 89, 90), lon=np.linspace(-178.5, 178.5, 120)
-    ),
+    "latlon2x3": dict(lat=np.linspace(-89, 89, 90), lon=np.linspace(-178.5, 178.5, 120)),
 }
 
 
@@ -71,11 +65,7 @@ L20_HEIGHT = [
 # fmt: on
 
 VERTICAL_LAYERS_PROTOTYPE_COORDS = {
-    "l10": dict(
-        level=np.array(
-            [1013.0, 1005.0, 995.0, 971.0, 943.0, 843.0, 642.0, 441.0, 243.0, 73.0]
-        )
-    ),
+    "l10": dict(level=np.array([1013.0, 1005.0, 995.0, 971.0, 943.0, 843.0, 642.0, 441.0, 243.0, 73.0])),
     "l19": dict(level=np.array(CARBOSCOPE_HEIGHT)),
     "l34": dict(level=np.array(CARBONTRACKER_HEIGHT)),
     "l20": dict(level=np.array(L20_HEIGHT)),

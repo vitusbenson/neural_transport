@@ -13,11 +13,9 @@ from numcodecs import Blosc
 from tqdm import tqdm
 from tqdm.contrib.concurrent import process_map, thread_map
 
-from neural_transport.tools.conversion import *
+from neural_transport.tools.conversion import density_to_massmix, massmix_to_molemix
 
-requests.packages.urllib3.disable_warnings(
-    requests.packages.urllib3.exceptions.InsecureRequestWarning
-)
+requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
 
 
 SINGLE_LEVEL_VARS_IMPORTANT = [
@@ -170,7 +168,7 @@ def download_data(save_dir):
 
     save_dir = Path(save_dir)
 
-    with open(Path.home() / ".adsapirc", "r") as f:
+    with open(Path.home() / ".adsapirc") as f:
         credentials = yaml.safe_load(f)
 
     c = cdsapi.Client(url=credentials["url"], key=credentials["key"])
@@ -178,16 +176,12 @@ def download_data(save_dir):
     print("Loading Multi Levels")
     multilevel_dir = save_dir / "multi_level"
 
-    for year in (
-        pbar1 := tqdm(range(2003, 2021), position=1, desc="Year", leave=False)
-    ):
+    for year in (pbar1 := tqdm(range(2003, 2021), position=1, desc="Year", leave=False)):
         pbar1.set_postfix({"year": year})
 
         year_dir = multilevel_dir / str(year)
         year_dir.mkdir(parents=True, exist_ok=True)
-        for month, month_start, month_end in (
-            pbar2 := tqdm(months, position=2, desc="Month", leave=False)
-        ):
+        for month, month_start, month_end in (pbar2 := tqdm(months, position=2, desc="Month", leave=False)):
             if month == "02" and year in [2004, 2008, 2012, 2016, 2020, 2024]:
                 month_end = "02-29"
 
@@ -210,23 +204,19 @@ def download_data(save_dir):
 
                 except KeyboardInterrupt:
                     return
-                except:
+                except Exception:
                     print(f"{year} {month} not working")
 
     singlelevel_dir = save_dir / "single_level"
 
     print("Loading Single Levels")
 
-    for year in (
-        pbar1 := tqdm(range(2003, 2021), position=1, desc="Year", leave=False)
-    ):
+    for year in (pbar1 := tqdm(range(2003, 2021), position=1, desc="Year", leave=False)):
         pbar1.set_postfix({"year": year})
 
         year_dir = singlelevel_dir / str(year)
         year_dir.mkdir(parents=True, exist_ok=True)
-        for month, month_start, month_end in (
-            pbar2 := tqdm(months, position=2, desc="Month", leave=False)
-        ):
+        for month, month_start, month_end in (pbar2 := tqdm(months, position=2, desc="Month", leave=False)):
             pbar2.set_postfix({"month": month})
             file_path = year_dir / f"{month}.nc"
 
@@ -248,7 +238,7 @@ def download_data(save_dir):
 
                 except KeyboardInterrupt:
                     return
-                except:
+                except Exception:
                     print(f"{year} {month} not working")
 
     print("Done!")
@@ -270,20 +260,8 @@ def remap_to_icon(save_dir):
     outpaths = []
     for year in tqdm(range(2003, 2021), position=0, leave=True, desc="Year"):
         for month in tqdm(range(1, 13), position=1, leave=False, desc="Month"):
-            inpath = (
-                save_dir
-                / "CAMS_EGG4"
-                / "multi_level"
-                / str(year)
-                / f"{str(month).zfill(2)}.nc"
-            )
-            outpath = (
-                save_dir
-                / "CAMS_EGG4"
-                / "icon_multi_level"
-                / str(year)
-                / f"{str(month).zfill(2)}.nc"
-            )
+            inpath = save_dir / "CAMS_EGG4" / "multi_level" / str(year) / f"{str(month).zfill(2)}.nc"
+            outpath = save_dir / "CAMS_EGG4" / "icon_multi_level" / str(year) / f"{str(month).zfill(2)}.nc"
 
             outpath.parent.mkdir(exist_ok=True, parents=True)
 
@@ -302,20 +280,8 @@ def remap_to_icon(save_dir):
     outpaths = []
     for year in tqdm(range(2003, 2021), position=0, leave=True, desc="Year"):
         for month in tqdm(range(1, 13), position=1, leave=False, desc="Month"):
-            inpath = (
-                save_dir
-                / "CAMS_EGG4"
-                / "single_level"
-                / str(year)
-                / f"{str(month).zfill(2)}.nc"
-            )
-            outpath = (
-                save_dir
-                / "CAMS_EGG4"
-                / "icon_single_level"
-                / str(year)
-                / f"{str(month).zfill(2)}.nc"
-            )
+            inpath = save_dir / "CAMS_EGG4" / "single_level" / str(year) / f"{str(month).zfill(2)}.nc"
+            outpath = save_dir / "CAMS_EGG4" / "icon_single_level" / str(year) / f"{str(month).zfill(2)}.nc"
 
             outpath.parent.mkdir(exist_ok=True, parents=True)
 
@@ -332,13 +298,9 @@ def remap_to_icon(save_dir):
 def latlon_to_zarr(data_dir):
     data_dir = Path(data_dir)
     print("Opening EGG4a")
-    egg4a = xr.open_mfdataset(
-        (data_dir / "CAMS_EGG4" / "multi_level").glob("*/*.nc")
-    ).reset_encoding()
+    egg4a = xr.open_mfdataset((data_dir / "CAMS_EGG4" / "multi_level").glob("*/*.nc")).reset_encoding()
     print("Opening EGG4s")
-    egg4s = xr.open_mfdataset(
-        (data_dir / "CAMS_EGG4" / "single_level").glob("*/*.nc")
-    ).reset_encoding()
+    egg4s = xr.open_mfdataset((data_dir / "CAMS_EGG4" / "single_level").glob("*/*.nc")).reset_encoding()
     print("Merging EGG4")
     egg4 = xr.merge([egg4a, egg4s.rename({"z": "z_surf"})])
 
@@ -357,16 +319,7 @@ def latlon_to_zarr(data_dir):
                 ["lat", "lon"],
                 np.stack(
                     len(lon)
-                    * [
-                        np.pi
-                        * 6.375e6**2
-                        * (
-                            np.sin(np.radians(lat_b[1:]))
-                            - np.sin(np.radians(lat_b[:-1]))
-                        )
-                        * 1
-                        / 180
-                    ],
+                    * [np.pi * 6.375e6**2 * (np.sin(np.radians(lat_b[1:])) - np.sin(np.radians(lat_b[:-1]))) * 1 / 180],
                     axis=-1,
                 ),
             ),
@@ -384,9 +337,7 @@ def latlon_to_zarr(data_dir):
 
     T_celsius = T - 273.15
 
-    Psat = 0.61121 * np.exp(
-        (18.678 - T_celsius / 234.5) * (T_celsius / (257.14 + T_celsius))
-    )
+    Psat = 0.61121 * np.exp((18.678 - T_celsius / 234.5) * (T_celsius / (257.14 + T_celsius)))
 
     Pv = RH / 100 * Psat
     Pd = gph.level - 10 * Pv
@@ -394,15 +345,12 @@ def latlon_to_zarr(data_dir):
     rho = 100 * Pd / (287.050676 * T)
 
     midpoints = (
-        gph.isel(level=slice(-1)).assign_coords(
-            {"level": gph.level.isel(level=slice(1, None))}
-        )
+        gph.isel(level=slice(-1)).assign_coords({"level": gph.level.isel(level=slice(1, None))})
         + gph.isel(level=slice(1, None))
     ) / 2
     V = dxyp * xr.concat(
         [
-            120000
-            - midpoints.isel(level=0).assign_coords({"level": gph.level.isel(level=0)}),
+            120000 - midpoints.isel(level=0).assign_coords({"level": gph.level.isel(level=0)}),
             -midpoints.diff("level", label="lower"),
             -midpoints.isel(level=-1) + egg4.z_surf / 9.80665,
         ],
@@ -456,30 +404,26 @@ def latlon_to_zarr(data_dir):
     enc = {x: {"compressor": compressor} for x in egg4.data_vars}
     print("To Zarr")
     with ProgressBar():
-        egg4.sel(time=slice("2018-01-01", "2018-12-31")).chunk(
-            {"time": 10, "level": -1, "lat": -1, "lon": -1}
-        ).to_zarr(val_dir / "egg4_latlon1.zarr", encoding=enc)
+        egg4.sel(time=slice("2018-01-01", "2018-12-31")).chunk({"time": 10, "level": -1, "lat": -1, "lon": -1}).to_zarr(
+            val_dir / "egg4_latlon1.zarr", encoding=enc
+        )
 
     with ProgressBar():
-        egg4.sel(time=slice("2003-01-01", "2017-12-31")).chunk(
-            {"time": 10, "level": -1, "lat": -1, "lon": -1}
-        ).to_zarr(train_dir / "egg4_latlon1.zarr", encoding=enc)
+        egg4.sel(time=slice("2003-01-01", "2017-12-31")).chunk({"time": 10, "level": -1, "lat": -1, "lon": -1}).to_zarr(
+            train_dir / "egg4_latlon1.zarr", encoding=enc
+        )
 
     with ProgressBar():
-        egg4.sel(time=slice("2019-01-01", "2020-12-31")).chunk(
-            {"time": 10, "level": -1, "lat": -1, "lon": -1}
-        ).to_zarr(test_dir / "egg4_latlon1.zarr", encoding=enc)
+        egg4.sel(time=slice("2019-01-01", "2020-12-31")).chunk({"time": 10, "level": -1, "lat": -1, "lon": -1}).to_zarr(
+            test_dir / "egg4_latlon1.zarr", encoding=enc
+        )
 
 
 def data_to_zarr(data_dir):
     print("Atmosphere data to Zarr")
     data_dir = Path(data_dir)
-    egg4a = xr.open_mfdataset(
-        (data_dir / "CAMS_EGG4" / "icon_multi_level").glob("*/*.nc")
-    ).reset_encoding()
-    egg4s = xr.open_mfdataset(
-        (data_dir / "CAMS_EGG4" / "icon_single_level").glob("*/*.nc")
-    ).reset_encoding()
+    egg4a = xr.open_mfdataset((data_dir / "CAMS_EGG4" / "icon_multi_level").glob("*/*.nc")).reset_encoding()
+    egg4s = xr.open_mfdataset((data_dir / "CAMS_EGG4" / "icon_single_level").glob("*/*.nc")).reset_encoding()
 
     egg4 = xr.merge([egg4a, egg4s.rename({"z": "z_surf"})])
     # egg4.coords['longitude'] = (egg4.coords['longitude'] + 180) % 360 - 180
@@ -489,6 +433,7 @@ def data_to_zarr(data_dir):
     gridpath = data_dir / "icon_grid" / "R02B04_G.nc"
     grid = xr.open_dataset(gridpath)
 
+    ds = egg4
     gph = ds.z / 9.80665
     T = ds.t
     RH = ds.r
@@ -496,9 +441,7 @@ def data_to_zarr(data_dir):
 
     T_celsius = T - 273.15
 
-    Psat = 0.61121 * np.exp(
-        (18.678 - T_celsius / 234.5) * (T_celsius / (257.14 + T_celsius))
-    )
+    Psat = 0.61121 * np.exp((18.678 - T_celsius / 234.5) * (T_celsius / (257.14 + T_celsius)))
 
     Pv = RH / 100 * Psat
     Pd = gph.level - 10 * Pv
@@ -506,15 +449,12 @@ def data_to_zarr(data_dir):
     rho = 100 * Pd / (287.050676 * T)
 
     midpoints = (
-        gph.isel(level=slice(-1)).assign_coords(
-            {"level": gph.level.isel(level=slice(1, None))}
-        )
+        gph.isel(level=slice(-1)).assign_coords({"level": gph.level.isel(level=slice(1, None))})
         + gph.isel(level=slice(1, None))
     ) / 2
     V = dxyp * xr.concat(
         [
-            120000
-            - midpoints.isel(level=0).assign_coords({"level": gph.level.isel(level=0)}),
+            120000 - midpoints.isel(level=0).assign_coords({"level": gph.level.isel(level=0)}),
             -midpoints.diff("level", label="lower"),
             -midpoints.isel(level=-1) + ds.z_surf / 9.80665,
         ],
@@ -568,19 +508,19 @@ def data_to_zarr(data_dir):
     enc = {x: {"compressor": compressor} for x in egg4.data_vars}
 
     with ProgressBar():
-        egg4.sel(time=slice("2018-01-01", "2018-12-31")).chunk(
-            {"time": 10, "level": -1, "cell": -1}
-        ).to_zarr(val_dir / "egg4_icon.zarr", encoding=enc)
+        egg4.sel(time=slice("2018-01-01", "2018-12-31")).chunk({"time": 10, "level": -1, "cell": -1}).to_zarr(
+            val_dir / "egg4_icon.zarr", encoding=enc
+        )
 
     with ProgressBar():
-        egg4.sel(time=slice("2003-01-01", "2017-12-31")).chunk(
-            {"time": 10, "level": -1, "cell": -1}
-        ).to_zarr(train_dir / "egg4_icon.zarr", encoding=enc)
+        egg4.sel(time=slice("2003-01-01", "2017-12-31")).chunk({"time": 10, "level": -1, "cell": -1}).to_zarr(
+            train_dir / "egg4_icon.zarr", encoding=enc
+        )
 
     with ProgressBar():
-        egg4.sel(time=slice("2019-01-01", "2020-12-31")).chunk(
-            {"time": 10, "level": -1, "cell": -1}
-        ).to_zarr(test_dir / "egg4_icon.zarr", encoding=enc)
+        egg4.sel(time=slice("2019-01-01", "2020-12-31")).chunk({"time": 10, "level": -1, "cell": -1}).to_zarr(
+            test_dir / "egg4_icon.zarr", encoding=enc
+        )
 
     # print("Surface data to Zarr")
     # egg4s = xr.open_mfdataset((data_dir/"single_level").glob("*/*.nc"))
@@ -609,9 +549,7 @@ def fix_one_chunk(zarrgroup, egg4, var):
 
 def fix_data_to_zarr(data_dir):
     data_dir = Path(data_dir)
-    egg4a = xr.open_mfdataset(
-        (data_dir / "CAMS_EGG4" / "icon_multi_level").glob("*/*.nc")
-    )
+    egg4a = xr.open_mfdataset((data_dir / "CAMS_EGG4" / "icon_multi_level").glob("*/*.nc"))
     # egg4s = xr.open_mfdataset((data_dir/"CAMS_EGG4"/"icon_single_level").glob("*/*.nc"))
 
     # egg4 = xr.merge([egg4a, egg4s.rename({"z":"z_surf"})])
@@ -688,9 +626,7 @@ def compute_weights(save_dir):
     ds = xr.open_zarr(Path(save_dir) / "CAMS_EGG4" / "train" / "egg4_icon.zarr")
     co2diff_mean = ds.co2.diff("time").mean(["cell", "time"])
     with ProgressBar():
-        co2diff_mean.to_dataset(name="co2mix").to_netcdf(
-            weight_path / "co2diff_mean.nc"
-        )
+        co2diff_mean.to_dataset(name="co2mix").to_netcdf(weight_path / "co2diff_mean.nc")
     co2diff_std = ds.co2.diff("time").std(["cell", "time"])
     with ProgressBar():
         co2diff_std.to_dataset(name="co2mix").to_netcdf(weight_path / "co2diff_std.nc")
@@ -745,9 +681,7 @@ def stats_dataset(save_dir):
             )
         ds_stats[f"{molecule}density_delta"] = delta_stats
 
-        massmix = density_to_massmix(
-            ds[density_var], ds.airdensity, ppm=True, eps=1e-12
-        )
+        massmix = density_to_massmix(ds[density_var], ds.airdensity, ppm=True, eps=1e-12)
         massmix_delta = massmix.diff("time")
 
         with ProgressBar():
@@ -810,9 +744,9 @@ def stats_dataset(save_dir):
             .to_dataset("var")
             .compute()
         ).rename({v: f"{v}_delta" for v in ds.data_vars})
-    ds_delta_stats.to_netcdf(train_dir / f"egg4_delta_stats.nc")
-    ds_delta_stats.to_netcdf(val_dir / f"egg4_delta_stats.nc")
-    ds_delta_stats.to_netcdf(test_dir / f"egg4_delta_stats.nc")
+    ds_delta_stats.to_netcdf(train_dir / "egg4_delta_stats.nc")
+    ds_delta_stats.to_netcdf(val_dir / "egg4_delta_stats.nc")
+    ds_delta_stats.to_netcdf(test_dir / "egg4_delta_stats.nc")
 
     ds_stats = ds_delta_stats.merge(ds_stats, compat="override")
 
@@ -820,16 +754,12 @@ def stats_dataset(save_dir):
         if "level" not in ds[v].dims:
             ds_stats[f"{v}_delta"] = ds_stats[f"{v}_delta"].isel(level=0)
     ds_stats = ds_stats.drop_vars(
-        [
-            k
-            for k in ds_stats.data_vars
-            if (k.endswith("_delta_next") or k.endswith("_next_next"))
-        ]
+        [k for k in ds_stats.data_vars if (k.endswith("_delta_next") or k.endswith("_next_next"))]
     )
 
-    ds_stats.to_netcdf(train_dir / f"egg4_stats.nc")
-    ds_stats.to_netcdf(val_dir / f"egg4_stats.nc")
-    ds_stats.to_netcdf(test_dir / f"egg4_stats.nc")
+    ds_stats.to_netcdf(train_dir / "egg4_stats.nc")
+    ds_stats.to_netcdf(val_dir / "egg4_stats.nc")
+    ds_stats.to_netcdf(test_dir / "egg4_stats.nc")
 
 
 if __name__ == "__main__":

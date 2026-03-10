@@ -13,19 +13,15 @@ import xarray as xr
 import xrft
 from torch.utils.tensorboard.writer import figure_to_image
 
-from neural_transport.tools.conversion import *
+from neural_transport.tools.conversion import massmix_to_molemix
 from neural_transport.tools.xarray_helper import tensor_to_xarray
 
 mplstyle.use("fast")
 warnings.filterwarnings("ignore", category=UserWarning)
 
 
-def create_val_step_dataset(
-    preds, batch, dataset="egg4", grid="latlon1", vertical_levels="l10"
-):
-    to_xarray = partial(
-        tensor_to_xarray, dataset=dataset, grid=grid, vertical_levels=vertical_levels
-    )
+def create_val_step_dataset(preds, batch, dataset="egg4", grid="latlon1", vertical_levels="l10"):
+    to_xarray = partial(tensor_to_xarray, dataset=dataset, grid=grid, vertical_levels=vertical_levels)
 
     return xr.Dataset(
         {f"{k}_pred": to_xarray(v) for k, v in preds.items() if v[0].numel() > 200}
@@ -40,9 +36,7 @@ def plot_icon_grid(ds, var, vmin=None, vmax=None, nstep=None):
 
     levels = np.linspace(vmin, vmax, nstep)
 
-    fig, ax = plt.subplots(
-        figsize=(10, 10), subplot_kw=dict(projection=ccrs.Robinson())
-    )
+    fig, ax = plt.subplots(figsize=(10, 10), subplot_kw=dict(projection=ccrs.Robinson()))
     cmap = plt.get_cmap("Spectral_r", len(levels))
     ax.set_global()
 
@@ -81,9 +75,7 @@ def plot_atmospheric_layer_icon(ds, sample_idx, layer_idx, vari_idx=0, time_idx=
             "axes.labelsize": 8,
         }
     ):
-        fig, axs = plt.subplots(
-            2, 2, figsize=(11, 5), subplot_kw=dict(projection=ccrs.Robinson())
-        )
+        fig, axs = plt.subplots(2, 2, figsize=(11, 5), subplot_kw=dict(projection=ccrs.Robinson()))
 
         vmin = ds.targ_t1.quantile(0.05).values  # (ds.targ_t1.min()//5)*5-5
         vmax = ds.targ_t1.quantile(0.95).values  # (ds.targ_t1.max()//5)*5+5
@@ -109,45 +101,33 @@ def plot_atmospheric_layer_icon(ds, sample_idx, layer_idx, vari_idx=0, time_idx=
         ax = axs[0, 0]
         ax.set_global()
 
-        gl = ax.gridlines(
-            draw_labels=True, linewidth=0.5, color="dimgray", alpha=0.4, zorder=2
-        )
+        gl = ax.gridlines(draw_labels=True, linewidth=0.5, color="dimgray", alpha=0.4, zorder=2)
         gl.xlabel_style = {"size": 8, "color": "dimgray"}
         gl.ylabel_style = {"size": 8, "color": "dimgray"}
         gl.bottom_labels = False
         gl.right_labels = False
 
         ax.coastlines(linewidth=0.5, zorder=2)
-        cnf = ax.tricontourf(
-            np.degrees(ds.clon), np.degrees(ds.clat), ds.targ_t1, **targ_kwargs
-        )
+        cnf = ax.tricontourf(np.degrees(ds.clon), np.degrees(ds.clat), ds.targ_t1, **targ_kwargs)
         ax.set_title("Target")
 
         ax = axs[0, 1]
         ax.set_global()
 
-        gl = ax.gridlines(
-            draw_labels=True, linewidth=0.5, color="dimgray", alpha=0.4, zorder=2
-        )
+        gl = ax.gridlines(draw_labels=True, linewidth=0.5, color="dimgray", alpha=0.4, zorder=2)
         gl.xlabel_style = {"size": 8, "color": "dimgray"}
         gl.ylabel_style = {"size": 8, "color": "dimgray"}
         gl.bottom_labels = False
         gl.right_labels = False
 
         ax.coastlines(linewidth=0.5, zorder=2)
-        cnf = ax.tricontourf(
-            np.degrees(ds.clon), np.degrees(ds.clat), ds.pred_t1, **targ_kwargs
-        )
+        cnf = ax.tricontourf(np.degrees(ds.clon), np.degrees(ds.clat), ds.pred_t1, **targ_kwargs)
         ax.set_title("Prediction")
 
-        cbar_conc = plt.colorbar(
-            cnf, ax=axs[0, :], shrink=0.9
-        )  # , orientation='horizontal')
+        plt.colorbar(cnf, ax=axs[0, :], shrink=0.9)  # , orientation='horizontal')
 
         max_delta = abs(ds.targ_t1 - ds.targ_t).max().values
-        max_delta = min(
-            (max_delta * 1.1 if max_delta < 1 else (max_delta // 1) + 1), 10
-        )
+        max_delta = min((max_delta * 1.1 if max_delta < 1 else (max_delta // 1) + 1), 10)
         if max_delta < 1e-6:
             max_delta = 1e-6
 
@@ -169,9 +149,7 @@ def plot_atmospheric_layer_icon(ds, sample_idx, layer_idx, vari_idx=0, time_idx=
         ax = axs[1, 0]
         ax.set_global()
 
-        gl = ax.gridlines(
-            draw_labels=True, linewidth=0.5, color="dimgray", alpha=0.4, zorder=2
-        )
+        gl = ax.gridlines(draw_labels=True, linewidth=0.5, color="dimgray", alpha=0.4, zorder=2)
         gl.xlabel_style = {"size": 8, "color": "dimgray"}
         gl.ylabel_style = {"size": 8, "color": "dimgray"}
         gl.bottom_labels = False
@@ -189,9 +167,7 @@ def plot_atmospheric_layer_icon(ds, sample_idx, layer_idx, vari_idx=0, time_idx=
         ax = axs[1, 1]
         ax.set_global()
 
-        gl = ax.gridlines(
-            draw_labels=True, linewidth=0.5, color="dimgray", alpha=0.4, zorder=2
-        )
+        gl = ax.gridlines(draw_labels=True, linewidth=0.5, color="dimgray", alpha=0.4, zorder=2)
         gl.xlabel_style = {"size": 8, "color": "dimgray"}
         gl.ylabel_style = {"size": 8, "color": "dimgray"}
         gl.bottom_labels = False
@@ -206,9 +182,7 @@ def plot_atmospheric_layer_icon(ds, sample_idx, layer_idx, vari_idx=0, time_idx=
         )
         ax.set_title("Delta Predicted")
 
-        cbar_delta = plt.colorbar(
-            cnf, ax=axs[1, :], shrink=0.9
-        )  # , orientation='horizontal')
+        plt.colorbar(cnf, ax=axs[1, :], shrink=0.9)  # , orientation='horizontal')
 
     return fig
 
@@ -224,9 +198,7 @@ def plot_atmospheric_layer(ds, sample_idx, layer_idx, vari_idx=0, time_idx=0):
             "axes.labelsize": 8,
         }
     ):
-        fig, axs = plt.subplots(
-            2, 2, dpi=300, subplot_kw=dict(projection=ccrs.Robinson()), figsize=(8, 5)
-        )
+        fig, axs = plt.subplots(2, 2, dpi=300, subplot_kw=dict(projection=ccrs.Robinson()), figsize=(8, 5))
 
         vmin = ds.targ_t1.quantile(0.05).values  # (ds.targ_t1.min()//5)*5-5
         vmax = ds.targ_t1.quantile(0.95).values  # (ds.targ_t1.max()//5)*5+5
@@ -257,12 +229,10 @@ def plot_atmospheric_layer(ds, sample_idx, layer_idx, vari_idx=0, time_idx=0):
         ds.pred_t1.plot(ax=axs[0, 1], **targ_kwargs)
         axs[0, 1].set_title("Prediction")
 
-        cbar_conc = plt.colorbar(cnf, ax=axs[0, :], shrink=0.9)
+        plt.colorbar(cnf, ax=axs[0, :], shrink=0.9)
 
         max_delta = abs(ds.targ_t1 - ds.targ_t).max().values
-        max_delta = min(
-            (max_delta * 1.1 if max_delta < 1 else (max_delta // 1) + 1), 10
-        )
+        max_delta = min((max_delta * 1.1 if max_delta < 1 else (max_delta // 1) + 1), 10)
         if max_delta < 1e-6:
             max_delta = 1e-6
 
@@ -287,13 +257,11 @@ def plot_atmospheric_layer(ds, sample_idx, layer_idx, vari_idx=0, time_idx=0):
         (ds.pred_t1 - ds.targ_t).plot(ax=axs[1, 1], **delta_kwargs)
         axs[1, 1].set_title("Delta Predicted")
 
-        cbar_delta = plt.colorbar(cnf, ax=axs[1, :], shrink=0.9)
+        plt.colorbar(cnf, ax=axs[1, :], shrink=0.9)
 
         for ax in axs.flatten():
             ax.set_global()
-            gl = ax.gridlines(
-                draw_labels=True, linewidth=0.5, color="dimgray", alpha=0.4, zorder=2
-            )
+            gl = ax.gridlines(draw_labels=True, linewidth=0.5, color="dimgray", alpha=0.4, zorder=2)
             gl.xlabel_style = {"size": 8, "color": "dimgray"}
             gl.ylabel_style = {"size": 8, "color": "dimgray"}
             gl.bottom_labels = False
@@ -332,9 +300,7 @@ def plot_zonal_mean(ds, sample_idx, vari_idx=0, time_idx=0):
         axs[0, 1].set_title("Prediction")
 
         max_delta = abs((ds.targ_t1 - ds.targ_t).mean("lon")).max().values
-        max_delta = min(
-            (max_delta * 1.1 if max_delta < 1 else (max_delta // 1) + 1), 10
-        )
+        max_delta = min((max_delta * 1.1 if max_delta < 1 else (max_delta // 1) + 1), 10)
         delta_kwargs = dict(
             x="lat",
             y="level",
@@ -392,9 +358,7 @@ def add_figure_to_logger(ds, sample_idx, layer_idx, name, grid="latlon5.625"):
             )
         else:
             return name, figure_to_image(
-                plot_atmospheric_layer_icon(
-                    ds, sample_idx=sample_idx, layer_idx=layer_idx
-                ),
+                plot_atmospheric_layer_icon(ds, sample_idx=sample_idx, layer_idx=layer_idx),
                 close=True,
             )
     except Exception as e:
@@ -421,19 +385,13 @@ def plots_val_step(
     max_workers=32,
     plot_every_n_epochs=1,
 ):
-    ds = create_val_step_dataset(
-        preds, batch, dataset=dataset, grid=grid, vertical_levels=vertical_levels
-    )
+    ds = create_val_step_dataset(preds, batch, dataset=dataset, grid=grid, vertical_levels=vertical_levels)
 
     for molecule in ["ch4", "co2"]:
         if f"{molecule}molemix" in variables:
             ds[f"{molecule}molemix"] = massmix_to_molemix(ds[f"{molecule}massmix"])
-            ds[f"{molecule}molemix_next"] = massmix_to_molemix(
-                ds[f"{molecule}massmix_next"]
-            )
-            ds[f"{molecule}molemix_pred"] = massmix_to_molemix(
-                ds[f"{molecule}massmix_pred"]
-            )
+            ds[f"{molecule}molemix_next"] = massmix_to_molemix(ds[f"{molecule}massmix_next"])
+            ds[f"{molecule}molemix_pred"] = massmix_to_molemix(ds[f"{molecule}massmix_pred"])
 
     try:
         outpath = Path(logger_experiment.log_dir) / "val_ds" / f"ds_{current_epoch}.nc"
@@ -474,4 +432,3 @@ def plots_val_step(
             name, img = future.result()
             if img is not None:
                 logger_experiment.add_image(name, img, current_epoch)
-            
