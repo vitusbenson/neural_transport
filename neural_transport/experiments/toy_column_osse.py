@@ -28,7 +28,7 @@ from flow_matching.path.scheduler import CondOTScheduler
 from flow_matching.solver import ODESolver
 from torch.utils.data import DataLoader, TensorDataset
 
-from neural_transport.models.flowmatching import MaskedVelocityWrapper
+from neural_transport.models.flowmatching import MaskedVelocityWrapper, compute_ot_coupling
 
 # ── Data generation ──────────────────────────────────────────────────────
 
@@ -168,7 +168,7 @@ class ToyVelocityWrapper(nn.Module):
 # ── Training ────────────────────────────────────────────────────────────
 
 
-def train_flow_matching(data, nlev=4, epochs=50, lr=1e-3, batch_size=128, device="cpu"):
+def train_flow_matching(data, nlev=4, epochs=50, lr=1e-3, batch_size=128, device="cpu", use_ot_coupling=False):
     """Train unconditional flow matching model on toy data."""
     model = TinyConvNet(nlev=nlev).to(device)
     path = AffineProbPath(scheduler=CondOTScheduler())
@@ -190,6 +190,8 @@ def train_flow_matching(data, nlev=4, epochs=50, lr=1e-3, batch_size=128, device
             x_1 = x_1.to(device)
             B = x_1.shape[0]
             x_0 = torch.randn_like(x_1)
+            if use_ot_coupling:
+                x_0 = compute_ot_coupling(x_0, x_1)
             t = torch.rand(B, device=device)
 
             path_sample = path.sample(t=t, x_0=x_0, x_1=x_1)

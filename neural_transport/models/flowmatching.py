@@ -296,6 +296,28 @@ class MaskedVelocityWrapper(VelocityWrapper):
         return x_masked
 
 
+@torch.no_grad()
+def compute_ot_coupling(x_0, x_1, reg=0.05, num_iter=50):
+    """Minibatch OT coupling via Sinkhorn. Returns x_0 reordered to match x_1."""
+    B = x_0.shape[0]
+    x0_flat = x_0.reshape(B, -1)  # [B, D]
+    x1_flat = x_1.reshape(B, -1)
+    # Cost matrix [B, B]
+    C = torch.cdist(x0_flat, x1_flat, p=2) ** 2
+    # Sinkhorn iterations
+    C_reg = C / (reg * C.max().clamp(min=1e-12))
+    K = torch.exp(-C_reg)
+    u = torch.ones(B, device=x_0.device)
+    for _ in range(num_iter):
+        v = 1.0 / (K.T @ u + 1e-12)
+        u = 1.0 / (K @ v + 1e-12)
+    # Transport plan -> hard assignment
+    plan = torch.diag(u) @ K @ torch.diag(v)  # [B, B]
+    # For each x_1[j], find best matching x_0[i]: perm[j] = argmax_i plan[i,j]
+    perm = plan.argmax(dim=0)  # [B]
+    return x_0[perm]
+
+
 class FlowMatching(RegularGridModel):
     def init_model(
         self,
@@ -307,6 +329,10 @@ class FlowMatching(RegularGridModel):
         nlev=1,
         step_size=0.01,
         generate_kwargs=None,
+        use_ot_coupling=False,
+        time_grid_spacing='uniform',
+        atol=1e-5,
+        rtol=1e-5,
     ):
         self.submodel = MODELS[submodel](**model_kwargs)
         self.return_intermediates = return_intermediates
@@ -315,6 +341,10 @@ class FlowMatching(RegularGridModel):
         self.nlev = nlev
         self.step_size = step_size
         self.generate_kwargs = generate_kwargs if generate_kwargs is not None else {}
+        self.use_ot_coupling = use_ot_coupling
+        self.time_grid_spacing = time_grid_spacing
+        self.atol = atol
+        self.rtol = rtol
         self.path = AffineProbPath(scheduler=CondOTScheduler())
         self.target_vars = self.submodel.target_vars  # Here target_vars[0] is supposed to be "co2massmix"
 
@@ -378,6 +408,10 @@ class FlowMatching(RegularGridModel):
 
         # sample noise  x_0 ~ N(0, I), [B C Nlat Nlon]
         x_0 = torch.randn_like(x_in, device=x_in.device)
+
+        # Minibatch OT coupling: reorder x_0 to reduce transport cost
+        if self.use_ot_coupling:
+            x_0 = compute_ot_coupling(x_0, x_1_normalized)
 
         # sample time t \in [0,1], [B] -> [B 1 Nlat Nlon]
         B, _, nlat, nlon = x_in.shape
@@ -476,6 +510,27 @@ class FlowMatching(RegularGridModel):
                 static_inputs=static_inputs,
             )
 
+    @staticmethod
+    def _build_time_grid(steps, device, spacing='uniform'):
+        """Build time grid with specified spacing.
+
+        Args:
+            steps: number of grid points
+            device: torch device
+            spacing: 'uniform', 'cosine' (denser at endpoints), or
+                     'front_loaded' (denser near t=0)
+
+        Returns:
+            Tensor of shape [steps] in [0, 1], monotonically increasing.
+        """
+        t_lin = torch.linspace(0, 1, steps, device=device)
+        if spacing == 'cosine':
+            return 0.5 * (1 - torch.cos(torch.pi * t_lin))
+        elif spacing == 'front_loaded':
+            return t_lin**2
+        else:  # uniform
+            return t_lin
+
     # inference_forward
     def inference_forward(self, x_in, x_init, masking_config=None, generate_kwargs=None):
         if generate_kwargs is None:
@@ -483,6 +538,7 @@ class FlowMatching(RegularGridModel):
 
         refine_start = generate_kwargs.get("refine_start", 1.0)
         steps = generate_kwargs.get("steps", 11)
+        spacing = generate_kwargs.get("time_grid_spacing", self.time_grid_spacing)
 
         # get timesteps for integration [T]
         if refine_start < 1.0:
@@ -490,7 +546,7 @@ class FlowMatching(RegularGridModel):
             fine = torch.linspace(refine_start, 1.0, steps=steps, device=x_init.device)
             time_grid = torch.cat([coarse, fine[1:]])
         else:
-            time_grid = torch.linspace(0, 1, steps=steps - 1, device=x_init.device)
+            time_grid = self._build_time_grid(steps - 1, x_init.device, spacing)
         masking_config["time_grid"] = time_grid
 
         # UNet expects normalization parameters
@@ -504,11 +560,14 @@ class FlowMatching(RegularGridModel):
 
         # solve the ODE to get the trajectory
         solver = ODESolver(velocity_model=velocity_model)
-        trajectory = solver.sample(
+        solver_kwargs = dict(
             time_grid=time_grid,
             x_init=x_init,
-            method=self.method,
+            method=generate_kwargs.get("method", self.method),
             step_size=self.step_size,
             return_intermediates=self.return_intermediates,
-        )  # [T B C Nlat Nlon]
+            atol=generate_kwargs.get("atol", self.atol),
+            rtol=generate_kwargs.get("rtol", self.rtol),
+        )
+        trajectory = solver.sample(**solver_kwargs)  # [T B C Nlat Nlon]
         return trajectory

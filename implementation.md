@@ -105,25 +105,30 @@ Formalize `toy_column_osse.py` as a mandatory validation gate.
 Ensure the unconditional model matches SOTA vanilla flow matching before adding conditioning.
 
 ### 4a: Audit training pipeline
-- [ ] Verify OT-CFM path (AffineProbPath + CondOTScheduler) is correctly implemented
-- [ ] Check noise-data pairing: currently random — is this optimal?
-- [ ] Verify loss function: plain MSE on velocity, no time-dependent weighting
-- [ ] Check inference: ODE solver settings (method, step_size, number of steps)
+- [x] Verify OT-CFM path (AffineProbPath + CondOTScheduler) is correctly implemented
+  - `x_t = (1-t)*x_0 + t*x_1`, target `dx_t = x_1 - x_0` ✓
+- [x] Check noise-data pairing: currently random → replaced with OT coupling in 4b
+- [x] Verify loss function: plain MSE on velocity, no time-dependent weighting needed ✓
+- [x] Check inference: fixed-step midpoint, `steps=11`, `step_size=0.2` in exp 01
 
 ### 4b: Minibatch OT coupling
-- [ ] Replace random noise-data pairing with OT-optimal pairing within minibatch
-- [ ] Use `scipy.optimize.linear_sum_assignment` for batch-level OT
-- [ ] **Modify**: `FlowMatching.training_forward()` — add OT pairing before `self.path.sample()`
-- [ ] Produces straighter trajectories, lower-variance gradients
+- [x] Replace random noise-data pairing with OT-optimal pairing within minibatch
+- [x] GPU-native Sinkhorn (pure PyTorch) instead of scipy — `compute_ot_coupling()` in `flowmatching.py`
+- [x] **Modify**: `FlowMatching.training_forward()` — add OT pairing before `self.path.sample()`
+- [x] Also added to `toy_column_osse.py` `train_flow_matching()` via `use_ot_coupling` param
 
 ### 4c: Inference improvements
-- [ ] Adaptive ODE solver (dopri5 or adaptive midpoint) instead of fixed-step
-- [ ] Investigate optimal number of integration steps (currently `steps=11`)
-- [ ] Time grid spacing: uniform vs cosine vs front-loaded
+- [x] Adaptive ODE solver support: `atol`/`rtol` params, `method` overridable via `generate_kwargs`
+- [x] Time grid spacing: `_build_time_grid()` with uniform/cosine/front_loaded options
+- [x] Ablation script in exp 09: steps (11/21/51), solver (midpoint/dopri5), timegrid variants
 
 ### 4d: Retrain + evaluate
-- [ ] Retrain with minibatch OT, compare unconditional RMSE
-- [ ] Use `osse_runner` baseline
+- [x] New experiment: `09_fm_unet_ot_training/` with `use_ot_coupling=True`
+- [x] `train.py` with `--max_steps` CLI arg for smoke testing
+- [x] `run_eval.py` with ablation framework (ot/solver/steps/timegrid/all)
+- [x] Tests: `tests/test_flowmatching_training.py` — OT coupling + time grid tests
+- [ ] Full training via Slurm: `sbatch 09_fm_unet_ot_training/train.slurm`
+- [ ] Evaluation: `sbatch 09_fm_unet_ot_training/run_eval.slurm`
 
 **Deliverable**: Improved unconditional model. Training curves + sample quality comparison plots.
 
