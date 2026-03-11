@@ -1100,6 +1100,9 @@ def plot_obs_mask_and_samples_x(
     if "trajectory_steps" in obs_mask_sel.dims:
         obs_mask_sel = obs_mask_sel.isel(trajectory_steps=0)
         obs_values_sel = obs_values_sel.isel(trajectory_steps=0)
+    if "sample" in obs_mask_sel.dims:
+        obs_mask_sel = obs_mask_sel.isel(sample=0)
+        obs_values_sel = obs_values_sel.isel(sample=0)
 
     obs_mask_np = obs_mask_sel.values.astype(bool)
     obs_values_np = obs_values_sel.values
@@ -1196,6 +1199,8 @@ def plot_mask_pattern_on_samples(
         obs_mask_sel = obs_mask_sel.isel(vari=0)
     if "trajectory_steps" in obs_mask_sel.dims:
         obs_mask_sel = obs_mask_sel.isel(trajectory_steps=0)
+    if "sample" in obs_mask_sel.dims:
+        obs_mask_sel = obs_mask_sel.isel(sample=0)
 
     obs_mask = obs_mask_sel.values.astype(bool)
 
