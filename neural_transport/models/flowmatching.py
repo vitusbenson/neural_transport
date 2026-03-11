@@ -860,8 +860,10 @@ class FlowMatching(RegularGridModel):
 
         if generate_kwargs is None:
             generate_kwargs = getattr(self, 'generate_kwargs', {})
+        
+        posterior_method = generate_kwargs.get("posterior_method", None)
 
-        if False: #obs_mask is not None and obs_values is not None:
+        if obs_mask is not None and obs_values is not None and posterior_method is None:
             return MaskedVelocityWrapper(
                 submodel=submodel,
                 masking_config=masking_config,
@@ -888,6 +890,8 @@ class FlowMatching(RegularGridModel):
 
         refine_start = generate_kwargs.get("refine_start", 1.0)
         steps = generate_kwargs.get("steps", 11)
+        posterior_method = generate_kwargs.get("posterior_method", None)
+        mask_source = generate_kwargs.get("mask_source", "oco2")
 
         # get timesteps for integration [T]
         if refine_start < 1.0:
@@ -912,35 +916,89 @@ class FlowMatching(RegularGridModel):
 
         # solve the ODE to get the trajectory
         solver = ODESolver(velocity_model=velocity_model)
-        x_0 = torch.nn.Parameter(x_init, requires_grad=True)  # [B C Nlat Nlon]
-        optimizer_x_0 = torch.optim.Adam([x_0], lr=1e-3)
-        with torch.enable_grad():
-            for i in range(100):
-                optimizer_x_0.zero_grad()
-                trajectory = solver.sample(time_grid=time_grid,
-                                            x_init=x_0,
-                                            method=self.method,
-                                            step_size=self.step_size,
-                                            return_intermediates=self.return_intermediates,
-                                            enable_grad=True,
-                )  # [T B C Nlat Nlon]
-                x_final = trajectory[-1,...]  # [B C Nlat Nlon]
-                print(f"\nDEBUG refinement step {i}:")
-                print(f"  ak type, shape: {type(masking_config['ak'])}, {masking_config['ak'].shape}")
-                print(f"  ak requires grad: {masking_config['ak'].requires_grad}")
-                print(f"  x_final requires grad: {x_final.requires_grad}")
-                x_final = torch.sum(torch.mul(x_final, masking_config["ak"]), dim=1, keepdim=True)
-                print(f"  x_final requires grad after summation: {x_final.requires_grad}")
-                x_final *= masking_config["obs_mask"]
-                x_target = torch.where(masking_config["obs_mask"], masking_config["obs_values"], 0)
-                print(f"  x_final requires grad after masking: {x_final.requires_grad}")
-                print(f"  x_target requires grad: {x_target.requires_grad}")
-                loss = torch.nn.functional.mse_loss(x_final, x_target)
-                print(f"  loss requires grad: {loss.requires_grad}")
-                loss.backward()
-                optimizer_x_0.step()
-                if i % 10 == 0:
-                    print(f"Refinement step {i}, loss: {loss.item():.6f}")
+
+        if posterior_method is None:
+            trajectory = solver.sample(time_grid=time_grid,
+                                x_init=x_init, method=self.method,
+                                step_size=self.step_size,
+                                return_intermediates=self.return_intermediates
+            )  # [T B C Nlat Nlon]
+        elif posterior_method == "dflow":
+            dflow_optimizer = generate_kwargs.get("dflow_optimizer", None)
+            if dflow_optimizer == "adam":
+                x_0 = torch.nn.Parameter(x_init, requires_grad=True)  # [B C Nlat Nlon]
+                optimizer_x_0 = torch.optim.Adam([x_0], lr=1e-2)
+                with torch.enable_grad():
+                    for i in range(100):
+                        optimizer_x_0.zero_grad()
+                        ### DEBUG
+                        torch.cuda.empty_cache()
+                        torch.cuda.reset_peak_memory_stats()
+                        ### END DEBUG
+                        trajectory = solver.sample(time_grid=time_grid,
+                                                    x_init=x_0,
+                                                    method=self.method,
+                                                    step_size=self.step_size,
+                                                    return_intermediates=self.return_intermediates,
+                                                    enable_grad=True,
+                        )  # [T B C Nlat Nlon]
+                        x_final = trajectory[-1,...]  # [B C Nlat Nlon]
+                        if mask_source == "oco2":
+                            x_final = torch.sum(x_final * masking_config["ak"], dim=1, keepdim=True)
+                        x_final = x_final * masking_config["obs_mask"]
+                        x_target = torch.where(masking_config["obs_mask"], masking_config["obs_values"], torch.zeros_like(masking_config["obs_values"]))
+                        loss = torch.nn.functional.mse_loss(x_final, x_target)
+                        loss.backward()
+                        optimizer_x_0.step()
+                        if i % 10 == 0:
+                            print(f"Refinement step {i}, loss: {loss.item():.6f}")
+                    print("\nDEBUG memory after solver:")
+                    print("  allocated:", torch.cuda.memory_allocated()/1e9, "GB")
+                    print("  reserved:", torch.cuda.memory_reserved()/1e9, "GB")
+                    print("  peak allocated:", torch.cuda.max_memory_allocated()/1e9, "GB")
+            elif dflow_optimizer == "lbfgs":
+                x_0 = torch.nn.Parameter(x_init.clone().contiguous())  # [B C Nlat Nlon]
+                optimizer_x_0 = torch.optim.LBFGS([x_0], max_iter=7, line_search_fn='strong_wolfe')  # Use L-BFGS optimizer for better convergence
+                log_state = {}
+                with torch.enable_grad():
+                    for i in range(15):
+                        def closure():
+                            optimizer_x_0.zero_grad()
+                            trajectory = solver.sample(time_grid=time_grid,
+                                                        x_init=x_0,
+                                                        method=self.method,
+                                                        step_size=self.step_size,
+                                                        return_intermediates=self.return_intermediates,
+                                                        enable_grad=True,
+                            )  # [T B C Nlat Nlon]
+                            x_final = trajectory[-1,...]  # [B C Nlat Nlon]
+                            if mask_source == "oco2":
+                                x_final = torch.sum(x_final * masking_config["ak"], dim=1, keepdim=True)
+                            x_final = x_final * masking_config["obs_mask"]
+                            x_target = torch.where(masking_config["obs_mask"], masking_config["obs_values"], torch.zeros_like(masking_config["obs_values"]))
+                            obs_loss = torch.nn.functional.mse_loss(x_final, x_target)
+                            reg_loss = 1e-5 * torch.norm(x_0)**2  # Add small regularization to prevent extreme values
+                            loss = obs_loss + reg_loss
+                            loss.backward()
+                            log_state["obs_loss"] = obs_loss.detach()
+                            log_state["reg_loss"] = reg_loss.detach()
+                            return loss
+                        
+                        loss = optimizer_x_0.step(closure)
+                        if loss.item() < 1e-3:
+                            print(f"Converged at step {i} with loss {loss.item():.3f}")
+                            break
+                        if i % 10 == 0:
+                            print(f"Refinement step {i}, loss: {loss.item():.6f}")
+                            print(f"  obs_loss: {log_state['obs_loss'].item():.6f}, reg_loss: {log_state['reg_loss'].item():.6f}")
+                with torch.no_grad():
+                    trajectory = solver.sample(time_grid=time_grid,
+                                                            x_init=x_0,
+                                                            method=self.method,
+                                                            step_size=self.step_size,
+                                                            return_intermediates=self.return_intermediates,
+                                                            enable_grad=False,
+                                )  # [T B C Nlat Nlon]
         print("\nDEBUG inference_forward:")
         print(f"  trajectory has NaN: {torch.isnan(trajectory).any()}")
         print(f"  trajectory[-1] stats: min={trajectory[-1].min()}, max={trajectory[-1].max()}")

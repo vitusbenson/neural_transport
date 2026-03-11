@@ -1020,11 +1020,11 @@ def plot_noise_diagnostics(noises, angles, out_dir, label="$\\theta$", imgformat
     return
 
 
-def plot_panel(ax, data, title, vmin=None, vmax=None, aspect_ratio=2.0, bold=False):
+def plot_panel(ax, data, title, cmap="cividis", vmin=None, vmax=None, aspect_ratio=2.0, bold=False):
     """Helper to plot one panel with consistent style."""
     im = ax.imshow(
         data[::-1, :],
-        cmap="cividis",
+        cmap=cmap,
         vmin=vmin,
         vmax=vmax,
         aspect=aspect_ratio / 2,
@@ -1294,6 +1294,143 @@ def plot_mask_pattern_on_samples(
     return fig
 
 
+def plot_masked_bias_samples(
+    batch,
+    preds_var,
+    varname="co2massmix",
+    nlat=32,
+    nlon=64,
+    max_samples=6,
+):
+    """
+    Plot bias of generated samples relative to ground truth, only at grid cells where observations are masked.
+    Layout: 2x4 grid
+      [0,0] = Ground Truth
+      [1,0] = Masked Observations
+      [0,1..3], [1,1..3] = Generated Samples (up to 6)
+    """
+
+    b, t, c = 0, 0, 0
+
+    obs_values = batch["obs_values"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
+    obs_mask = batch["obs_mask"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
+    masked_obs = np.where(obs_mask, obs_values, np.nan)
+
+    # Generated samples [sample, lat, lon, level, (time)]
+    samples = preds_var
+    if "time" in samples.dims:
+        samples = samples.isel(time=t)
+
+    if "xco2_averaging_kernel" in batch:
+        ak = batch["xco2_averaging_kernel"][b, t, :, :].detach().cpu()
+        ak_sum = ak.sum(dim=-1, keepdim=True)
+        ak = ak / ak_sum
+        vals = batch[varname][b, t, :, :].detach().cpu()
+        target_vals = (ak * vals).sum(dim=-1).numpy().reshape(nlat, nlon)
+        if "level" in samples.dims:
+            ak_reshaped = ak.numpy().reshape(nlat, nlon, -1)
+            samples_np = samples.values
+            samples_list = []
+            for i in range(min(samples_np.shape[0], max_samples)):
+                samples_list.append((ak_reshaped * samples_np[i]).sum(axis=-1))
+            samples = xr.DataArray(
+                np.array(samples_list),
+                dims=["sample", "lat", "lon"]
+            )
+    else:
+        target_vals = batch[varname][b, t, :, :].mean(dim=-1).detach().cpu().numpy().reshape(nlat, nlon)
+        if "level" in samples.dims:
+            samples = samples.mean(dim="level")
+
+    samples_np = samples.values  # shape: [sample, lat, lon]
+    n_samples = min(samples_np.shape[0], max_samples)
+
+    bias_list = []
+    for i in range(n_samples):
+        bias = samples_np[i] - target_vals
+        bias = np.where(obs_mask, bias, np.nan)
+        bias_list.append(bias)
+
+    bias_np = np.array(bias_list)
+
+    # Global symmetric color limits
+    vmax = np.nanmax(np.abs(bias_np))
+    vmin = -vmax
+    targ_min, targ_max = np.nanmin(target_vals), np.nanmax(target_vals)
+    if np.all(np.isnan(masked_obs)):
+        obs_min, obs_max = targ_min, targ_max
+    else:
+        obs_min, obs_max = np.nanmin(masked_obs), np.nanmax(masked_obs)
+
+    # Figure setup
+    aspect_ratio = nlon / nlat
+    base_size = 3.0
+    fig_width = 4 * base_size * (aspect_ratio / 2)
+    fig_height = 2 * base_size
+    fig, axs = plt.subplots(2, 4, figsize=(fig_width, fig_height))
+    axs = axs.reshape(2, 4)
+
+    # Panels ([0,0]: Ground truth, [1,0]: Masked obs, [0,1..3] and [1,1..3]: samples)
+    # Ground truth
+    im = plot_panel(axs[0, 0], target_vals, "Ground Truth", vmin=targ_min, vmax=targ_max, aspect_ratio=aspect_ratio, bold=True)
+
+    # Masked observations
+    plot_panel(axs[1, 0], np.ma.masked_valid(masked_obs), "Masked Observations",
+        vmin=obs_min, vmax=obs_max, aspect_ratio=aspect_ratio, bold=True)
+
+    # Bias samples
+    for i in range(n_samples):
+        row = 0 if i < 3 else 1
+        col = (i % 3) + 1
+        plot_panel(
+            axs[row, col],
+            bias_np[i],
+            f"Bias Sample {i}",
+            cmap="RdBu_r",
+            vmin=vmin,
+            vmax=vmax,
+            aspect_ratio=aspect_ratio
+        )
+
+    fig.text(
+        0.56,
+        0.9,
+        "Bias of Generated Samples at Masked Locations",
+        fontsize=14,
+        fontweight="bold",
+        ha="center",
+        va="top"
+    )
+
+    for row in range(2):
+        for col in range(4):
+            if not axs[row, col].images:
+                axs[row, col].axis("off")
+
+    # shared colorbars
+    cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
+    fig.colorbar(im, cax=cbar_ax, orientation="vertical", label="Bias [ppm]")
+
+    bbox0 = axs[1,0].get_position()
+    cbar_truth_ax = fig.add_axes([
+        bbox0.x0,
+        bbox0.y0 - 0.05,
+        bbox0.width,
+        0.02
+    ])
+    fig.colorbar(
+        im,
+        cax=cbar_truth_ax,
+        orientation="horizontal",
+        label="XCO₂ [ppm]"
+    )
+
+    fig.suptitle("Bias of Generated Samples (Masked Locations)", fontsize=16)
+    plt.tight_layout(rect=[0, 0, 0.9, 1])
+
+    return fig
+
+
 def plot_masking_diagnostics(
         batch,
         preds,
@@ -1322,10 +1459,21 @@ def plot_masking_diagnostics(
             nlon=nlon,
             max_samples=6,
             )
-
         for fmt in imgformats:
             fig.savefig(out_dir / f"masking_{varname}.{fmt}", dpi=300, bbox_inches="tight")
         plt.close(fig)
+
+        fig_bias = plot_masked_bias_samples(
+            batch,
+            preds_var,
+            varname=varname,
+            nlat=nlat,
+            nlon=nlon,
+            max_samples=6,
+        )
+        for fmt in imgformats:
+            fig_bias.savefig(out_dir / f"masking_{varname}_bias.{fmt}", dpi=300, bbox_inches="tight")
+        plt.close(fig_bias)
 
         # Plot mask pattern overlay on generated samples
         if "obs_mask_original" in batch:
