@@ -163,14 +163,14 @@ For `p(y|x) ~ N(y; H(x), sigma_y^2 I)`, `H(x) = sum_k h_k a_k x_k`:
 ```
 nabla_{x_k} log p(y|x) = (h_k * a_k / sigma_y^2) * (y - H(x))
 ```
-- [ ] Add `sigma_obs` parameter to `MaskedVelocityWrapper`
-- [ ] Key change: gradient proportional to `h_k * a_k` (surface-heavy), not uniform
-- [ ] **File**: `flowmatching.py`
+- [x] Add `sigma_obs` parameter to `MaskedVelocityWrapper`
+- [x] Key change: gradient proportional to `h_k * a_k` (surface-heavy), not uniform
+- [x] **File**: `flowmatching.py`
 
 ### 5b: Gaussian spatial smoothing
-- [ ] `_gaussian_smooth_2d(field, sigma)` via `F.conv2d`, periodic longitude padding
-- [ ] `spatial_smoothing_sigma` parameter in `generate_kwargs`
-- [ ] **File**: `flowmatching.py`
+- [x] `_gaussian_smooth_2d(field, sigma)` via `F.conv2d`, periodic longitude padding
+- [x] `spatial_smoothing_sigma` parameter in `generate_kwargs`
+- [x] **File**: `flowmatching.py`
 
 ### 5c: Toy OSSE gate + full OSSE via osse_runner
 

@@ -442,6 +442,41 @@ CONDITIONING_METHODS = {
         masking_time="smooth_late_masking",
         t_threshold=0.8,
     ),
+    # DPS guidance ablation (Phase 5)
+    "dps_s1.0": dict(
+        conditioning_mode="guidance",
+        guidance_scale=1.0,
+        masking_method="total_column_average_simple",
+        sigma_obs=1.0,
+    ),
+    "dps_s0.5": dict(
+        conditioning_mode="guidance",
+        guidance_scale=1.0,
+        masking_method="total_column_average_simple",
+        sigma_obs=0.5,
+    ),
+    "dps_s0.1": dict(
+        conditioning_mode="guidance",
+        guidance_scale=1.0,
+        masking_method="total_column_average_simple",
+        sigma_obs=0.1,
+    ),
+    "dps_s0.5_smooth2": dict(
+        conditioning_mode="guidance",
+        guidance_scale=1.0,
+        masking_method="total_column_average_simple",
+        sigma_obs=0.5,
+        spatial_smoothing_sigma=2.0,
+    ),
+    "dps_s0.5_smooth2_late": dict(
+        conditioning_mode="guidance",
+        guidance_scale=1.0,
+        masking_method="total_column_average_simple",
+        sigma_obs=0.5,
+        spatial_smoothing_sigma=2.0,
+        masking_time="smooth_late_masking",
+        t_threshold=0.8,
+    ),
 }
 
 

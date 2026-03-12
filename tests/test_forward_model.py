@@ -4,7 +4,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from neural_transport.models.flowmatching import MaskedVelocityWrapper
+from neural_transport.models.flowmatching import MaskedVelocityWrapper, _gaussian_smooth_2d
 
 
 class MockSubmodel(nn.Module):
@@ -36,6 +36,8 @@ def _make_wrapper(
     masking_method="total_column_average_simple",
     conditioning_mode="correction",
     guidance_scale=1.0,
+    sigma_obs=1.0,
+    spatial_smoothing_sigma=0.0,
 ):
     """Build a MaskedVelocityWrapper with synthetic data for testing."""
     B, C, Nlat, Nlon = batch_size, nlev, nlat, nlon
@@ -91,6 +93,8 @@ def _make_wrapper(
         masking_method=masking_method,
         conditioning_mode=conditioning_mode,
         guidance_scale=guidance_scale,
+        sigma_obs=sigma_obs,
+        spatial_smoothing_sigma=spatial_smoothing_sigma,
     )
 
     return wrapper, x_norm, x_phys
@@ -221,3 +225,134 @@ class TestMaskingMethodsRemoved:
         t = torch.tensor(0.5)
         with pytest.raises(ValueError, match="Unknown masking method"):
             wrapper.apply_masking(x_norm, t)
+
+
+class TestGaussianSmooth2D:
+    def test_constant_field_unchanged(self):
+        """Constant field should be unchanged by smoothing."""
+        field = torch.ones(2, 3, 16, 32) * 5.0
+        result = _gaussian_smooth_2d(field, sigma=2.0)
+        assert torch.allclose(result, field, atol=1e-5)
+
+    def test_delta_produces_bump(self):
+        """Delta function should produce a Gaussian-like bump."""
+        field = torch.zeros(1, 1, 32, 64)
+        field[0, 0, 16, 32] = 1.0
+        result = _gaussian_smooth_2d(field, sigma=2.0)
+        # Peak should be at original location but smaller
+        assert result[0, 0, 16, 32] > 0
+        assert result[0, 0, 16, 32] < 1.0
+        # Neighbors should be positive
+        assert result[0, 0, 15, 32] > 0
+        assert result[0, 0, 16, 31] > 0
+
+    def test_output_shape_matches_input(self):
+        """Output shape must equal input shape."""
+        for shape in [(1, 1, 8, 16), (2, 5, 32, 64), (1, 3, 4, 4)]:
+            field = torch.randn(*shape)
+            result = _gaussian_smooth_2d(field, sigma=1.5)
+            assert result.shape == field.shape
+
+    def test_sigma_zero_returns_input(self):
+        """sigma=0 should return the input unchanged."""
+        field = torch.randn(2, 3, 16, 32)
+        result = _gaussian_smooth_2d(field, sigma=0.0)
+        assert torch.equal(result, field)
+
+    def test_periodic_longitude_wrapping(self):
+        """A spike at the right edge should wrap around to the left edge."""
+        field = torch.zeros(1, 1, 16, 32)
+        field[0, 0, 8, 31] = 1.0  # rightmost column
+        result = _gaussian_smooth_2d(field, sigma=2.0)
+        # Left edge should receive some weight from periodic wrapping
+        assert result[0, 0, 8, 0] > 1e-6, "Periodic wrapping failed: left edge should see the right-edge spike"
+
+
+class TestSigmaObs:
+    def test_sigma_obs_scaling(self):
+        """sigma_obs=2.0 should produce 4x weaker guidance than sigma_obs=1.0."""
+        wrapper_s1, x_norm, _ = _make_wrapper(
+            use_prior=False,
+            conditioning_mode="guidance",
+            guidance_scale=1.0,
+            sigma_obs=1.0,
+        )
+        wrapper_s1.obs_values = wrapper_s1.obs_values + 1.0
+
+        wrapper_s2, _, _ = _make_wrapper(
+            use_prior=False,
+            conditioning_mode="guidance",
+            guidance_scale=1.0,
+            sigma_obs=2.0,
+        )
+        wrapper_s2.obs_values = wrapper_s2.obs_values + 1.0
+
+        t = torch.tensor(0.5)
+        v1 = wrapper_s1.forward(x_norm, t)
+        v2 = wrapper_s2.forward(x_norm, t)
+
+        # v = -guidance_scale * mask_weight * guidance; guidance scales as 1/sigma_obs^2
+        ratio = v1.abs().mean() / v2.abs().mean()
+        assert abs(ratio - 4.0) < 0.5, f"Expected ~4x ratio, got {ratio:.2f}"
+
+    def test_sigma_obs_1_backward_compat(self):
+        """sigma_obs=1.0 should match behavior without sigma_obs parameter."""
+        wrapper, x_norm, _ = _make_wrapper(
+            use_prior=False,
+            conditioning_mode="guidance",
+            guidance_scale=1.0,
+            sigma_obs=1.0,
+        )
+        wrapper.obs_values = wrapper.obs_values + 1.0
+        t = torch.tensor(0.5)
+        v = wrapper.forward(x_norm, t)
+        assert not torch.isnan(v).any()
+        assert v.abs().mean() > 0  # non-trivial guidance
+
+
+class TestSpatialSmoothingSigma:
+    def test_smoothed_guidance_is_smoother(self):
+        """Guidance with smoothing should have lower Laplacian norm (smoother)."""
+        wrapper_no, x_norm, _ = _make_wrapper(
+            use_prior=False,
+            conditioning_mode="guidance",
+            guidance_scale=1.0,
+            spatial_smoothing_sigma=0.0,
+        )
+        wrapper_no.obs_values = wrapper_no.obs_values + 1.0
+
+        wrapper_sm, _, _ = _make_wrapper(
+            use_prior=False,
+            conditioning_mode="guidance",
+            guidance_scale=1.0,
+            spatial_smoothing_sigma=2.0,
+        )
+        wrapper_sm.obs_values = wrapper_sm.obs_values + 1.0
+
+        t = torch.tensor(0.5)
+        v_no = wrapper_no.forward(x_norm, t)
+        v_sm = wrapper_sm.forward(x_norm, t)
+
+        # Compute Laplacian norm (sum of second derivatives) as proxy for roughness
+        def laplacian_norm(v):
+            d2_lat = v[:, :, 2:, :] - 2 * v[:, :, 1:-1, :] + v[:, :, :-2, :]
+            d2_lon = v[:, :, :, 2:] - 2 * v[:, :, :, 1:-1] + v[:, :, :, :-2]
+            return d2_lat.pow(2).mean() + d2_lon.pow(2).mean()
+
+        lap_no = laplacian_norm(v_no)
+        lap_sm = laplacian_norm(v_sm)
+        assert lap_sm < lap_no, f"Smoothed Laplacian {lap_sm:.6f} should be < unsmoothed {lap_no:.6f}"
+
+    def test_no_nan_with_both_params(self):
+        """No NaN when both sigma_obs and smoothing are enabled."""
+        wrapper, x_norm, _ = _make_wrapper(
+            use_prior=False,
+            conditioning_mode="guidance",
+            guidance_scale=1.0,
+            sigma_obs=0.5,
+            spatial_smoothing_sigma=2.0,
+        )
+        wrapper.obs_values = wrapper.obs_values + 1.0
+        t = torch.tensor(0.5)
+        v = wrapper.forward(x_norm, t)
+        assert not torch.isnan(v).any()

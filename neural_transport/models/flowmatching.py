@@ -3,6 +3,7 @@ import inspect
 # torch
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from flow_matching.path import AffineProbPath
 
 # flow_matching
@@ -66,6 +67,8 @@ class MaskedVelocityWrapper(VelocityWrapper):
         self.masking_method = generate_kwargs.get("masking_method", "interpolate")
         self.conditioning_mode = generate_kwargs.get("conditioning_mode", "correction")
         self.guidance_scale = generate_kwargs.get("guidance_scale", 1.0)
+        self.sigma_obs = generate_kwargs.get("sigma_obs", 1.0)
+        self.spatial_smoothing_sigma = generate_kwargs.get("spatial_smoothing_sigma", 0.0)
 
     def compute_xco2(self, x):
         """OCO-2 forward model: XCO2 = xco2_prior + sum(h * a * (x - x_prior)).
@@ -151,15 +154,16 @@ class MaskedVelocityWrapper(VelocityWrapper):
             # Use torch.where to avoid NaN from obs_values at unobserved locations
             obs_safe = torch.where(self.obs_mask, self.obs_values.detach(), torch.zeros_like(xco2))
             column_error = torch.where(self.obs_mask, xco2 - obs_safe, torch.zeros_like(xco2))
+            if self.spatial_smoothing_sigma > 0:
+                column_error = _gaussian_smooth_2d(column_error, self.spatial_smoothing_sigma)
             # Jacobian transpose of H(x) = sum_k h_k a_k x_k: gradient is h_k * a_k * error
-            guidance = h_ak * column_error
+            guidance = (h_ak / (self.sigma_obs**2)) * column_error
         else:
             obs_safe = torch.where(self.obs_mask, self.obs_values.detach(), torch.zeros_like(x))
-            guidance = torch.where(self.obs_mask, x - obs_safe, torch.zeros_like(x))
+            guidance = torch.where(self.obs_mask, (x - obs_safe) / (self.sigma_obs**2), torch.zeros_like(x))
+            if self.spatial_smoothing_sigma > 0:
+                guidance = _gaussian_smooth_2d(guidance, self.spatial_smoothing_sigma)
 
-        # TODO: investigate spatial smoothing of the guidance field for column conditioning.
-        # The point-wise column error creates spatially discontinuous gradients that may
-        # benefit from Gaussian smoothing before being applied to the 3D velocity field.
         mask_weight = self._get_temporal_weight(t)
         return v - self.guidance_scale * mask_weight * guidance
 
@@ -316,6 +320,62 @@ def compute_ot_coupling(x_0, x_1, reg=0.05, num_iter=50):
     # For each x_1[j], find best matching x_0[i]: perm[j] = argmax_i plan[i,j]
     perm = plan.argmax(dim=0)  # [B]
     return x_0[perm]
+
+
+def _gaussian_smooth_2d(field: torch.Tensor, sigma: float) -> torch.Tensor:
+    """Separable 2D Gaussian smoothing with geo-aware padding.
+
+    Args:
+        field: [B, C, Nlat, Nlon] tensor to smooth.
+        sigma: Gaussian kernel standard deviation in grid cells. If <= 0, returns input unchanged.
+
+    Returns:
+        Smoothed tensor of same shape.
+
+    Padding:
+        - Longitude: circular (periodic).
+        - Latitude: reflect (no periodicity at poles).
+    """
+    if sigma <= 0:
+        return field
+
+    Nlat, Nlon = field.shape[2], field.shape[3]
+
+    ks = int(6 * sigma + 1)
+    if ks % 2 == 0:
+        ks += 1
+    # Clamp kernel size so padding doesn't exceed spatial dimensions
+    ks = min(ks, 2 * min(Nlat, Nlon) - 1)
+    if ks < 3:
+        return field
+    half = ks // 2
+
+    # 1D Gaussian kernel
+    coords = torch.arange(ks, dtype=field.dtype, device=field.device) - half
+    kernel_1d = torch.exp(-0.5 * (coords / sigma) ** 2)
+    kernel_1d = kernel_1d / kernel_1d.sum()
+
+    C = field.shape[1]
+
+    # --- Longitude (dim=-1): circular padding ---
+    half_lon = min(half, Nlon - 1)
+    kernel_lon_1d = kernel_1d[half - half_lon : half + half_lon + 1]
+    kernel_lon_1d = kernel_lon_1d / kernel_lon_1d.sum()
+    ks_lon = 2 * half_lon + 1
+    kernel_lon = kernel_lon_1d.view(1, 1, 1, ks_lon).expand(C, 1, 1, ks_lon)
+    padded = F.pad(field, (half_lon, half_lon, 0, 0), mode='circular')
+    out = F.conv2d(padded, kernel_lon, groups=C)
+
+    # --- Latitude (dim=-2): reflect padding ---
+    half_lat = min(half, Nlat - 1)
+    kernel_lat_1d = kernel_1d[half - half_lat : half + half_lat + 1]
+    kernel_lat_1d = kernel_lat_1d / kernel_lat_1d.sum()
+    ks_lat = 2 * half_lat + 1
+    kernel_lat = kernel_lat_1d.view(1, 1, ks_lat, 1).expand(C, 1, ks_lat, 1)
+    padded = F.pad(out, (0, 0, half_lat, half_lat), mode='reflect')
+    out = F.conv2d(padded, kernel_lat, groups=C)
+
+    return out
 
 
 class FlowMatching(RegularGridModel):
