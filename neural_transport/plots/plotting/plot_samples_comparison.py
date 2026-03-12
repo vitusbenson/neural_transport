@@ -51,9 +51,6 @@ def plot_samples_with_comparison(
     if N != lat * lon:
         raise ValueError(f"Expected N={lat*lon}, got N={N}")
 
-    print(traj)
-    print(traj.dims)
-    print(traj.shape)
     last_step = traj.sizes["trajectory_steps"] - 1
 
     if sample_indices is not None:

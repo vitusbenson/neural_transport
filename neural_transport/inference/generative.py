@@ -703,9 +703,10 @@ def iterative_generate(
         ds = ds.assign_coords(
             trajectory_steps=("trajectory_steps", np.arange(traj.shape[1]) if traj.ndim > 0 else [0]),
             sample=("sample", [i]),
-        )
-        time_value = prototype_zarr.isel(time=i).time.values if not condition_one_timestep else prototype_zarr.isel(time=0).time.values
-        ds = ds.expand_dims(time=[time_value])
+        )   
+        time_value = prototype_zarr.isel(time=i).time.values  ### time=0 for condition_one_timestep=True but this breaks the plotting functions.
+        time_coords = [time_value]
+        ds = ds.expand_dims(time=time_coords)
 
         if remap:
             ds = remap_with_cdo(dataset, prototype_zarr.isel(time=0), ds)

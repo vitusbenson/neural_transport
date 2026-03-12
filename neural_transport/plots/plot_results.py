@@ -454,9 +454,9 @@ def plot_zonal_spectrum_heatmap(pred, targ, figsize=(8, 5), freq="QS", **kwargs)
 
     result = xr.concat([Specpredf, Spectargf], dim=["Prediction", "Target"])
     result = result.rename(rename_dict)
-    
+
     with mpl.rc_context(mpl_rc_params):
-        if "time" in Specpredf.dims:
+        if result.sizes.get("Lead time [days]", 0) > 1:
             result.plot(
                 cmap="Spectral",
                 norm=mpl.colors.LogNorm(),
