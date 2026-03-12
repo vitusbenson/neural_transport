@@ -7,11 +7,15 @@ import cartopy.crs as ccrs
 import xarray as xr
 
 from neural_transport.plots.utilities.plot_utils import (
-    save_figure,
     load_carbontracker_tests,
-    parse_projections
+    parse_projections,
+    save_animation,
+    save_figure,
 )
 from neural_transport.plots.utilities.cmaps import get_cmap_list
+from neural_transport.plots.plotting.animate_trajectory import (
+    animate_trajectory
+)
 from neural_transport.plots.plotting.plot_samples_comparison import (
     plot_samples_with_comparison
 )
@@ -69,7 +73,7 @@ def one_to_rule_them_all(args):
 
     fig = plot_trajectory_timeseries(
             trajectory=samples.trajectory,
-            sample_idx=sample_idx,
+            sample_idx=0,
             level_idx=args.level_idx,
             projection=projections[0],
             cmap=cmaps[0],
@@ -101,7 +105,7 @@ def one_to_rule_them_all(args):
         n_samples=args.n_samples,
         sample_indices=None,
         level_idx=args.level_idx,
-        time_indices=args.time_indices,
+        step_indices=args.step_indices,
         cmaps=cmaps,
         title="Sample Trajectories",
     )
@@ -138,6 +142,23 @@ def one_to_rule_them_all(args):
     )
     save_figure(fig, args.out_dir, "samples", imgformats=["pdf"])
 
+    # 8. animate trajectory
+    for sample_idx in range(min(args.n_samples, samples.sizes["sample"])):
+        for proj in projections:
+            anim = animate_trajectory(
+                trajectory=samples.trajectory,
+                sample_idx=sample_idx,
+                level_idx=args.level_idx,
+                projection=proj,
+                cmap=cmaps[0],
+                bias_hidden=args.bias_hidden,
+                title="Trajectory (noise → target)",
+            )
+            proj_name = proj.__class__.__name__
+            suffix = "minmax_" if args.bias_hidden else ""
+            save_animation(anim, args.out_dir, f"trajectory_animation_{sample_idx}_{suffix}{proj_name}", formats=["mp4"])
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Master plotting script for CO₂ samples and trajectories.")
     parser.add_argument("--samples_path", type=str, required=True)
@@ -150,11 +171,14 @@ if __name__ == "__main__":
     parser.add_argument("--use_ipcc_one", action="store_true")
     parser.add_argument("--use_selected", action="store_true")
     parser.add_argument("--bias_hidden", action="store_true")
-    parser.add_argument("--time_indices", type=int, nargs="+", default=[0, 5, 7, 9])
+    parser.add_argument("--step_indices", type=int, nargs="+", default=[0, 5, 7, 9])
     parser.add_argument("--ncol", type=int, default=2)
     args = parser.parse_args()
 
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
     one_to_rule_them_all(args)
 
-# python /Net/Groups/BGI/work_5/CO2_diffusion/neural_transport/neural_transport/plots/one_to_rule_them_all.py --samples_path /Net/Groups/BGI/work_5/CO2_diffusion/carbonbench/transport_models/carbontracker_lowres/flowmatching_dev/flowmatching_20251030_1_unet_baseline_dev/singlestep/preds/ckpt=best_massfixer=default/co2_pred_rollout_QS.zarr --out_dir /Net/Groups/BGI/work_5/CO2_diffusion/carbonbench/plotting/flowmatching/plots/20251030_1_unet_baseline_dev/ --use_ipcc_one --n_samples 100
+# python /Net/Groups/BGI/work_5/CO2_diffusion/neural_transport/neural_transport/plots/one_to_rule_them_all.py
+# --samples_path /Net/Groups/BGI/work_5/CO2_diffusion/carbonbench/transport_models/carbontracker_lowres/flowmatching_dev/flowmatching_20251030_1_unet_baseline_dev/singlestep/preds/ckpt=best_massfixer=default/co2_pred_rollout_QS.zarr
+# --data_path /Net/Groups/BGI/tscratch/vbenson/graph_tm/data/Carbontracker/
+# --out_dir /Net/Groups/BGI/work_5/CO2_diffusion/carbonbench/plotting/flowmatching/plots/20251030_1_unet_baseline_dev/ --use_ipcc_one --n_samples 100

@@ -699,10 +699,13 @@ def iterative_generate(
             {k: dataset.tensor_to_xarray(pred) for k, pred in preds_fixed.items()}
         )
 
+        ds = ds.rename({"time": "trajectory_steps"})
         ds = ds.assign_coords(
-            time=("time", prototype_zarr.time[:traj.shape[1]].values if traj.ndim > 0 else [0]),
+            trajectory_steps=("trajectory_steps", np.arange(traj.shape[1]) if traj.ndim > 0 else [0]),
             sample=("sample", [i]),
         )
+        time_value = prototype_zarr.isel(time=i).time.values if not condition_one_timestep else prototype_zarr.isel(time=0).time.values
+        ds = ds.expand_dims(time=[time_value])
 
         if remap:
             ds = remap_with_cdo(dataset, prototype_zarr.isel(time=0), ds)

@@ -18,6 +18,16 @@ def save_figure(fig, out_dir, filename, imgformats=["svg", "png", "pdf"], dpi=30
         fig.savefig(out_dir / f"{filename}.{fmt}", dpi=dpi, bbox_inches="tight")
     plt.close(fig)
 
+
+def save_animation(anim, out_dir, filename, fps=6, dpi=200, formats=["mp4"]):
+    out_dir = Path(out_dir)
+    out_dir.mkdir(exist_ok=True, parents=True)
+    for fmt in formats:
+        save_path = out_dir / f"{filename}.{fmt}"
+        print(f"Saving animation {filename}: {save_path}")
+        anim.save(save_path, fps=fps, dpi=dpi, writer="ffmpeg")
+
+
 mpl_rc_params = {
     "xtick.labelsize": 8,
     "ytick.labelsize": 8,
@@ -27,6 +37,7 @@ mpl_rc_params = {
     "legend.fontsize": 8,
     "legend.title_fontsize": 8,
 }
+
 
 def decorate_earth(ax,
                    terrain=False,
@@ -69,6 +80,7 @@ PROJECTION_MAP = {
     "Mercator": ccrs.Mercator,
     "LambertCylindrical": ccrs.LambertCylindrical,
 }
+
 
 def parse_projections(names):
     """Convert list of projection names to ccrs projection instances."""

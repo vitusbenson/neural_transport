@@ -25,7 +25,7 @@ def plot_cmaps(
     n_colors = len(cmap_list)
     n_rows = math.ceil(n_colors / n_col)
 
-    da = samples["co2massmix"].isel(sample=2, level=0).compute()
+    da = samples["co2massmix"].isel(time=0, sample=2, level=0).compute()
 
     with mpl.rc_context(mpl_rc_params):
         fig, axes = plt.subplots(n_rows, n_col, figsize=(12, 3 * n_rows))

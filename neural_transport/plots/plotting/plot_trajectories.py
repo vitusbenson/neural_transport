@@ -21,7 +21,7 @@ def plot_trajectories(
     different_samples: bool = True,
     sample_indices: list[int] | None=None,
     level_idx: int = 0,
-    time_indices: list[int] | None=None,
+    step_indices: list[int] | None=None,
     cmaps: list[str] | None=None,
     seed: int = 42,
     figsize: tuple[int, int] | None=None,
@@ -32,8 +32,9 @@ def plot_trajectories(
         if dim not in traj.dims:
             raise ValueError(f"traj must have '{dim}' dimension")
 
-    if time_indices is None:
-        time_indices = list(range(10))
+    if step_indices is None:
+        step_indices = list(range(10))
+    nsteps = traj.sizes["trajectory_steps"]
 
     # --- choose sample indices ---
     if different_samples:
@@ -52,7 +53,7 @@ def plot_trajectories(
 
     # --- colormaps ---
     nrow = len(sample_indices)
-    ncol = len(time_indices)
+    ncol = len(step_indices)
     if cmaps is None:
         cmaps = ["bone_r"] * nrow
     elif len(cmaps) < nrow:
@@ -69,13 +70,13 @@ def plot_trajectories(
     last_maps = []
 
     for i, (sample_idx, cmap) in enumerate(zip(sample_indices, cmaps)):
-        traj_sample = traj.isel(sample=sample_idx, level=level_idx)
+        traj_sample = traj.isel(time=0, sample=sample_idx, level=level_idx)
         with contextlib.suppress(Exception):
             traj_sample = traj_sample.compute()
 
-        for j, time_idx in enumerate(time_indices):
+        for j, step_idx in enumerate(step_indices):
             ax = axes[i, j]
-            traj_slice = traj_sample.isel(time=time_idx)
+            traj_slice = traj_sample.isel(trajectory_steps=step_idx)
             mappable = traj_slice.plot(ax=ax, cmap=cmap, add_colorbar=False, add_labels=False, rasterized=True)
 
             ax.set_aspect('equal', adjustable='box')
@@ -90,8 +91,9 @@ def plot_trajectories(
                 ax.set_xticklabels([])
                 ax.set_yticklabels([])
 
+            t = step_idx / (nsteps - 1)
             ax.text(
-                0.05, 0.93, f"t={time_idx}",
+                0.05, 0.93, f"t={t:.2f}",
                 transform=ax.transAxes,
                 fontsize=10,
                 fontweight="bold",

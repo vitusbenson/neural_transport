@@ -48,7 +48,7 @@ def plot_trajectory_timeseries(
     if projection is None:
         projection = ccrs.PlateCarree()
 
-    nsteps = da_sample.sizes["time"]
+    nsteps = da_sample.sizes["trajectory_steps"]
     lat, lon = da_sample.sizes["lat"], da_sample.sizes["lon"]
 
     ncols = nsteps // 2 if nsteps % 2 == 0 else (nsteps + 1) // 2
@@ -74,7 +74,7 @@ def plot_trajectory_timeseries(
         ax = fig.add_subplot(gs[row, col], projection=projection)
         axes.append(ax)
 
-        map_data = da_sample.isel(time=i).values
+        map_data = da_sample.isel(time=0, trajectory_steps=i).values
 
         im = ax.pcolormesh(
             da_sample["lon"], da_sample["lat"],
@@ -95,8 +95,9 @@ def plot_trajectory_timeseries(
         for spine in ax.spines.values():
             spine.set_visible(False)
 
+        t = i / (nsteps - 1)
         ax.text(
-            0.05, 0.95, f"t={i}",
+            0.05, 0.95, f"t={t:.2f}",
             transform=ax.transAxes,
             fontsize=12, fontweight="bold",
             color="white",

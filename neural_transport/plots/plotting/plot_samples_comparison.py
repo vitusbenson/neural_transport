@@ -51,7 +51,10 @@ def plot_samples_with_comparison(
     if N != lat * lon:
         raise ValueError(f"Expected N={lat*lon}, got N={N}")
 
-    last_time = traj.sizes["time"] - 1
+    print(traj)
+    print(traj.dims)
+    print(traj.shape)
+    last_step = traj.sizes["trajectory_steps"] - 1
 
     if sample_indices is not None:
         sample_indices = list(sample_indices)[:n_samples]
@@ -78,7 +81,12 @@ def plot_samples_with_comparison(
         ax_pred = fig.add_subplot(gs[i, 0], projection=projection or None)
         ax_true = fig.add_subplot(gs[i, 1], projection=projection or None)
 
-        da_sample = traj_norm.isel(sample=sample_idx, level=level_idx, time=last_time)
+        da_sample = traj_norm.isel(
+            time=0,
+            sample=sample_idx,
+            trajectory_steps=last_step,
+            level=level_idx,
+        )
         with contextlib.suppress(Exception):
             da_sample = da_sample.compute()
 

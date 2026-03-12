@@ -1375,14 +1375,14 @@ def plot_masked_bias_samples(
     im = plot_panel(axs[0, 0], target_vals, "Ground Truth", vmin=targ_min, vmax=targ_max, aspect_ratio=aspect_ratio, bold=True)
 
     # Masked observations
-    plot_panel(axs[1, 0], np.ma.masked_valid(masked_obs), "Masked Observations",
+    plot_panel(axs[1, 0], np.ma.masked_invalid(masked_obs), "Masked Observations",
         vmin=obs_min, vmax=obs_max, aspect_ratio=aspect_ratio, bold=True)
 
     # Bias samples
     for i in range(n_samples):
         row = 0 if i < 3 else 1
         col = (i % 3) + 1
-        plot_panel(
+        im2 = plot_panel(
             axs[row, col],
             bias_np[i],
             f"Bias Sample {i}",
@@ -1395,7 +1395,7 @@ def plot_masked_bias_samples(
     fig.text(
         0.56,
         0.9,
-        "Bias of Generated Samples at Masked Locations",
+        "Generated Samples",
         fontsize=14,
         fontweight="bold",
         ha="center",
@@ -1407,9 +1407,11 @@ def plot_masked_bias_samples(
             if not axs[row, col].images:
                 axs[row, col].axis("off")
 
+    plt.tight_layout(rect=[0, 0, 0.9, 1], h_pad=0.2)
+
     # shared colorbars
     cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
-    fig.colorbar(im, cax=cbar_ax, orientation="vertical", label="Bias [ppm]")
+    fig.colorbar(im2, cax=cbar_ax, orientation="vertical", label="Bias [ppm]")
 
     bbox0 = axs[1,0].get_position()
     cbar_truth_ax = fig.add_axes([
@@ -1426,7 +1428,6 @@ def plot_masked_bias_samples(
     )
 
     fig.suptitle("Bias of Generated Samples (Masked Locations)", fontsize=16)
-    plt.tight_layout(rect=[0, 0, 0.9, 1])
 
     return fig
 

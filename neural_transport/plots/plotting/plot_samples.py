@@ -27,8 +27,8 @@ def plot_samples(
     figsize: tuple[int, int] | None=None,
     title: str = "Samples",
 ) -> plt.Figure:
-    """Plot selected/random samples at the last time step."""
-    for dim in ("sample", "time", "lat", "lon"):
+    """Plot selected/random samples at the last integration step."""
+    for dim in ("trajectory_steps", "sample", "time", "lat", "lon"):
         if dim not in traj.dims:
             raise ValueError(f"traj must have '{dim}' dimension")
 
@@ -48,7 +48,7 @@ def plot_samples(
     elif len(cmaps) < n_samples:
         cmaps = cmaps + ["bone_r"] * (n_samples - len(cmaps))
 
-    last_time = traj.sizes["time"] - 1
+    last_step = traj.sizes["trajectory_steps"] - 1
 
     nrow = int(np.ceil(n_samples / ncol))
     aspect = traj.sizes["lat"] / traj.sizes["lon"]
@@ -62,7 +62,7 @@ def plot_samples(
 
     for i, (sample_idx, cmap) in enumerate(zip(sample_indices, cmaps)):
         ax = axes_flat[i]
-        da_sample = traj.isel(sample=sample_idx, level=level_idx, time=last_time)
+        da_sample = traj.isel(time=0, sample=sample_idx, trajectory_steps=last_step, level=level_idx)
         with contextlib.suppress(Exception):
             da_sample = da_sample.compute()
 

@@ -32,8 +32,8 @@ def plot_samples_projection(
     figsize: tuple | None=None,
     title: str="Sample Projections",
 ) -> plt.Figure:
-    """Plot selected/random samples at the last time step on a global projection."""
-    for dim in ("sample", "time", "lat", "lon"):
+    """Plot selected/random samples at the last integration step on a global projection."""
+    for dim in ("time", "sample", "trajectory_steps", "lat", "lon"):
         if dim not in traj.dims:
             raise ValueError(f"traj must have '{dim}' dimension")
 
@@ -63,7 +63,7 @@ def plot_samples_projection(
     else:
         projections = [projection] * n_samples
 
-    last_time = traj.sizes["time"] - 1
+    last_step = traj.sizes["trajectory_steps"] - 1
 
     nrow = int(np.ceil(n_samples / ncol))
     aspect = traj.sizes["lat"] / traj.sizes["lon"]
@@ -84,7 +84,7 @@ def plot_samples_projection(
         ax = fig.add_subplot(axes_flat[i].get_subplotspec(), projection=proj)
         axes_flat[i].remove()  # remove placeholder
 
-        da_sample = traj.isel(sample=sample_idx, level=level_idx, time=last_time)
+        da_sample = traj.isel(time=0, sample=sample_idx, trajectory_steps=last_step, level=level_idx)
         with contextlib.suppress(Exception):
             da_sample = da_sample.compute()
 

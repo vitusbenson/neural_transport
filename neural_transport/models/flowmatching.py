@@ -958,10 +958,10 @@ class FlowMatching(RegularGridModel):
                     print("  peak allocated:", torch.cuda.max_memory_allocated()/1e9, "GB")
             elif dflow_optimizer == "lbfgs":
                 x_0 = torch.nn.Parameter(x_init.clone().contiguous())  # [B C Nlat Nlon]
-                optimizer_x_0 = torch.optim.LBFGS([x_0], max_iter=7, line_search_fn='strong_wolfe')  # Use L-BFGS optimizer for better convergence
+                optimizer_x_0 = torch.optim.LBFGS([x_0], max_iter=10, line_search_fn='strong_wolfe')  # Use L-BFGS optimizer for better convergence
                 log_state = {}
                 with torch.enable_grad():
-                    for i in range(15):
+                    for i in range(20):
                         def closure():
                             optimizer_x_0.zero_grad()
                             trajectory = solver.sample(time_grid=time_grid,
@@ -977,11 +977,11 @@ class FlowMatching(RegularGridModel):
                             x_final = x_final * masking_config["obs_mask"]
                             x_target = torch.where(masking_config["obs_mask"], masking_config["obs_values"], torch.zeros_like(masking_config["obs_values"]))
                             obs_loss = torch.nn.functional.mse_loss(x_final, x_target)
-                            reg_loss = 1e-5 * torch.norm(x_0)**2  # Add small regularization to prevent extreme values
+                            reg_loss = 1e-2 * (torch.norm(x_0) - torch.norm(x_init))**2  # Add regularization to prevent extreme values (alternatively 1e-2 * torch.norm(x_0)**2)
                             loss = obs_loss + reg_loss
                             loss.backward()
-                            log_state["obs_loss"] = obs_loss.detach()
-                            log_state["reg_loss"] = reg_loss.detach()
+                            log_state["obs_loss"] = obs_loss.detach().item()
+                            log_state["reg_loss"] = reg_loss.detach().item()
                             return loss
                         
                         loss = optimizer_x_0.step(closure)
@@ -990,7 +990,7 @@ class FlowMatching(RegularGridModel):
                             break
                         if i % 10 == 0:
                             print(f"Refinement step {i}, loss: {loss.item():.6f}")
-                            print(f"  obs_loss: {log_state['obs_loss'].item():.6f}, reg_loss: {log_state['reg_loss'].item():.6f}")
+                            print(f"  obs_loss: {log_state['obs_loss']:.6f}, reg_loss: {log_state['reg_loss']:.6f}")
                 with torch.no_grad():
                     trajectory = solver.sample(time_grid=time_grid,
                                                             x_init=x_0,

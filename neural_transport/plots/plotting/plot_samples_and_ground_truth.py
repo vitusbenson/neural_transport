@@ -50,7 +50,7 @@ def plot_samples_and_ground_truth(
     if N != lat * lon:
         raise ValueError(f"Expected N={lat*lon}, got N={N}")
 
-    last_time = traj.sizes["time"] - 1
+    last_step = traj.sizes["trajectory_steps"] - 1
 
     if sample_indices is not None:
         sample_indices = list(sample_indices)[:n_samples]
@@ -77,7 +77,11 @@ def plot_samples_and_ground_truth(
         ax_pred, ax_true = axes[i]
 
         # Prediction
-        da_sample = traj_norm.isel(sample=sample_idx, time=last_time)
+        da_sample = traj_norm.isel(
+            time=0,
+            sample=sample_idx,
+            trajectory_steps=last_step,
+        )
         with contextlib.suppress(Exception):
             da_sample = da_sample.compute()
 
