@@ -1,13 +1,10 @@
 """Pytest suite for the toy column OSSE.
 
-Quick tests (~30s total): sanity checks with tiny model (500 samples, 5 epochs, 8x16 grid).
-Slow tests (~5min total): full validation with all 8 methods (10k samples, 50 epochs, 16x32 grid).
+All tests in this module are marked slow since they train models.
+Run with: pytest -m slow
 
-Usage:
-    pytest -m quick          # ~30s, sanity checks
-    pytest -m slow           # ~5min, full validation
-    pytest -m "not slow"     # default: runs quick + unmarked
-    pytest                   # everything
+Quick tests: sanity checks with tiny model (500 samples, 5 epochs, 8x16 grid).
+Slow tests: full validation with all 8 methods (10k samples, 50 epochs, 16x32 grid).
 """
 
 import json
@@ -15,6 +12,8 @@ import json
 import numpy as np
 import pytest
 import torch
+
+pytestmark = pytest.mark.slow
 
 from neural_transport.experiments.toy_column_osse import (
     CONDITIONING_METHODS,

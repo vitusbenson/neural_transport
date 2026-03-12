@@ -6,10 +6,16 @@ import pandas as pd
 import pytorch_lightning as pl
 import xarray as xr
 
-from neural_transport.datamodule import CarbonDataModule, CarbonDataset
-from neural_transport.inference.analyse import compute_local_scores, compute_score_df, compute_score_df_generate
+from neural_transport.datamodule import CarbonDataModule, CarbonDataset, PreBatchedShuffleCallback
+from neural_transport.inference.analyse import (
+    compute_distributional_score_df,
+    compute_local_scores,
+    compute_score_df,
+    compute_score_df_generate,
+)
 from neural_transport.inference.forecast import iterative_forecast
 from neural_transport.inference.generative import (
+    generate_for_distributional_eval,
     iterative_generate,
     iterative_generate_oco2,
 )
@@ -37,6 +43,7 @@ def train_singlestep(
         auto_insert_metric_name=False,
         every_n_epochs=1,
     ),
+    extra_callbacks=None,
 ):
     run_dir = Path(run_dir)
 
@@ -56,16 +63,16 @@ def train_singlestep(
 
     if ckptpath is not None:
         lit_module_kwargs["pretrained_ckptpath"] = ckptpath
-        # model = NeuralTransport.load_from_checkpoint(
-        #     ckptpath,
-        #     map_location="cpu",
-        #     **lit_module_kwargs,
-        # )
-    # else:
     model = NeuralTransport(**lit_module_kwargs)
 
+    callbacks = [checkpoint_callback, latest_checkpoint_callback, lr_monitor]
+    if extra_callbacks:
+        callbacks.extend(extra_callbacks)
+    if data_kwargs.get("compute", False):
+        callbacks.append(PreBatchedShuffleCallback())
+
     trainer = pl.Trainer(
-        callbacks=[checkpoint_callback, latest_checkpoint_callback, lr_monitor],
+        callbacks=callbacks,
         logger=logger,
         **trainer_kwargs,
     )
@@ -95,7 +102,7 @@ def train_rollout(
     ckptdir = log_path / "checkpoints"
     bestckptpath = sorted(
         [p for p in ckptdir.glob("*.ckpt") if "LossVal" in p.name],
-        key=lambda p: float(p.name.split("=")[-1].split(".c")[0]),
+        key=lambda p: float(p.name.split("=")[-1].split(".c")[0].split("-v")[0]),
     )[0]
 
     lastckptpath = log_path / "checkpoints/last.ckpt"
@@ -172,13 +179,15 @@ def predict(
     zero_surfflux=False,
     save_obs=False,
     generate_kwargs={},
+    distributional_eval=False,
+    distributional_eval_kwargs=None,
 ):
     log_path = Path(log_path)
 
     ckptdir = log_path / "checkpoints"
     bestckptpath = sorted(
         [p for p in ckptdir.glob("*.ckpt") if "LossVal" in p.name],
-        key=lambda p: float(p.name.split("=")[-1].split(".c")[0]),
+        key=lambda p: float(p.name.split("=")[-1].split(".c")[0].split("-v")[0]),
     )[0]
 
     lastckptpath = log_path / "checkpoints/last.ckpt"
@@ -189,12 +198,29 @@ def predict(
         lit_module_kwargs["model_kwargs"]["massfixer"] = massfixer
     outpath = log_path / "preds" / f"ckpt={ckpt}_massfixer={massfixer}"
 
-    dataset = load_dataset(data_path_forecast, data_kwargs)
+    is_fm = type(lit_module_kwargs['model']).__name__ == "FlowMatching" or lit_module_kwargs['model'] == "flowmatching"
+    dataset = load_dataset(data_path_forecast, data_kwargs, load_obspack=not is_fm)
 
-    if type(lit_module_kwargs['model']).__name__ == "FlowMatching" or lit_module_kwargs['model'] == "flowmatching":
+    if is_fm:
         print(f"Generating {ckptpath} {ckpt} CKPT")
         model = NeuralTransport.load_from_checkpoint(ckptpath, **lit_module_kwargs)
         outpath.mkdir(parents=True, exist_ok=True)
+
+        if distributional_eval:
+            dist_kwargs = distributional_eval_kwargs or {}
+            dist_outpath = outpath / "distributional_eval"
+            print("Running distributional evaluation...")
+            generate_for_distributional_eval(
+                model,
+                dataset,
+                dist_outpath,
+                device=device,
+                target_vars_3d=data_kwargs["target_vars"],
+                generate_kwargs=generate_kwargs,
+                **dist_kwargs,
+            )
+            return
+
         if generate_kwargs.get("mask_source") == "oco2":
             dataset_gen = load_dataset(generate_kwargs["data_path_generate"], generate_kwargs["generate_data_kwargs"])
             iterative_generate_oco2(
@@ -268,7 +294,28 @@ def score(
     freq: str | None = "QS",
     target_var: str | None = "co2massmix",
     generate_kwargs: dict | None = None,
+    distributional_eval: bool = False,
+    distributional_eval_path: str | None = None,
 ) -> None:
+    # Distributional evaluation path
+    if distributional_eval:
+        import xarray as xr
+
+        dist_dir = (
+            Path(distributional_eval_path) if distributional_eval_path else Path(pred_path) / "distributional_eval"
+        )
+        if dist_dir.exists():
+            gt_ds = xr.open_dataset(dist_dir / "gt_pool.nc")
+            gen_ds = xr.open_dataset(dist_dir / "gen_pool.nc")
+            df = compute_distributional_score_df(gt_ds, gen_ds, target_var=target_var)
+            score_path = dist_dir / "scores"
+            score_path.mkdir(parents=True, exist_ok=True)
+            df.to_csv(score_path / "distributional_metrics.csv", index=False)
+            print(f"Distributional metrics saved to {score_path / 'distributional_metrics.csv'}")
+        else:
+            print(f"Distributional eval dir not found: {dist_dir}")
+        return
+
     co2targ, co2pred = load_pred_targ(target_path, pred_path)
     co2pred = co2pred.isel(time=slice(1, None))
     co2targ = co2targ.isel(time=slice(1, None)).isel(time=slice(len(co2pred.time)))
@@ -333,20 +380,24 @@ def plot(
     if generate_kwargs is None:
         generate_kwargs = {}
 
-    co2targ, co2pred = load_pred_targ(target_path, pred_path)
+    # For distributional-only plots, skip loading pred/target zarr
+    needs_pred_targ = any(pt in plot_types for pt in ["metrics", "animations", "obspack", "samples"])
 
     ckpt_name = pred_path.parent.name
     plot_path = pred_path.parent.parent.parent / "plots" / ckpt_name
     score_path = pred_path.parent.parent.parent / "scores" / ckpt_name
-
-    co2pred = co2pred.isel(time=slice(1, None))
-    co2targ = co2targ.isel(time=slice(1, None))
-    co2targ = co2targ.isel(time=slice(None, len(co2pred.time)))
-    co2massmix = data_kwargs['target_vars'][0]
-    co2pred["co2molemix"] = massmix_to_molemix(co2pred[co2massmix])
-    co2targ["co2molemix"] = massmix_to_molemix(co2targ[co2massmix])
-
     plot_path.mkdir(parents=True, exist_ok=True)
+
+    if needs_pred_targ:
+        co2targ, co2pred = load_pred_targ(target_path, pred_path)
+        co2pred = co2pred.isel(time=slice(1, None))
+        co2targ = co2targ.isel(time=slice(1, None))
+        co2targ = co2targ.isel(time=slice(None, len(co2pred.time)))
+        co2massmix = data_kwargs['target_vars'][0]
+        co2pred["co2molemix"] = massmix_to_molemix(co2pred[co2massmix])
+        co2targ["co2molemix"] = massmix_to_molemix(co2targ[co2massmix])
+    else:
+        co2targ = co2pred = None
     if "metrics" in plot_types:
         plot_metrics(co2pred, co2targ, plot_path, imgformats=["pdf"])
 
@@ -373,6 +424,160 @@ def plot(
             postfix=f"3d_anim_t0={t0}-tend={tend}",
             num_workers=num_workers,
         )
+
+    if "distributional" in plot_types:
+        dist_dir = pred_path.parent / "distributional_eval"
+        if dist_dir.exists():
+            from neural_transport.plots.distributional_plots import (
+                plot_distributional_metrics_summary,
+                plot_lat_height_comparison,
+                plot_marginal_distributions,
+                plot_power_spectrum_comparison,
+                plot_qq,
+                plot_sample_grid,
+                plot_spatial_pattern_comparison,
+            )
+
+            gt_ds = xr.open_dataset(dist_dir / "gt_pool.nc")
+            gen_ds = xr.open_dataset(dist_dir / "gen_pool.nc")
+            target_var = data_kwargs['target_vars'][0]
+            gt_fields = gt_ds[target_var].values
+            gen_fields = gen_ds[target_var].values
+            lat_vals = gt_ds.lat.values
+            lon_vals = gt_ds.lon.values
+            level_values = gt_ds.level.values if "level" in gt_ds.dims else None
+
+            dist_plot_dir = plot_path / "distributional"
+
+            # Select representative levels closest to [1013, 843, 441, 73] hPa
+            import numpy as np
+
+            nlev = gt_fields.shape[-1]
+            if level_values is not None:
+                target_pressures = [1013, 843, 441, 73]
+                level_indices = []
+                for tp in target_pressures:
+                    idx = int(np.argmin(np.abs(np.asarray(level_values) - tp)))
+                    if idx not in level_indices:
+                        level_indices.append(idx)
+            else:
+                level_indices = list(range(min(nlev, 4)))
+
+            # Per-level plots
+            for lev_idx in level_indices:
+                lev_hpa = int(level_values[lev_idx]) if level_values is not None else None
+                plot_spatial_pattern_comparison(
+                    gt_fields,
+                    gen_fields,
+                    lat_vals,
+                    lon_vals,
+                    dist_plot_dir,
+                    level_idx=lev_idx,
+                    level_hpa=lev_hpa,
+                    imgformats=["png"],
+                )
+                plot_marginal_distributions(
+                    gt_fields,
+                    gen_fields,
+                    dist_plot_dir,
+                    level_idx=lev_idx,
+                    level_hpa=lev_hpa,
+                    imgformats=["png"],
+                )
+                plot_power_spectrum_comparison(
+                    gt_fields,
+                    gen_fields,
+                    lat_vals,
+                    lon_vals,
+                    dist_plot_dir,
+                    level_idx=lev_idx,
+                    level_hpa=lev_hpa,
+                    imgformats=["png"],
+                )
+                plot_qq(gt_fields, gen_fields, dist_plot_dir, level_idx=lev_idx, level_hpa=lev_hpa, imgformats=["png"])
+
+            # Total column plots (level_idx=None)
+            plot_spatial_pattern_comparison(
+                gt_fields,
+                gen_fields,
+                lat_vals,
+                lon_vals,
+                dist_plot_dir,
+                level_idx=None,
+                level_values=level_values,
+                imgformats=["png"],
+            )
+            plot_marginal_distributions(
+                gt_fields,
+                gen_fields,
+                dist_plot_dir,
+                level_idx=None,
+                level_values=level_values,
+                imgformats=["png"],
+            )
+            plot_power_spectrum_comparison(
+                gt_fields,
+                gen_fields,
+                lat_vals,
+                lon_vals,
+                dist_plot_dir,
+                level_idx=None,
+                level_values=level_values,
+                imgformats=["png"],
+            )
+            plot_qq(gt_fields, gen_fields, dist_plot_dir, level_idx=None, level_values=level_values, imgformats=["png"])
+
+            # Lat-height cross-section
+            plot_lat_height_comparison(
+                gt_fields,
+                gen_fields,
+                lat_vals,
+                dist_plot_dir,
+                level_values=level_values,
+                imgformats=["png"],
+            )
+
+            # Sample grid
+            plot_sample_grid(
+                gt_fields,
+                gen_fields,
+                lat_vals,
+                lon_vals,
+                dist_plot_dir,
+                level_values=level_values,
+                imgformats=["png"],
+            )
+
+            # Distributional metrics bar chart
+            metrics_csv = dist_dir / "scores" / "distributional_metrics.csv"
+            if metrics_csv.exists():
+                import pandas as pd
+
+                metrics_df = pd.read_csv(metrics_csv)
+                metrics = dict(zip(metrics_df.columns, metrics_df.iloc[0]))
+                plot_distributional_metrics_summary(
+                    metrics,
+                    dist_plot_dir,
+                    level_values=level_values,
+                    imgformats=["png"],
+                )
+            else:
+                from neural_transport.inference.distributional_metrics import (
+                    compute_distributional_metrics,
+                )
+
+                metrics = compute_distributional_metrics(
+                    gt_fields,
+                    gen_fields,
+                    lat_vals,
+                    lon_vals,
+                )
+                plot_distributional_metrics_summary(
+                    metrics,
+                    dist_plot_dir,
+                    level_values=level_values,
+                    imgformats=["png"],
+                )
 
     if obs_pred_path and ("obspack" in plot_types):
         obspreds = xr.open_zarr(obs_pred_path)
@@ -416,6 +621,9 @@ def train_and_eval_singlestep(
     ),
     plot_types=["metrics", "animations", "obspack"],
     generate_kwargs=None,
+    distributional_eval=False,
+    distributional_eval_kwargs=None,
+    extra_callbacks=None,
 ):
     if generate_kwargs is None:
         generate_kwargs = {}
@@ -428,6 +636,7 @@ def train_and_eval_singlestep(
             trainer_kwargs,
             ckptpath=pretrained_ckptpath,
             ckpt_kwargs=ckpt_kwargs,
+            extra_callbacks=extra_callbacks,
         )
 
     if ("SLURM_PROCID" in os.environ) and (int(os.environ["SLURM_PROCID"]) > 0):
@@ -443,6 +652,8 @@ def train_and_eval_singlestep(
         lit_module_kwargs=lit_module_kwargs,
         massfixer=massfixer,
         generate_kwargs=generate_kwargs,
+        distributional_eval=distributional_eval,
+        distributional_eval_kwargs=distributional_eval_kwargs,
     )
     target_path = (
         data_path_forecast
@@ -454,32 +665,61 @@ def train_and_eval_singlestep(
     obs_pred_path = (
         run_dir / "singlestep" / "preds" / f"ckpt={ckpt}_massfixer={massfixer}" / f"obs_co2_pred_rollout_{freq}.zarr"
     )
-    if type(lit_module_kwargs['model']).__name__ == "FlowMatching" or lit_module_kwargs['model'] == "flowmatching":
+    is_fm = type(lit_module_kwargs['model']).__name__ == "FlowMatching" or lit_module_kwargs['model'] == "flowmatching"
+    if is_fm:
         obs_pred_path = None
         plot_types += ["samples"]
 
-    target_var = data_kwargs['target_vars'][0]
-    score(
-        target_path,
-        pred_path,
-        obs_pred_path=obs_pred_path,
-        freq=freq,
-        target_var=target_var,
-        generate_kwargs=generate_kwargs,
-    )
-    plot(
-        target_path,
-        pred_path,
-        obs_pred_path=obs_pred_path,
-        obs_compare_path=obs_compare_path,
-        freq=freq,
-        data_path_forecast=data_path_forecast,
-        data_kwargs=data_kwargs,
-        movie_interval=movie_interval,
-        num_workers=num_workers,
-        plot_types=plot_types,
-        generate_kwargs=generate_kwargs,
-    )
+    if distributional_eval and is_fm:
+        # Distributional-only evaluation: run score/plot on generated pools
+        dist_outpath = run_dir / "singlestep" / "preds" / f"ckpt={ckpt}_massfixer={massfixer}" / "distributional_eval"
+        target_var = data_kwargs['target_vars'][0]
+        score(
+            target_path,
+            pred_path,
+            obs_pred_path=obs_pred_path,
+            freq=freq,
+            target_var=target_var,
+            generate_kwargs=generate_kwargs,
+            distributional_eval=True,
+            distributional_eval_path=dist_outpath,
+        )
+        plot(
+            target_path,
+            pred_path,
+            obs_pred_path=obs_pred_path,
+            obs_compare_path=obs_compare_path,
+            freq=freq,
+            data_path_forecast=data_path_forecast,
+            data_kwargs=data_kwargs,
+            movie_interval=movie_interval,
+            num_workers=num_workers,
+            plot_types=["distributional"],
+            generate_kwargs=generate_kwargs,
+        )
+    else:
+        target_var = data_kwargs['target_vars'][0]
+        score(
+            target_path,
+            pred_path,
+            obs_pred_path=obs_pred_path,
+            freq=freq,
+            target_var=target_var,
+            generate_kwargs=generate_kwargs,
+        )
+        plot(
+            target_path,
+            pred_path,
+            obs_pred_path=obs_pred_path,
+            obs_compare_path=obs_compare_path,
+            freq=freq,
+            data_path_forecast=data_path_forecast,
+            data_kwargs=data_kwargs,
+            movie_interval=movie_interval,
+            num_workers=num_workers,
+            plot_types=plot_types,
+            generate_kwargs=generate_kwargs,
+        )
 
 
 def train_and_eval_rollout(

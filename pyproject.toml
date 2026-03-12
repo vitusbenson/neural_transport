@@ -75,7 +75,7 @@ quote-style = "preserve"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
-addopts = ["-v", "--tb=short", "-ra"]
+addopts = ["-v", "--tb=short", "-ra", "-m not slow"]
 filterwarnings = ["ignore::DeprecationWarning", "ignore::UserWarning"]
 markers = [
     "slow: marks tests as slow (~5min, full model training)",

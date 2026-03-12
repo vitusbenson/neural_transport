@@ -174,8 +174,37 @@ class MSE(nn.Module):
         return loss, losses
 
 
+class FlowMatchingWeightedMSE(nn.Module):
+    """Flow matching MSE with optional time-dependent weighting.
+
+    The model stores the time-dependent weight in preds["time_loss_weight"]
+    when time_loss_weight is configured. This loss applies it.
+    """
+
+    def __init__(self, target_var="co2massmix"):
+        super().__init__()
+        self.target_var = target_var
+
+    def forward(self, preds, batch):
+        loss = 0
+        losses = {}
+        se = (preds[self.target_var] - preds["dx_t"]) ** 2
+
+        if "time_loss_weight" in preds:
+            w = preds["time_loss_weight"]
+            mse = torch.mean(se * w)
+        else:
+            mse = torch.mean(se)
+
+        loss += mse
+        losses["Loss_FlowMatching/mse"] = mse
+
+        return loss, losses
+
+
 LOSSES = {
     "mse": MSE,
     "mae": MAE,
     "flowmatching_mse": FlowMatchingMSE,
+    "flowmatching_weighted_mse": FlowMatchingWeightedMSE,
 }

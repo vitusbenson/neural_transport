@@ -333,6 +333,9 @@ class FlowMatching(RegularGridModel):
         time_grid_spacing='uniform',
         atol=1e-5,
         rtol=1e-5,
+        time_sampling='uniform',
+        time_sampling_kwargs=None,
+        time_loss_weight=None,
     ):
         self.submodel = MODELS[submodel](**model_kwargs)
         self.return_intermediates = return_intermediates
@@ -345,6 +348,9 @@ class FlowMatching(RegularGridModel):
         self.time_grid_spacing = time_grid_spacing
         self.atol = atol
         self.rtol = rtol
+        self.time_sampling = time_sampling
+        self.time_sampling_kwargs = time_sampling_kwargs or {}
+        self.time_loss_weight = time_loss_weight
         self.path = AffineProbPath(scheduler=CondOTScheduler())
         self.target_vars = self.submodel.target_vars  # Here target_vars[0] is supposed to be "co2massmix"
 
@@ -352,9 +358,13 @@ class FlowMatching(RegularGridModel):
         if not hasattr(self, "generate_kwargs"):
             self.generate_kwargs = {}
         if self.training:
-            x_out, dx_t = self.training_forward(batch)
+            x_out, dx_t, time_weight = self.training_forward(batch)
             preds = self.postprocess_outputs(x_out, batch, denormalize=False)
             preds["dx_t"] = dx_t.permute(0, 2, 3, 1).reshape(*preds[self.target_vars[0]].shape)  # [B N C]
+            if time_weight is not None:
+                # Broadcast weight [B,1,1,1] -> [B,N,C] matching preds shape
+                B = preds[self.target_vars[0]].shape[0]
+                preds["time_loss_weight"] = time_weight.view(B, 1, 1).expand_as(preds[self.target_vars[0]])
             return preds
         elif self.generating:
             x_in = self.preprocess_inputs(batch)
@@ -385,16 +395,67 @@ class FlowMatching(RegularGridModel):
             trajectory = self.inference_forward(
                 x_in, x_init, masking_config=masking_config, generate_kwargs=self.generate_kwargs
             )
-            x_out = trajectory[-1, ...]
             if self.return_intermediates:
+                # trajectory is [T, B, C, Nlat, Nlon]
+                x_out = trajectory[-1, ...]
                 sol = self.postprocess_outputs(x_out, batch)
                 T, B, C, Nlat, Nlon = trajectory.shape
                 trajectory = trajectory.permute(0, 1, 3, 4, 2)  # [T B Nlat Nlon C]
                 trajectory = trajectory.reshape(T, B, Nlat * Nlon, C)  # [T B Nlat*Nlon C]
                 sol["trajectory"] = trajectory
+            else:
+                # trajectory is [B, C, Nlat, Nlon] (final timestep only)
+                x_out = trajectory
+                sol = self.postprocess_outputs(x_out, batch)
             return sol
         else:
             return super().forward(batch)
+
+    def _sample_time(self, B, device):
+        """Sample timesteps for training with configurable distribution.
+
+        Args:
+            B: batch size
+            device: torch device
+
+        Returns:
+            Tensor of shape [B] with timesteps in (0, 1).
+        """
+        if self.time_sampling == "logit_normal":
+            mean = self.time_sampling_kwargs.get("mean", 0.0)
+            std = self.time_sampling_kwargs.get("std", 1.0)
+            u = torch.randn(B, device=device) * std + mean
+            return torch.sigmoid(u)
+        elif self.time_sampling == "beta":
+            a = self.time_sampling_kwargs.get("a", 2.0)
+            b = self.time_sampling_kwargs.get("b", 5.0)
+            return torch.distributions.Beta(a, b).sample((B,)).to(device)
+        else:  # uniform
+            return torch.rand(B, device=device)
+
+    def _compute_time_loss_weight(self, t):
+        """Compute time-dependent loss weighting.
+
+        Args:
+            t: [B] tensor of timesteps
+
+        Returns:
+            [B, 1, 1, 1] weight tensor, or 1.0 if no weighting.
+        """
+        if self.time_loss_weight is None:
+            return 1.0
+        elif self.time_loss_weight == "snr":
+            # SNR weighting: w(t) = 1 / (1 - t + eps)^2
+            # Higher weight near t=1 where signal-to-noise is higher
+            w = 1.0 / (1.0 - t + 1e-4) ** 2
+            return w.view(-1, 1, 1, 1)
+        elif self.time_loss_weight == "sigma_inv":
+            # Inverse sigma weighting: w(t) = 1 / sigma(t)
+            # For CondOT: sigma(t) = 1 - t
+            w = 1.0 / (1.0 - t + 1e-4)
+            return w.view(-1, 1, 1, 1)
+        else:
+            return 1.0
 
     # training
     def training_forward(self, batch):
@@ -415,7 +476,7 @@ class FlowMatching(RegularGridModel):
 
         # sample time t \in [0,1], [B] -> [B 1 Nlat Nlon]
         B, _, nlat, nlon = x_in.shape
-        t = torch.rand(B, device=x_in.device)
+        t = self._sample_time(B, x_in.device)
 
         # sample path
         path_sample = self.path.sample(t=t, x_0=x_0, x_1=x_1_normalized)
@@ -433,14 +494,11 @@ class FlowMatching(RegularGridModel):
 
         dx_t = path_sample.dx_t
 
-        # # access scheduler for affine path
-        # scheduler_out = self.path.scheduler(t)
-        # d_sigma_t = scheduler_out.d_sigma_t.view(-1, 1, 1, 1)
-        # d_alpha_t = scheduler_out.d_alpha_t.view(-1, 1, 1, 1)
+        # Compute time-dependent loss weight
+        time_weight = self._compute_time_loss_weight(t)
+        time_weight = time_weight if not isinstance(time_weight, float) else None
 
-        # x_out = (x_out - d_sigma_t * x_0) / d_alpha_t # to adjust for loss function definition
-
-        return x_out, dx_t  # , x_1_normalized # return {self.target_vars[0]: x_out}
+        return x_out, dx_t, time_weight
 
     def prepare_masking_config(self, batch, B, C, obs_var):
         if "xco2_averaging_kernel" in batch:

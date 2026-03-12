@@ -127,10 +127,30 @@ Ensure the unconditional model matches SOTA vanilla flow matching before adding 
 - [x] `train.py` with `--max_steps` CLI arg for smoke testing
 - [x] `run_eval.py` with ablation framework (ot/solver/steps/timegrid/all)
 - [x] Tests: `tests/test_flowmatching_training.py` — OT coupling + time grid tests
-- [ ] Full training via Slurm: `sbatch 09_fm_unet_ot_training/train.slurm`
-- [ ] Evaluation: `sbatch 09_fm_unet_ot_training/run_eval.slurm`
+- [x] Full training via Slurm: `sbatch 09_fm_unet_ot_training/train.slurm`
+- [x] Evaluation: `sbatch 09_fm_unet_ot_training/run_eval.slurm`
 
 **Deliverable**: Improved unconditional model. Training curves + sample quality comparison plots.
+
+---
+
+### Phase 4.5: Unconditional Flow Matching proper evaluation and tuning
+
+The goal of this phase is to obtain a solid flow matching forward model. The problem is, the current evaluation is not robust enough to allow us to really assess which one of two generative models is better. What we want is an evaluation that properly checks the how well the generations are, i.e. evaluate their distribution.
+
+- [x] Produce plots of the different marginals of the distributions in a reasonable way: we want multiple ground truth CO2 samples (so multiple time steps)... and then also multiple generated CO2 samples. For each of them we want to compute statistics (e.g. mean, std. dev., power spectrum etc.), and then compare the distributions of these statistics against each other.
+- [x] We want to compute probabilistic scores comparing the two distributions with samples
+- [x] We want plots that directly plot the spatial pattern (mean over samples) against each other, same for the lat-height pattern. Also compare the std. dev over samples for both.
+- [x] During training of the flow matching model, make sure that the validation epoch spits out a meaningful metric that is associated with generation quality, and can be used to pick the best checkpoint afterwards
+- [x] Check with literature for any other meaningful metrics & plots to assess the quality of the generative model
+- [x] Where necessary, rewrite the current API / generalize it, such that this generative evaluation is more straight forward to support (but we still also want full support & ideally backwards compatibility for the forward transport models)
+- [x] Tune a bunch of different training settings, especially optimization parameters like the learning rate (and others). Keep the batch size high to fill the GPU. Use SLURM for the tuning.
+- [x] Also check with literature again for any tricks / bells & whistles to improve the flow matching training, and also tune these.
+- [x] Also make a tuning experiment with inference-time parameters, i.e. those related to generation like the solver or the step size.
+- [x] Create a comparison of the tuning experiments with bar plots & tables that show what changing each parameter / adding new features adds/changes in terms of generation quality.
+- [x] Train a final model with the best tuning config for more epochs
+
+**Deliverable**: A top notch unconditional model with plenty of visual evidence to support design choices & experiments.
 
 ---
 

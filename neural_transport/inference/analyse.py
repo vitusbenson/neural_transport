@@ -381,6 +381,44 @@ def compute_score_df_generate(targs, preds, target_var="co2massmix", **generate_
     return df, df_global_scalars, maps
 
 
+def compute_distributional_score_df(
+    gt_anomalies,
+    gen_anomalies,
+    target_var="co2massmix",
+):
+    """Compare GT and generated anomaly distributions.
+
+    Args:
+        gt_anomalies: xr.Dataset [sample, lat, lon, level] — GT CO2 anomaly patterns
+        gen_anomalies: xr.Dataset [sample, lat, lon, level] — generated CO2 anomaly patterns
+        target_var: variable name to compare
+
+    Returns:
+        pd.DataFrame with all metric values.
+    """
+    from neural_transport.inference.distributional_metrics import compute_distributional_metrics
+
+    gt_fields = gt_anomalies[target_var].values  # [N, nlat, nlon, nlev]
+    gen_fields = gen_anomalies[target_var].values  # [M, nlat, nlon, nlev]
+
+    lat = gt_anomalies.lat.values
+    lon = gt_anomalies.lon.values
+
+    metrics = compute_distributional_metrics(gt_fields, gen_fields, lat, lon)
+
+    # Flatten nested dicts and convert to DataFrame
+    flat_metrics = {}
+    for k, v in metrics.items():
+        if isinstance(v, dict):
+            for k2, v2 in v.items():
+                flat_metrics[f"{k}/{k2}"] = v2
+        else:
+            flat_metrics[k] = v
+
+    df = pd.DataFrame({k: [v] for k, v in flat_metrics.items()})
+    return df
+
+
 def compute_local_scores(obs_preds, freq="QS"):
     obs_preds = obs_preds.compute()
     if "co2molemix" not in obs_preds:

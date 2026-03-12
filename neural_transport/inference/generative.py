@@ -898,3 +898,152 @@ def iterative_generate(
         )
 
     return ds_all
+
+
+def generate_for_distributional_eval(
+    model,
+    dataset,
+    outpath,
+    n_gt_samples=50,
+    n_gen_samples=200,
+    device="cuda",
+    target_vars_3d=None,
+    generate_kwargs=None,
+    seed=42,
+    batch_size=20,
+):
+    """Build GT and generated anomaly pools for distributional comparison.
+
+    GT pool: sample n_gt_samples random timesteps from dataset,
+             subtract per-timestep spatial mean -> anomaly patterns.
+    Gen pool: generate n_gen_samples unconditional samples (batched),
+              subtract per-sample spatial mean -> anomaly patterns.
+
+    Args:
+        model: NeuralTransport model (with FlowMatching inside).
+        dataset: CarbonDataset.
+        outpath: Path to save results.
+        n_gt_samples: Number of GT samples to draw.
+        n_gen_samples: Number of unconditional samples to generate.
+        device: Device for generation.
+        target_vars_3d: List of target variable names. Defaults to ["co2massmix"].
+        generate_kwargs: kwargs for generation (steps, method, etc.).
+        seed: Random seed for reproducibility.
+        batch_size: Number of samples to generate per forward pass.
+
+    Returns:
+        gt_ds: xr.Dataset [sample, lat, lon, level] -- GT CO2 fields
+        gen_ds: xr.Dataset [sample, lat, lon, level] -- generated CO2 fields
+    """
+    if target_vars_3d is None:
+        target_vars_3d = ["co2massmix"]
+    if generate_kwargs is None:
+        generate_kwargs = {}
+
+    outpath = Path(outpath)
+    outpath.mkdir(parents=True, exist_ok=True)
+
+    rng = np.random.RandomState(seed)
+    target_var = target_vars_3d[0]
+
+    # --- GT pool ---
+    n_gt = min(n_gt_samples, len(dataset))
+    gt_indices = rng.choice(len(dataset), n_gt, replace=False)
+    gt_fields = []
+    for idx in gt_indices:
+        batch = dataset[idx]
+        field = batch[target_var]  # [T, N, C] or [N, C]
+        if field.ndim == 3:
+            field = field[0]  # first timestep: [N, C]
+        gt_fields.append(field.numpy())
+    gt_fields = np.stack(gt_fields)  # [n_gt, N, C]
+
+    # Reshape to [n_gt, nlat, nlon, nlev]
+    nlat = model.model.in_nlat
+    nlon = model.model.in_nlon
+    nlev = gt_fields.shape[-1]
+    gt_fields = gt_fields.reshape(n_gt, nlat, nlon, nlev)
+
+    # --- Gen pool ---
+    model_eval = model.eval().to(device)
+    model_eval.model.generating = True
+    model_eval.model.generate_kwargs = generate_kwargs
+    model_eval.return_intermediates = False
+    model_eval.model.return_intermediates = False
+
+    gen_fields = []
+    n_remaining = n_gen_samples
+
+    # Use first dataset sample as template for batch structure
+    # dataset[i] returns {var: [T, N, C]}, unsqueeze(0) → [B=1, T, N, C]
+    template = {k: v.unsqueeze(0).to(device) for k, v in dataset[0].items() if isinstance(v, torch.Tensor)}
+
+    while n_remaining > 0:
+        this_batch_size = min(batch_size, n_remaining)
+
+        # Build batch: expand template to [batch_size, T, N, C]
+        batch_in = {}
+        for k, v in template.items():
+            batch_in[k] = v.expand(this_batch_size, *v.shape[1:]).clone()
+
+        with torch.no_grad():
+            # Go through NeuralTransport.forward which handles T dimension
+            preds = model_eval(batch_in)
+
+        if target_var in preds:
+            field = preds[target_var].cpu().numpy()  # [B, T, N, C] or [B, N, C]
+            if field.ndim == 4:
+                field = field[:, -1]  # Take last timestep: [B, N, C]
+            for i in range(this_batch_size):
+                if not is_bad_sample(field[i]):
+                    gen_fields.append(field[i])
+
+        n_remaining -= this_batch_size
+
+    gen_fields = np.stack(gen_fields[:n_gen_samples])  # [n_gen, N, C]
+    gen_fields = gen_fields.reshape(len(gen_fields), nlat, nlon, nlev)
+
+    # Build xarray datasets with proper 1D lat/lon coordinate arrays
+    # Dataset stores per-cell lat/lon (flattened), so look up from grid prototypes
+    from neural_transport.datasets.grids import LATLON_PROTOTYPE_COORDS
+
+    lat_vals = None
+    for grid_name, coords in LATLON_PROTOTYPE_COORDS.items():
+        if len(coords['lat']) == nlat and len(coords['lon']) == nlon:
+            lat_vals = coords['lat']
+            lon_vals = coords['lon']
+            break
+    if lat_vals is None:
+        lat_vals = np.linspace(-90, 90, nlat)
+        lon_vals = np.linspace(0, 360, nlon, endpoint=False)
+
+    if hasattr(dataset, 'ds') and 'level' in dataset.ds:
+        level_vals = dataset.ds.level.values[:nlev]
+    else:
+        level_vals = np.arange(nlev)
+
+    gt_ds = xr.Dataset(
+        {target_var: (("sample", "lat", "lon", "level"), gt_fields)},
+        coords={
+            "sample": np.arange(len(gt_fields)),
+            "lat": lat_vals,
+            "lon": lon_vals,
+            "level": level_vals,
+        },
+    )
+
+    gen_ds = xr.Dataset(
+        {target_var: (("sample", "lat", "lon", "level"), gen_fields)},
+        coords={
+            "sample": np.arange(len(gen_fields)),
+            "lat": lat_vals,
+            "lon": lon_vals,
+            "level": level_vals,
+        },
+    )
+
+    # Save
+    gt_ds.to_netcdf(outpath / "gt_pool.nc")
+    gen_ds.to_netcdf(outpath / "gen_pool.nc")
+
+    return gt_ds, gen_ds
