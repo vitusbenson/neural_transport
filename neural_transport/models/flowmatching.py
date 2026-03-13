@@ -667,6 +667,24 @@ class FlowMatching(RegularGridModel):
             time_grid = self._build_time_grid(steps - 1, x_init.device, spacing)
         masking_config["time_grid"] = time_grid
 
+        # FlowDPS sampler dispatch — replaces ODE solver with projection loop
+        sampler = generate_kwargs.get("sampler", None)
+        if sampler == "flowdps":
+            from neural_transport.inference.posterior_samplers import FlowDPSSampler
+
+            velocity_model = VelocityWrapper(
+                submodel=self.submodel,
+                nlev=self.nlev,
+            )
+            dps_sampler = FlowDPSSampler(
+                velocity_model=velocity_model,
+                masking_config=masking_config,
+                sigma_obs=generate_kwargs.get("sigma_obs", 0.1),
+                spatial_smoothing_sigma=generate_kwargs.get("spatial_smoothing_sigma", 0.0),
+                fresh_noise=generate_kwargs.get("fresh_noise", True),
+            )
+            return dps_sampler.sample(x_init, time_grid, self.return_intermediates)
+
         # UNet expects normalization parameters
         velocity_model = self.return_velocity_wrapper(
             submodel=self.submodel,

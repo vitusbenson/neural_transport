@@ -46,7 +46,11 @@ class EMACallback(pl.Callback):
 
         decay = self.decay
         for key, param in pl_module.state_dict().items():
-            self.ema_state_dict[key].mul_(decay).add_(param, alpha=1 - decay)
+            if param.is_floating_point():
+                self.ema_state_dict[key].mul_(decay).add_(param, alpha=1 - decay)
+            else:
+                # Non-float params (e.g. batch norm num_batches_tracked): copy directly
+                self.ema_state_dict[key].copy_(param)
 
     def on_validation_start(self, trainer, pl_module):
         """Swap in EMA weights for validation."""

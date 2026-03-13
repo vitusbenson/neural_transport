@@ -28,6 +28,7 @@ from flow_matching.path.scheduler import CondOTScheduler
 from flow_matching.solver import ODESolver
 from torch.utils.data import DataLoader, TensorDataset
 
+from neural_transport.inference.posterior_samplers import FlowDPSSampler
 from neural_transport.models.flowmatching import MaskedVelocityWrapper, compute_ot_coupling
 
 # ── Data generation ──────────────────────────────────────────────────────
@@ -249,6 +250,23 @@ def sample_conditioned(model_wrapper, masking_config, generate_kwargs, n_samples
         time_grid=time_grid, x_init=x_init, method="midpoint", step_size=None, return_intermediates=False
     )
     return traj
+
+
+def sample_flowdps(model_wrapper, masking_config, generate_kwargs, n_samples, nlev, nlat, nlon, device, steps=20):
+    """Generate conditioned samples using FlowDPS (projection-based posterior sampling)."""
+    x_init = torch.randn(n_samples, nlev, nlat, nlon, device=device)
+    time_grid = torch.linspace(0, 1, steps, device=device)
+
+    sampler = FlowDPSSampler(
+        velocity_model=model_wrapper,
+        masking_config=masking_config,
+        sigma_obs=generate_kwargs.get("sigma_obs", 0.1),
+        spatial_smoothing_sigma=generate_kwargs.get("spatial_smoothing_sigma", 0.0),
+        fresh_noise=generate_kwargs.get("fresh_noise", True),
+    )
+
+    samples = sampler.sample(x_init, time_grid, return_intermediates=False)
+    return samples
 
 
 def build_masking_config(obs_mask, obs_values, data_mean, data_std, column_weights, device):
@@ -477,6 +495,24 @@ CONDITIONING_METHODS = {
         masking_time="smooth_late_masking",
         t_threshold=0.8,
     ),
+    # FlowDPS (Phase 6) — projection-based posterior sampling
+    "flowdps_s0.1": dict(
+        _sampler="flowdps",
+        sigma_obs=0.1,
+    ),
+    "flowdps_s0.5": dict(
+        _sampler="flowdps",
+        sigma_obs=0.5,
+    ),
+    "flowdps_s1.0": dict(
+        _sampler="flowdps",
+        sigma_obs=1.0,
+    ),
+    "flowdps_s0.1_smooth2": dict(
+        _sampler="flowdps",
+        sigma_obs=0.1,
+        spatial_smoothing_sigma=2.0,
+    ),
 }
 
 
@@ -580,11 +616,15 @@ def run_toy_osse(
         print(f"\nTesting: {method_name}")
         config = {k: v for k, v in method_config.items()}
         is_unconditional = config.pop("_unconditional", False)
+        sampler_type = config.pop("_sampler", None)
 
         torch.manual_seed(42)
 
         if is_unconditional:
             samples = sample_unconditional(velocity_wrapper, n_samples, nlev, nlat, nlon, device)
+        elif sampler_type == "flowdps":
+            masking_config = build_masking_config(obs_mask, obs_values, data_mean, data_std, column_weights, device)
+            samples = sample_flowdps(velocity_wrapper, masking_config, config, n_samples, nlev, nlat, nlon, device)
         else:
             masking_config = build_masking_config(obs_mask, obs_values, data_mean, data_std, column_weights, device)
             samples = sample_conditioned(velocity_wrapper, masking_config, config, n_samples, nlev, nlat, nlon, device)

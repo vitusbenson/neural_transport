@@ -25,9 +25,11 @@ from neural_transport.experiments.toy_column_osse import (
     get_column_weights,
     run_toy_osse,
     sample_conditioned,
+    sample_flowdps,
     sample_unconditional,
     train_flow_matching,
 )
+from neural_transport.inference.posterior_samplers import FlowDPSSampler
 
 # ── Expected metric keys ─────────────────────────────────────────────────
 
@@ -53,6 +55,10 @@ RMSE_THRESHOLDS = {
     "guidance_1": 85.0,
     "guidance_1_late": 95.0,
     "repaint_late": 65.0,
+    "flowdps_s0.1": 50.0,
+    "flowdps_s0.5": 60.0,
+    "flowdps_s1.0": 80.0,
+    "flowdps_s0.1_smooth2": 50.0,
 }
 
 # ── Quick fixtures (tiny model, shared across quick tests) ────────────────
@@ -202,6 +208,60 @@ def test_run_toy_osse_smoke(tmp_path):
         assert "samples" in res
         assert "metrics" in res
         assert set(res["metrics"].keys()) == EXPECTED_METRIC_KEYS
+
+
+@pytest.mark.quick
+def test_flowdps_no_nan(quick_model_and_data):
+    """FlowDPS samples contain no NaN/Inf and have correct shape."""
+    ctx = quick_model_and_data
+    torch.manual_seed(42)
+    masking_config = ctx["masking_config"]
+    config = {"sigma_obs": 0.1}
+    samples = sample_flowdps(
+        ctx["velocity_wrapper"],
+        masking_config,
+        config,
+        5,
+        ctx["nlev"],
+        ctx["nlat"],
+        ctx["nlon"],
+        ctx["device"],
+    )
+    assert samples.shape == (5, ctx["nlev"], ctx["nlat"], ctx["nlon"])
+    assert not torch.isnan(samples).any(), "NaN in FlowDPS samples"
+    assert not torch.isinf(samples).any(), "Inf in FlowDPS samples"
+    assert samples.abs().max() < 1000, f"Divergence in FlowDPS: max={samples.abs().max():.1f}"
+
+
+@pytest.mark.quick
+def test_flowdps_projection_unit(quick_model_and_data):
+    """Single projection step reduces column error at observed locations."""
+    ctx = quick_model_and_data
+    masking_config = ctx["masking_config"]
+
+    sampler = FlowDPSSampler(
+        velocity_model=ctx["velocity_wrapper"],
+        masking_config=masking_config,
+        sigma_obs=1e-6,  # near-zero for hard constraint
+    )
+
+    # Create a random field and project it
+    torch.manual_seed(42)
+    x_hat = torch.randn(1, ctx["nlev"], ctx["nlat"], ctx["nlon"], device=ctx["device"])
+
+    xco2_before = sampler.compute_xco2(x_hat)
+    x_hat_proj = sampler._project_column(x_hat)
+    xco2_after = sampler.compute_xco2(x_hat_proj)
+
+    obs_mask = masking_config["obs_mask"]
+    obs_values = masking_config["obs_values"]
+
+    error_before = (xco2_before - obs_values)[obs_mask].pow(2).mean().sqrt()
+    error_after = (xco2_after - obs_values)[obs_mask].pow(2).mean().sqrt()
+
+    assert error_after < error_before, (
+        f"Projection did not reduce column error: before={error_before:.4f}, after={error_after:.4f}"
+    )
 
 
 # ── Slow tests ───────────────────────────────────────────────────────────

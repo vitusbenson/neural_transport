@@ -186,11 +186,14 @@ nabla_{x_k} log p(y|x) = (h_k * a_k / sigma_y^2) * (y - H(x))
 
 Tweedie estimate -> data projection -> re-noise. Projects clean estimate onto column constraint.
 
-- [ ] **Create** `neural_transport/inference/posterior_samplers.py`
-- [ ] `FlowDPSSampler`: `_tweedie_estimate`, `_project_column`, `_renoise`
-- [ ] Column projection: `x_hat_k += (h_k a_k) * (y - H(x_hat)) / (sum(h_j a_j)^2 + sigma^2)`
-- [ ] Integrate: `sampler="flowdps"` in `generate_kwargs`
-- [ ] **File**: `flowmatching.py` `inference_forward` — dispatch to sampler
+- [x] **Create** `neural_transport/inference/posterior_samplers.py`
+- [x] `FlowDPSSampler`: `_tweedie_estimate`, `_project_column`, `_renoise`
+- [x] Column projection: `x_hat_k += (h_k a_k) * (y - H(x_hat)) / (sum_j(h_j a_j)^2 + sigma^2)`
+- [x] Integrate: `sampler="flowdps"` in `generate_kwargs`
+- [x] **File**: `flowmatching.py` `inference_forward` — dispatch to sampler
+- [x] Toy OSSE integration: `sample_flowdps()` in `toy_column_osse.py`, 4 FlowDPS configs
+- [x] Tests: `test_flowdps_no_nan`, `test_flowdps_projection_unit` (quick), slow tests via parametrize
+- [x] Full-scale ablation: `13_flowdps_ablation/` (sigma_obs, smoothing, steps, fresh_noise sweeps)
 
 **Deliverable**: Toy OSSE gate + full OSSE. Trajectory visualization (Tweedie estimates at t=0.2,0.5,0.8). RMSE convergence vs steps.
 
