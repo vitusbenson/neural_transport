@@ -100,12 +100,12 @@ def sample_masking_config():
 - Create toy model → generate 2 samples → compute metrics → assert no NaN
 
 ### Checklist
-- [ ] Create `conftest.py` with all shared fixtures
-- [ ] Move `MockSubmodel` and other shared helpers from existing tests into `conftest.py`
-- [ ] Update existing tests to use shared fixtures (remove duplication)
-- [ ] Create `test_smoke.py` with E2E smoke test on current API
-- [ ] All 4 existing test files still pass
-- [ ] Mark smoke test as `@pytest.mark.quick`
+- [x] Create `conftest.py` with all shared fixtures
+- [x] Move `MockSubmodel` and other shared helpers from existing tests into `conftest.py`
+- [x] Update existing tests to use shared fixtures (remove duplication)
+- [x] Create `test_smoke.py` with E2E smoke test on current API
+- [x] All 4 existing test files still pass
+- [x] Mark smoke test as `@pytest.mark.quick`
 
 ---
 

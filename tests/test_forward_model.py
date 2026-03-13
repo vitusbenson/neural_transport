@@ -2,24 +2,9 @@
 
 import pytest
 import torch
-import torch.nn as nn
+from conftest import MockSubmodel
 
 from neural_transport.models.flowmatching import MaskedVelocityWrapper, _gaussian_smooth_2d
-
-
-class MockSubmodel(nn.Module):
-    """Submodel that returns zero velocity."""
-
-    def __init__(self, nlev):
-        super().__init__()
-        self.nlev = nlev
-        self.model = (
-            self  # forward_guidance calls super().forward -> VelocityWrapper.forward -> self.submodel.model(x_in)
-        )
-
-    def forward(self, x):
-        # Input: [B, C+1, Nlat, Nlon] (channels + time). Return zero velocity.
-        return torch.zeros(x.shape[0], self.nlev, x.shape[2], x.shape[3], device=x.device)
 
 
 def _make_wrapper(
