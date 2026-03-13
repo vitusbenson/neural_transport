@@ -205,10 +205,21 @@ Tweedie estimate -> data projection -> re-noise. Projects clean estimate onto co
 
 ODE = deterministic given noise. SDE = noise injection for better posterior exploration.
 
-- [ ] `StochasticPosteriorSampler` in `posterior_samplers.py`
-- [ ] SDE: `dx = v(x,t)dt + sigma(t)dW`, annealed schedule `sigma(t) = sigma_max(1-t)`
-- [ ] Predictor-Corrector: flow step + Langevin MCMC corrector targeting `p(x_t|y)`
-- [ ] Combine with FlowDPS projection
+- [x] `StochasticPosteriorSampler` in `posterior_samplers.py`
+  - SDE noise injection with annealed/constant/cosine noise schedules
+  - Composition with FlowDPSSampler for Tweedie + projection internals
+  - Euler-Maruyama discretization: `x_{t+dt} = x_t + v_theta*dt + sigma(t)*sqrt(dt)*z`
+- [x] SDE: `dx = v(x,t)dt + sigma(t)dW`, annealed schedule `sigma(t) = sigma_max(1-t)`
+- [x] Predictor-Corrector: flow step + Langevin MCMC corrector targeting `p(x_t|y)`
+  - Prior score from Tweedie: `v_theta / (1-t)`
+  - Likelihood gradient: `(h_k * a_k / sigma_obs^2) * (y - H(x_hat_1))`
+  - Re-projection after corrector steps to maintain column constraint
+- [x] Combine with FlowDPS projection
+- [x] `sampler="sde"` dispatch in `flowmatching.py` `inference_forward`
+- [x] Toy OSSE integration: `sample_sde()`, 5 SDE/PC configs in CONDITIONING_METHODS
+- [x] Ensemble spread metrics: `spread_3d`, `spread_xco2`, `spread_skill_ratio` in `evaluate()`
+- [x] Tests: 5 new quick tests (SDE no-NaN, corrector no-NaN, larger spread, schedule variants, sigma=0 matches FlowDPS)
+- [x] Full-scale ablation: `14_sde_ablation/` (sigma_max, noise schedule, corrector steps/eps, projection, steps)
 
 **Deliverable**: Toy OSSE gate + ablation (noise schedule, corrector steps). Ensemble spread comparison: ODE vs SDE.
 

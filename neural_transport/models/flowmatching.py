@@ -685,6 +685,28 @@ class FlowMatching(RegularGridModel):
             )
             return dps_sampler.sample(x_init, time_grid, self.return_intermediates)
 
+        elif sampler == "sde":
+            from neural_transport.inference.posterior_samplers import StochasticPosteriorSampler
+
+            velocity_model = VelocityWrapper(
+                submodel=self.submodel,
+                nlev=self.nlev,
+            )
+            sde_sampler = StochasticPosteriorSampler(
+                velocity_model=velocity_model,
+                masking_config=masking_config,
+                sigma_obs=generate_kwargs.get("sigma_obs", 0.1),
+                spatial_smoothing_sigma=generate_kwargs.get("spatial_smoothing_sigma", 0.0),
+                fresh_noise=generate_kwargs.get("fresh_noise", True),
+                sigma_max=generate_kwargs.get("sigma_max", 0.5),
+                noise_schedule=generate_kwargs.get("noise_schedule", "annealed"),
+                n_corrector_steps=generate_kwargs.get("n_corrector_steps", 0),
+                corrector_step_size=generate_kwargs.get("corrector_step_size", 0.01),
+                corrector_snr=generate_kwargs.get("corrector_snr", 0.16),
+                use_projection=generate_kwargs.get("use_projection", True),
+            )
+            return sde_sampler.sample(x_init, time_grid, self.return_intermediates)
+
         # UNet expects normalization parameters
         velocity_model = self.return_velocity_wrapper(
             submodel=self.submodel,

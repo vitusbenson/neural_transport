@@ -28,7 +28,7 @@ from flow_matching.path.scheduler import CondOTScheduler
 from flow_matching.solver import ODESolver
 from torch.utils.data import DataLoader, TensorDataset
 
-from neural_transport.inference.posterior_samplers import FlowDPSSampler
+from neural_transport.inference.posterior_samplers import FlowDPSSampler, StochasticPosteriorSampler
 from neural_transport.models.flowmatching import MaskedVelocityWrapper, compute_ot_coupling
 
 # ── Data generation ──────────────────────────────────────────────────────
@@ -269,6 +269,29 @@ def sample_flowdps(model_wrapper, masking_config, generate_kwargs, n_samples, nl
     return samples
 
 
+def sample_sde(model_wrapper, masking_config, generate_kwargs, n_samples, nlev, nlat, nlon, device, steps=20):
+    """Generate conditioned samples using SDE posterior sampling."""
+    x_init = torch.randn(n_samples, nlev, nlat, nlon, device=device)
+    time_grid = torch.linspace(0, 1, steps, device=device)
+
+    sampler = StochasticPosteriorSampler(
+        velocity_model=model_wrapper,
+        masking_config=masking_config,
+        sigma_obs=generate_kwargs.get("sigma_obs", 0.1),
+        spatial_smoothing_sigma=generate_kwargs.get("spatial_smoothing_sigma", 0.0),
+        fresh_noise=generate_kwargs.get("fresh_noise", True),
+        sigma_max=generate_kwargs.get("sigma_max", 0.5),
+        noise_schedule=generate_kwargs.get("noise_schedule", "annealed"),
+        n_corrector_steps=generate_kwargs.get("n_corrector_steps", 0),
+        corrector_step_size=generate_kwargs.get("corrector_step_size", 0.01),
+        corrector_snr=generate_kwargs.get("corrector_snr", 0.16),
+        use_projection=generate_kwargs.get("use_projection", True),
+    )
+
+    samples = sampler.sample(x_init, time_grid, return_intermediates=False)
+    return samples
+
+
 def build_masking_config(obs_mask, obs_values, data_mean, data_std, column_weights, device):
     """Build masking config for MaskedVelocityWrapper."""
     obs_mean = torch.tensor(data_mean, device=device).view(1, 1, 1, 1)
@@ -321,11 +344,20 @@ def evaluate(samples, gt, obs_mask, column_weights, data_mean, data_std):
     ens_mean = samples_phys.mean(dim=0, keepdim=True)  # [1, nlev, nlat, nlon]
     diff_3d = ens_mean - gt_phys  # [1, nlev, nlat, nlon]
 
+    # Ensemble spread
+    ens_std = samples_phys.std(dim=0)  # [nlev, nlat, nlon]
+    spread_3d = float(ens_std.mean())
+
+    w = column_weights.view(1, -1, 1, 1).to(samples.device)
+    xco2_samples = (w * samples_phys).sum(dim=1, keepdim=True)  # [n, 1, nlat, nlon]
+    spread_xco2 = float(xco2_samples.std(dim=0).mean())
+
     # 3D field RMSE
     rmse_3d_full = float(diff_3d.pow(2).mean().sqrt())
 
+    spread_skill_ratio = float(spread_3d / max(rmse_3d_full, 1e-12))
+
     # XCO2
-    w = column_weights.view(1, -1, 1, 1).to(samples.device)
     xco2_pred = (w * ens_mean).sum(dim=1, keepdim=True)
     xco2_gt = (w * gt_phys).sum(dim=1, keepdim=True)
     xco2_diff = xco2_pred - xco2_gt
@@ -347,6 +379,9 @@ def evaluate(samples, gt, obs_mask, column_weights, data_mean, data_std):
         "rmse_xco2_full": rmse_xco2_full,
         "rmse_xco2_obs": rmse_xco2_obs,
         "rmse_xco2_away": rmse_xco2_away,
+        "spread_3d": spread_3d,
+        "spread_xco2": spread_xco2,
+        "spread_skill_ratio": spread_skill_ratio,
     }
 
 
@@ -513,15 +548,26 @@ CONDITIONING_METHODS = {
         sigma_obs=0.1,
         spatial_smoothing_sigma=2.0,
     ),
+    # SDE (Phase 7) -- stochastic posterior sampling with FlowDPS projection
+    "sde_s0.3": dict(_sampler="sde", sigma_obs=0.1, sigma_max=0.3),
+    "sde_s0.5": dict(_sampler="sde", sigma_obs=0.1, sigma_max=0.5),
+    "sde_s1.0": dict(_sampler="sde", sigma_obs=0.1, sigma_max=1.0),
+    # Predictor-Corrector (Phase 7)
+    "pc_c1_s0.3": dict(_sampler="sde", sigma_obs=0.1, sigma_max=0.3, n_corrector_steps=1, corrector_step_size=0.01),
+    "pc_c3_s0.3": dict(_sampler="sde", sigma_obs=0.1, sigma_max=0.3, n_corrector_steps=3, corrector_step_size=0.01),
 }
 
 
 def _print_summary_table(all_results):
     """Print a formatted summary table of results."""
-    print(f"\n{'=' * 100}")
-    header = f"{'Method':<22} {'RMSE_3d':>10} {'RMSE_3d_o':>10} {'RMSE_3d_a':>10} {'RMSE_xco2':>10} {'RMSE_xo':>10} {'RMSE_xa':>10}"
+    print(f"\n{'=' * 130}")
+    header = (
+        f"{'Method':<22} {'RMSE_3d':>10} {'RMSE_3d_o':>10} {'RMSE_3d_a':>10} "
+        f"{'RMSE_xco2':>10} {'RMSE_xo':>10} {'RMSE_xa':>10} "
+        f"{'Sprd_3d':>10} {'Sprd_xco2':>10} {'SSR':>8}"
+    )
     print(header)
-    print(f"{'-' * 100}")
+    print(f"{'-' * 130}")
     for name, res in all_results.items():
         m = res["metrics"]
 
@@ -531,9 +577,11 @@ def _print_summary_table(all_results):
         print(
             f"{name:<22} {_f(m['rmse_3d_full']):>10} {_f(m['rmse_3d_obs']):>10} "
             f"{_f(m['rmse_3d_away']):>10} {_f(m['rmse_xco2_full']):>10} "
-            f"{_f(m['rmse_xco2_obs']):>10} {_f(m['rmse_xco2_away']):>10}"
+            f"{_f(m['rmse_xco2_obs']):>10} {_f(m['rmse_xco2_away']):>10} "
+            f"{_f(m['spread_3d']):>10} {_f(m['spread_xco2']):>10} "
+            f"{_f(m['spread_skill_ratio']):>8}"
         )
-    print(f"{'=' * 100}")
+    print(f"{'=' * 130}")
 
 
 def run_toy_osse(
@@ -625,6 +673,9 @@ def run_toy_osse(
         elif sampler_type == "flowdps":
             masking_config = build_masking_config(obs_mask, obs_values, data_mean, data_std, column_weights, device)
             samples = sample_flowdps(velocity_wrapper, masking_config, config, n_samples, nlev, nlat, nlon, device)
+        elif sampler_type == "sde":
+            masking_config = build_masking_config(obs_mask, obs_values, data_mean, data_std, column_weights, device)
+            samples = sample_sde(velocity_wrapper, masking_config, config, n_samples, nlev, nlat, nlon, device)
         else:
             masking_config = build_masking_config(obs_mask, obs_values, data_mean, data_std, column_weights, device)
             samples = sample_conditioned(velocity_wrapper, masking_config, config, n_samples, nlev, nlat, nlon, device)
@@ -657,6 +708,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--n_samples", type=int, default=20)
     parser.add_argument("--obs_fraction", type=float, default=0.3)
+    parser.add_argument("--methods", type=str, nargs="+", default=None, help="Subset of CONDITIONING_METHODS to run")
     parser.add_argument("--out_dir", type=str, default=None)
     args = parser.parse_args()
 
@@ -672,6 +724,7 @@ def main():
         epochs=args.epochs,
         n_samples=args.n_samples,
         obs_fraction=args.obs_fraction,
+        methods=args.methods,
         out_dir=out_dir,
     )
 

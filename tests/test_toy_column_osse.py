@@ -26,6 +26,7 @@ from neural_transport.experiments.toy_column_osse import (
     run_toy_osse,
     sample_conditioned,
     sample_flowdps,
+    sample_sde,
     sample_unconditional,
     train_flow_matching,
 )
@@ -40,6 +41,9 @@ EXPECTED_METRIC_KEYS = {
     "rmse_xco2_full",
     "rmse_xco2_obs",
     "rmse_xco2_away",
+    "spread_3d",
+    "spread_xco2",
+    "spread_skill_ratio",
 }
 
 # ── RMSE thresholds (generous placeholders, tighten after first baseline run) ──
@@ -59,6 +63,11 @@ RMSE_THRESHOLDS = {
     "flowdps_s0.5": 60.0,
     "flowdps_s1.0": 80.0,
     "flowdps_s0.1_smooth2": 50.0,
+    "sde_s0.3": 100.0,
+    "sde_s0.5": 100.0,
+    "sde_s1.0": 100.0,
+    "pc_c1_s0.3": 100.0,
+    "pc_c3_s0.3": 100.0,
 }
 
 # ── Quick fixtures (tiny model, shared across quick tests) ────────────────
@@ -261,6 +270,145 @@ def test_flowdps_projection_unit(quick_model_and_data):
 
     assert error_after < error_before, (
         f"Projection did not reduce column error: before={error_before:.4f}, after={error_after:.4f}"
+    )
+
+
+@pytest.mark.quick
+def test_sde_no_nan(quick_model_and_data):
+    """SDE samples (sigma_max=0.3, no corrector) have no NaN/Inf, correct shape."""
+    ctx = quick_model_and_data
+    torch.manual_seed(42)
+    masking_config = ctx["masking_config"]
+    config = {"sigma_obs": 0.1, "sigma_max": 0.3}
+    samples = sample_sde(
+        ctx["velocity_wrapper"],
+        masking_config,
+        config,
+        5,
+        ctx["nlev"],
+        ctx["nlat"],
+        ctx["nlon"],
+        ctx["device"],
+    )
+    assert samples.shape == (5, ctx["nlev"], ctx["nlat"], ctx["nlon"])
+    assert not torch.isnan(samples).any(), "NaN in SDE samples"
+    assert not torch.isinf(samples).any(), "Inf in SDE samples"
+    assert samples.abs().max() < 1000, f"Divergence in SDE: max={samples.abs().max():.1f}"
+
+
+@pytest.mark.quick
+def test_sde_with_corrector_no_nan(quick_model_and_data):
+    """SDE + 2 corrector steps, no NaN/Inf."""
+    ctx = quick_model_and_data
+    torch.manual_seed(42)
+    masking_config = ctx["masking_config"]
+    config = {"sigma_obs": 0.1, "sigma_max": 0.3, "n_corrector_steps": 2, "corrector_step_size": 0.01}
+    samples = sample_sde(
+        ctx["velocity_wrapper"],
+        masking_config,
+        config,
+        5,
+        ctx["nlev"],
+        ctx["nlat"],
+        ctx["nlon"],
+        ctx["device"],
+    )
+    assert samples.shape == (5, ctx["nlev"], ctx["nlat"], ctx["nlon"])
+    assert not torch.isnan(samples).any(), "NaN in SDE+corrector samples"
+    assert not torch.isinf(samples).any(), "Inf in SDE+corrector samples"
+
+
+@pytest.mark.quick
+def test_sde_has_larger_spread(quick_model_and_data):
+    """SDE ensemble spread >= FlowDPS ensemble spread."""
+    ctx = quick_model_and_data
+    masking_config = ctx["masking_config"]
+
+    # FlowDPS baseline
+    torch.manual_seed(42)
+    flowdps_samples = sample_flowdps(
+        ctx["velocity_wrapper"],
+        masking_config,
+        {"sigma_obs": 0.1},
+        10,
+        ctx["nlev"],
+        ctx["nlat"],
+        ctx["nlon"],
+        ctx["device"],
+    )
+    flowdps_std = flowdps_samples.std(dim=0).mean().item()
+
+    # SDE
+    torch.manual_seed(42)
+    sde_samples = sample_sde(
+        ctx["velocity_wrapper"],
+        masking_config,
+        {"sigma_obs": 0.1, "sigma_max": 0.5},
+        10,
+        ctx["nlev"],
+        ctx["nlat"],
+        ctx["nlon"],
+        ctx["device"],
+    )
+    sde_std = sde_samples.std(dim=0).mean().item()
+
+    assert sde_std >= flowdps_std * 0.9, f"SDE spread ({sde_std:.4f}) should be >= FlowDPS spread ({flowdps_std:.4f})"
+
+
+@pytest.mark.quick
+@pytest.mark.parametrize("schedule", ["annealed", "constant", "cosine"])
+def test_noise_schedule_variants(quick_model_and_data, schedule):
+    """All noise schedule variants produce valid samples."""
+    ctx = quick_model_and_data
+    torch.manual_seed(42)
+    masking_config = ctx["masking_config"]
+    config = {"sigma_obs": 0.1, "sigma_max": 0.3, "noise_schedule": schedule}
+    samples = sample_sde(
+        ctx["velocity_wrapper"],
+        masking_config,
+        config,
+        5,
+        ctx["nlev"],
+        ctx["nlat"],
+        ctx["nlon"],
+        ctx["device"],
+    )
+    assert not torch.isnan(samples).any(), f"NaN in SDE {schedule} samples"
+    assert not torch.isinf(samples).any(), f"Inf in SDE {schedule} samples"
+
+
+@pytest.mark.quick
+def test_sde_sigma_zero_matches_flowdps(quick_model_and_data):
+    """With sigma_max=0.0 + 0 corrector steps, SDE output matches FlowDPS."""
+    ctx = quick_model_and_data
+    masking_config = ctx["masking_config"]
+
+    torch.manual_seed(42)
+    flowdps_samples = sample_flowdps(
+        ctx["velocity_wrapper"],
+        masking_config,
+        {"sigma_obs": 0.1},
+        5,
+        ctx["nlev"],
+        ctx["nlat"],
+        ctx["nlon"],
+        ctx["device"],
+    )
+
+    torch.manual_seed(42)
+    sde_samples = sample_sde(
+        ctx["velocity_wrapper"],
+        masking_config,
+        {"sigma_obs": 0.1, "sigma_max": 0.0, "n_corrector_steps": 0},
+        5,
+        ctx["nlev"],
+        ctx["nlat"],
+        ctx["nlon"],
+        ctx["device"],
+    )
+
+    assert torch.allclose(sde_samples, flowdps_samples, atol=1e-5), (
+        f"SDE(sigma=0) should match FlowDPS. Max diff: {(sde_samples - flowdps_samples).abs().max():.6f}"
     )
 
 
