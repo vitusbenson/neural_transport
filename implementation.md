@@ -1,378 +1,923 @@
-# Flow Matching Posterior Conditioning for CO2 Transport — Implementation Plan
+# Flow Matching for CO2 Data Assimilation — Refactor & Development Plan
 
 ## Context
 
-This project uses Flow Matching generative models to sample 3D atmospheric CO2 fields, with the goal of conditioning on sparse satellite observations (OCO-2 XCO2 columns) for data assimilation. The unconditional model works well, but **posterior conditioning does not yet produce satisfactory results**: all four implemented methods (correction, velocity projection, guidance, repaint) either create spatial artifacts, have weak effect, or are worse than unconditional generation.
+We have a working Flow Matching system for CO2 transport across two repos: `neural_transport` (core library) and `carbonbench` (experiment runner). Phases 1–9 of the original implementation plan are complete: evaluation infrastructure, code cleanup, toy OSSE gate, vanilla FM training, and 5 posterior sampling methods (DPS, FlowDPS, SDE, FIG, ICTM).
 
-The core issue is a **distribution mismatch**: column-level constraints create uniform vertical shifts that are out-of-distribution for the UNet, and current guidance lacks proper likelihood gradient computation. The OSSE comparison (experiment 08) shows that only weak/late guidance provides marginal improvement (RMSE 3.3 vs 4.3 unconditional), while hard-constraint methods (correction, repaint) increase RMSE to ~5.0.
+**Problem**: The codebase has grown organically and now suffers from:
+- ~1,800 lines duplicated across 5 `run_ablation.py` scripts in carbonbench (only ~50 lines differ per file)
+- ~1,350 lines duplicated across 5 `plot_ablation.py` scripts
+- Monolithic `generative.py` (1031 lines) mixing generation, masking, OCO-2 handling, noise patterns
+- Two nearly-identical generation functions (`iterative_generate` + `iterative_generate_oco2`) with ~65% code overlap
+- `MaskedVelocityWrapper` (260 lines) doing too much: conditioning, forward model, masking, temporal weighting
+- XCO2 forward model (`compute_xco2`) duplicated in 3 places: `flowmatching.py`, `posterior_samplers.py`, `metrics.py`
+- Raw dicts everywhere (`generate_kwargs`, `masking_config`, `DATA_KWARGS`) with no validation
+- Metrics scattered across `metrics.py`, `distributional_metrics.py`, `analyse.py` — plus duplicate metric defs in `plot_results.py` (lines 66-107)
+- Plotting functions not composable, no auto figure saving, no publication defaults, no shared pipeline
+- No clean data loading API for inference (tied to Lightning `CarbonDataModule`); OCO-2 data loading entangled with generation logic
+- Hardcoded magic numbers throughout: `dt=0.1` fallback, `T=5` default, satellite tilt angle `-5*π/180`, swath width `obs_fraction*nlon/8`, target pressures `[1013, 843, 441, 73]`, `max_n=200` energy distance cutoff
+- Regular transport model training/eval not integrated with generative eval pipeline
+- No structured logging (print statements everywhere)
 
-**Goal**: Fix conditioning, implement SOTA posterior sampling, benchmark on OSSE + real OCO-2, publish as **application paper** (ACP/GMD).
+**Goal**: Refactor into a generalizable, robust, modular API supporting:
+1. **Train FM models** on CO2 fields + comprehensive distributional evaluation
+2. **OSSE experiments** with synthetic observations (including real OCO-2 masks) + proper scoring & visualization
+3. **Real inversion** with OCO-2 XCO2 + evaluation against baselines
 
-**Primary test case**: 2D total-column XCO2 observations (OCO-2 style). Forward model: `XCO2 = sum_k h_k a_k x_k`. 3D/other patterns are secondary "what if" experiments.
+...while keeping the regular (deterministic) transport model training fully supported, sharing plots and metrics infrastructure across both model types.
 
-**Strategy**: (1) Evaluation infra + cleanup, (2) fix vanilla FM training, (3) training-free posterior methods, (4) advanced FM training + CFM retraining, (5) comparison + real data + paper. Every method passes **toy column OSSE** before full experiments.
-
----
-
-## Current State Summary
-
-### What Works
-- [x] FM model trained on CarbonTracker (5.625deg, 10 levels, UNet)
-- [x] Unconditional generation: RMSE ~4.3 ppm
-- [x] Data pipeline: CT loading, OCO-2, vertical aggregation
-- [x] OSSE framework with multiple mask patterns
-- [x] Toy column OSSE for fast debugging
-- [x] 4 conditioning modes: correction, velocity_projection, guidance, repaint
-- [x] OCO-2 forward model (`compute_xco2`) with AK support
-
-### What Doesn't Work
-- [ ] Column conditioning: spatial artifacts, weak effect, or worse than unconditional
-- [x] 9+ near-duplicate masking methods (removed 8, kept 4)
-- [x] `compute_xco2` fallback missing targshift correction (fixed)
-- [x] Guidance: uniform correction instead of Jacobian transpose (fixed)
-- [ ] No spatial smoothing of guidance (TODO in code)
-
-### Key Files
-| File | Role |
-|------|------|
-| `neural_transport/models/flowmatching.py` | FlowMatching + MaskedVelocityWrapper |
-| `neural_transport/inference/generative.py` | Inference, mask creation, OCO-2 |
-| `neural_transport/datasets/carbontracker.py` | CT data, vertical aggregation |
-| `neural_transport/experiments/toy_column_osse.py` | Debugging testbed |
-| `neural_transport/plots/plot_results.py` | Visualization |
-| `carbonbench/.../08_fm_unet_osse_conditioning_comparison/` | Latest OSSE experiment |
+**Development approach**: Test-driven development throughout — each phase writes tests first, then implements to make them pass.
 
 ---
 
-## Additional Development Guidelines
+## Completed Work (Phases 1-9 of original plan)
 
-- **Fast iteration**: Always use minimal test cases during development
-- **E2E after each phase**: Run full pipeline after each phase, even on toy data
-- **Plots are deliverables**: Every phase must produce visual evidence
+<details>
+<summary>Click to expand completed phases</summary>
 
----
+- **Phase 1**: Evaluation infrastructure — `metrics.py`, `conditioning_diagnostics.py`, `osse_runner.py`
+- **Phase 2**: Code cleanup — removed 8 duplicate masking methods, fixed `compute_xco2` fallback, fixed guidance gradient
+- **Phase 3**: Toy OSSE test gate — `toy_column_osse.py` as pytest, baseline metrics
+- **Phase 4**: Vanilla FM training — OT-CFM, Sinkhorn coupling, adaptive ODE, time grid spacing, experiments 09-11
+- **Phase 4.5**: Unconditional FM evaluation — distributional metrics, marginal plots, power spectra, tuning experiments
+- **Phase 5**: DPS guidance — proper likelihood gradient, Gaussian spatial smoothing, experiment 12
+- **Phase 6**: FlowDPS — `FlowDPSSampler`, Tweedie + projection + re-noise, experiment 13
+- **Phase 7**: SDE posterior sampling — `StochasticPosteriorSampler`, Langevin corrector, experiment 14
+- **Phase 8**: FIG — `FIGSampler`, measurement interpolants, experiment 15
+- **Phase 9**: ICTM — `ICTMSampler`, r(t) schedules, closed-form MAP, experiment 16
 
-## Phase 1: Evaluation Infrastructure
-
-Build reusable evaluation so every subsequent phase auto-produces full diagnostics.
-
-- [x] **Create** `neural_transport/inference/metrics.py`:
-  `rmse_3d`, `rmse_xco2`, `rmse_at_obs`/`rmse_away`, `crps_ensemble`, `spread_skill_ratio`, `calibration_score`, `rank_histogram`, `spatial_roughness`, `compute_all_metrics`
-- [x] **Create** `neural_transport/plots/conditioning_diagnostics.py`:
-  `plot_conditioning_comparison` (GT/obs/ens.mean/|error|/samples grid), `plot_metrics_summary`, `plot_ensemble_diagnostics`, `plot_xco2_maps`
-- [x] **Create** `neural_transport/inference/osse_runner.py`:
-  `run_single_osse(model, config, gt, obs) -> OSSEResult`, `run_osse_comparison`, `save_osse_results`
-
-**Deliverable**: Every subsequent phase calls `osse_runner` and gets metrics JSON + plots automatically.
+</details>
 
 ---
 
-## Phase 2: Code Cleanup & Bug Fixes
+## Phase 0: Update implementation.md
 
-### 2a: Remove dead masking methods
-- [x] **Keep**: `masking_simple`, `masking_interpolate`, `masking_total_column_average_simple`, `masking_total_column_average_mult`
-- [x] **Remove** 8 others (4 are identical to `_simple`, rest are experimental dead ends)
-- [x] **File**: `flowmatching.py`
+**Goal**: Replace the current `implementation.md` with this refactored plan.
 
-### 2b: Fix `compute_xco2` fallback
-- [x] Add targshift correction to fallback path (`+ targshift_mean * h_ak_sum`)
-- [x] Add `ak is not None` guard in fallback
-- [x] **File**: `flowmatching.py`
+**Modify**: `/Net/Groups/BGI/people/vbenson/CarbonBench/dryrun/neural_transport/implementation.md`
 
-### 2c: Fix guidance gradient
-- [x] Current: `column_error / h_ak_sum` (uniform). Fix: `h_k * a_k * column_error` (Jacobian transpose)
-- [x] **File**: `flowmatching.py`
-
-**Deliverable**: Unit tests in `tests/test_forward_model.py` (17 tests, all passing). Roundtrip error < 1e-5.
+### Checklist
+- [x] Rewrite `implementation.md`: completed work summary, refactor phases 1-19, development phases 20-27
+- [ ] Commit the updated file
 
 ---
 
-## Phase 3: Toy OSSE Test Gate
+## Phase 1: Test Infrastructure & Shared Fixtures
 
-Formalize `toy_column_osse.py` as a mandatory validation gate.
+**Goal**: Establish TDD foundation before any refactoring begins. Every subsequent phase writes tests first.
 
-- [x] Make importable as test module with pytest markers (quick ~30s, full ~5min)
-- [x] Every conditioning method must pass: column RMSE < threshold, no NaN, no divergence
-- [x] Run on all existing methods to establish baseline
-- [x] Run `osse_runner` on real CT data for baseline evaluation of current methods
+**Create**: `tests/conftest.py`
 
-**Deliverable**: Baseline metrics + plots for unconditional and all 4 existing conditioning modes.
+```python
+@pytest.fixture
+def mock_velocity_model():
+    """Zero-velocity MockSubmodel for testing samplers/wrappers."""
 
----
+@pytest.fixture(params=[(4, 8, 10), (32, 64, 10)])  # tiny + realistic
+def synthetic_co2_field(request):
+    """Random CO2 field [B, nlev, nlat, nlon] with physically plausible range."""
 
-## Phase 4: Vanilla FM Training Fixes
+@pytest.fixture
+def synthetic_pressure_weights():
+    """Pressure layer weights for XCO2 computation."""
 
-Ensure the unconditional model matches SOTA vanilla flow matching before adding conditioning.
+@pytest.fixture
+def synthetic_averaging_kernel():
+    """Averaging kernel (ak) for column observation forward model."""
 
-### 4a: Audit training pipeline
-- [x] Verify OT-CFM path (AffineProbPath + CondOTScheduler) is correctly implemented
-  - `x_t = (1-t)*x_0 + t*x_1`, target `dx_t = x_1 - x_0` ✓
-- [x] Check noise-data pairing: currently random → replaced with OT coupling in 4b
-- [x] Verify loss function: plain MSE on velocity, no time-dependent weighting needed ✓
-- [x] Check inference: fixed-step midpoint, `steps=11`, `step_size=0.2` in exp 01
+@pytest.fixture
+def sample_obs_mask():
+    """Binary observation mask [B, 1, nlat, nlon] with ~30% coverage."""
 
-### 4b: Minibatch OT coupling
-- [x] Replace random noise-data pairing with OT-optimal pairing within minibatch
-- [x] GPU-native Sinkhorn (pure PyTorch) instead of scipy — `compute_ot_coupling()` in `flowmatching.py`
-- [x] **Modify**: `FlowMatching.training_forward()` — add OT pairing before `self.path.sample()`
-- [x] Also added to `toy_column_osse.py` `train_flow_matching()` via `use_ot_coupling` param
-
-### 4c: Inference improvements
-- [x] Adaptive ODE solver support: `atol`/`rtol` params, `method` overridable via `generate_kwargs`
-- [x] Time grid spacing: `_build_time_grid()` with uniform/cosine/front_loaded options
-- [x] Ablation script in exp 09: steps (11/21/51), solver (midpoint/dopri5), timegrid variants
-
-### 4d: Retrain + evaluate
-- [x] New experiment: `09_fm_unet_ot_training/` with `use_ot_coupling=True`
-- [x] `train.py` with `--max_steps` CLI arg for smoke testing
-- [x] `run_eval.py` with ablation framework (ot/solver/steps/timegrid/all)
-- [x] Tests: `tests/test_flowmatching_training.py` — OT coupling + time grid tests
-- [x] Full training via Slurm: `sbatch 09_fm_unet_ot_training/train.slurm`
-- [x] Evaluation: `sbatch 09_fm_unet_ot_training/run_eval.slurm`
-
-**Deliverable**: Improved unconditional model. Training curves + sample quality comparison plots.
-
----
-
-### Phase 4.5: Unconditional Flow Matching proper evaluation and tuning
-
-The goal of this phase is to obtain a solid flow matching forward model. The problem is, the current evaluation is not robust enough to allow us to really assess which one of two generative models is better. What we want is an evaluation that properly checks the how well the generations are, i.e. evaluate their distribution.
-
-- [x] Produce plots of the different marginals of the distributions in a reasonable way: we want multiple ground truth CO2 samples (so multiple time steps)... and then also multiple generated CO2 samples. For each of them we want to compute statistics (e.g. mean, std. dev., power spectrum etc.), and then compare the distributions of these statistics against each other.
-- [x] We want to compute probabilistic scores comparing the two distributions with samples
-- [x] We want plots that directly plot the spatial pattern (mean over samples) against each other, same for the lat-height pattern. Also compare the std. dev over samples for both.
-- [x] During training of the flow matching model, make sure that the validation epoch spits out a meaningful metric that is associated with generation quality, and can be used to pick the best checkpoint afterwards
-- [x] Check with literature for any other meaningful metrics & plots to assess the quality of the generative model
-- [x] Where necessary, rewrite the current API / generalize it, such that this generative evaluation is more straight forward to support (but we still also want full support & ideally backwards compatibility for the forward transport models)
-- [x] Tune a bunch of different training settings, especially optimization parameters like the learning rate (and others). Keep the batch size high to fill the GPU. Use SLURM for the tuning.
-- [x] Also check with literature again for any tricks / bells & whistles to improve the flow matching training, and also tune these.
-- [x] Also make a tuning experiment with inference-time parameters, i.e. those related to generation like the solver or the step size.
-- [x] Create a comparison of the tuning experiments with bar plots & tables that show what changing each parameter / adding new features adds/changes in terms of generation quality.
-- [x] Train a final model with the best tuning config for more epochs
-
-**Deliverable**: A top notch unconditional model with plenty of visual evidence to support design choices & experiments.
-
----
-
-## Phase 5: Proper DPS Guidance for Column XCO2
-
-Fix the core guidance algorithm to use proper likelihood gradients.
-
-### 5a: DPS likelihood gradient
-For `p(y|x) ~ N(y; H(x), sigma_y^2 I)`, `H(x) = sum_k h_k a_k x_k`:
+@pytest.fixture
+def sample_masking_config():
+    """Full masking_config dict matching current API (bridge to new configs)."""
 ```
-nabla_{x_k} log p(y|x) = (h_k * a_k / sigma_y^2) * (y - H(x))
+
+**Consolidate**: Move `MockSubmodel` from `test_forward_model.py` into `conftest.py`. Deduplicate any shared setup across the 4 existing test files.
+
+**Create**: `tests/test_smoke.py` — minimal end-to-end smoke test that exercises the current API:
+- Create toy model → generate 2 samples → compute metrics → assert no NaN
+
+### Checklist
+- [ ] Create `conftest.py` with all shared fixtures
+- [ ] Move `MockSubmodel` and other shared helpers from existing tests into `conftest.py`
+- [ ] Update existing tests to use shared fixtures (remove duplication)
+- [ ] Create `test_smoke.py` with E2E smoke test on current API
+- [ ] All 4 existing test files still pass
+- [ ] Mark smoke test as `@pytest.mark.quick`
+
+---
+
+## Phase 2: Config System (Typed Dataclasses)
+
+**Goal**: Replace all raw `dict` passing with typed, validated dataclasses. Foundation for everything else.
+
+**Create**: `neural_transport/neural_transport/configs.py`
+
+Key dataclasses:
+- `SamplerConfig` — sampler type + all sampler-specific hyperparams (sigma_obs, r_max, k_steps, noise_schedule, etc.)
+- `GenerateConfig` — n_samples, steps, masking, conditioning_mode, obs_fraction, noise_pattern, time_grid_spacing + nested `SamplerConfig`
+- `DataConfig` — dataset, grid, vertical_levels, freq, target_vars, data_root, obs_source (None / "synthetic" / "oco2")
+- `EvalConfig` — which metrics to compute, n_gt/gen_samples for distributional eval, works for both transport and generative
+- `PlotConfig` — imgformats, dpi, figsize_scale, save_dir, target_pressures, experiment_type
+- `TrainingConfig` — lr, weight_decay, warmup_steps, batch_size, max_steps, loss weighting
+- `ExperimentConfig` — name + nested Data/Generate/Eval/Plot/Training configs + device + seed
+- `MaskingConstants` — satellite tilt angle, swath width params, default T, temporal weight params (all currently hardcoded)
+
+Each class: `from_dict()`, `to_dict()`, `merge(overrides: dict)`, YAML serialization support.
+
+### Checklist
+- [ ] **Tests first**: Write `tests/test_configs.py` — serialization roundtrip, defaults, merge with nested overrides, validation (e.g. sampler name must be in known set), YAML round-trip
+- [ ] Implement `configs.py` with all dataclasses
+- [ ] Extract all magic numbers from `generative.py` (satellite tilt `-5*π/180`, swath width `obs_fraction*nlon/8`, `T=5` default) and `flowmatching.py` (`dt=0.1` fallback) into `MaskingConstants` / `GenerateConfig`
+- [ ] Add `compat_to_generate_kwargs()` bridge: `GenerateConfig → dict` for backward compat
+- [ ] Add `compat_from_generate_kwargs()` bridge: `dict → GenerateConfig`
+- [ ] Update `toy_column_osse.py` to use configs as proof-of-concept
+- [ ] All existing tests still pass
+
+---
+
+## Phase 3: Forward Model Extraction
+
+**Goal**: Extract XCO2 forward model from 3 duplicated locations into one standalone, well-tested module.
+
+Currently duplicated in:
+- `flowmatching.py` `MaskedVelocityWrapper.compute_xco2` (lines 73-97) — PyTorch
+- `posterior_samplers.py` (each sampler has inline column projection) — PyTorch
+- `metrics.py` `compute_xco2_column` (lines 23-38) — NumPy
+
+**Create**: `neural_transport/neural_transport/forward_model.py`
+
+```python
+class XCO2ForwardModel:
+    """H(x) = xco2_prior + sum(h * a * (x - x_prior))"""
+    def __init__(self, pressure_weights, ak, xco2_prior=None, co2_profile_prior=None,
+                 obs_mean=None, obs_std=None, target_mean=None, target_std=None, targshift_mean=None): ...
+    def forward(self, x: Tensor) -> Tensor           # [B,C,Nlat,Nlon] -> [B,1,Nlat,Nlon]
+    def forward_numpy(self, x: ndarray) -> ndarray    # for metrics
+    def jacobian_transpose(self, col_error) -> Tensor # h_k * a_k * error (used by DPS guidance)
+    def project(self, x_hat, obs_values, obs_mask, sigma) -> Tensor  # pseudoinverse projection
+    @classmethod
+    def from_masking_config(cls, masking_config: dict) -> "XCO2ForwardModel":
+        """Bridge constructor from legacy masking_config dict."""
 ```
-- [x] Add `sigma_obs` parameter to `MaskedVelocityWrapper`
-- [x] Key change: gradient proportional to `h_k * a_k` (surface-heavy), not uniform
-- [x] **File**: `flowmatching.py`
 
-### 5b: Gaussian spatial smoothing
-- [x] `_gaussian_smooth_2d(field, sigma)` via `F.conv2d`, periodic longitude padding
-- [x] `spatial_smoothing_sigma` parameter in `generate_kwargs`
-- [x] **File**: `flowmatching.py`
-
-### 5c: Toy OSSE gate + full OSSE via osse_runner
-
-**Deliverable**: DPS ablation (guidance_scale x sigma_obs x smoothing x timing). Plots: RMSE vs scale, roughness, per-level guidance magnitude.
-
-**Success**: Column RMSE < 75% of unconditional at obs locations.
-
----
-
-## Phase 6: FlowDPS — Posterior Sampling via Projection
-
-**Ref**: Kim et al., ICCV 2025
-
-Tweedie estimate -> data projection -> re-noise. Projects clean estimate onto column constraint.
-
-- [x] **Create** `neural_transport/inference/posterior_samplers.py`
-- [x] `FlowDPSSampler`: `_tweedie_estimate`, `_project_column`, `_renoise`
-- [x] Column projection: `x_hat_k += (h_k a_k) * (y - H(x_hat)) / (sum_j(h_j a_j)^2 + sigma^2)`
-- [x] Integrate: `sampler="flowdps"` in `generate_kwargs`
-- [x] **File**: `flowmatching.py` `inference_forward` — dispatch to sampler
-- [x] Toy OSSE integration: `sample_flowdps()` in `toy_column_osse.py`, 4 FlowDPS configs
-- [x] Tests: `test_flowdps_no_nan`, `test_flowdps_projection_unit` (quick), slow tests via parametrize
-- [x] Full-scale ablation: `13_flowdps_ablation/` (sigma_obs, smoothing, steps, fresh_noise sweeps)
-
-**Deliverable**: Toy OSSE gate + full OSSE. Trajectory visualization (Tweedie estimates at t=0.2,0.5,0.8). RMSE convergence vs steps.
-
-**Success**: Lower RMSE_xco2_obs than best DPS configuration.
+### Checklist
+- [ ] **Tests first**: Extend `tests/test_forward_model.py`:
+  - Roundtrip: `H(project(x, y)) ≈ y` at observed locations
+  - Linearity: `H(ax + by) = aH(x) + bH(y)`
+  - Projection idempotence: `project(project(x)) ≈ project(x)`
+  - NumPy/PyTorch parity: `forward(x).numpy() ≈ forward_numpy(x.numpy())`
+  - `from_masking_config` produces identical results to current `compute_xco2`
+- [ ] Implement `XCO2ForwardModel` in `forward_model.py`
+- [ ] Refactor `MaskedVelocityWrapper.compute_xco2` to delegate to `XCO2ForwardModel`
+- [ ] Refactor all 4 samplers to use shared `forward_model.project()`
+- [ ] Refactor `metrics.py` `compute_xco2_column` to wrap `forward_model.forward_numpy()`
+- [ ] All existing tests still pass
 
 ---
 
-## Phase 7: Stochastic Posterior Sampling (SDE)
+## Phase 4: Sampler Abstract Base Class
 
-ODE = deterministic given noise. SDE = noise injection for better posterior exploration.
+**Goal**: Define the sampler interface and shared logic before migrating individual samplers.
 
-- [x] `StochasticPosteriorSampler` in `posterior_samplers.py`
-  - SDE noise injection with annealed/constant/cosine noise schedules
-  - Composition with FlowDPSSampler for Tweedie + projection internals
-  - Euler-Maruyama discretization: `x_{t+dt} = x_t + v_theta*dt + sigma(t)*sqrt(dt)*z`
-- [x] SDE: `dx = v(x,t)dt + sigma(t)dW`, annealed schedule `sigma(t) = sigma_max(1-t)`
-- [x] Predictor-Corrector: flow step + Langevin MCMC corrector targeting `p(x_t|y)`
-  - Prior score from Tweedie: `v_theta / (1-t)`
-  - Likelihood gradient: `(h_k * a_k / sigma_obs^2) * (y - H(x_hat_1))`
-  - Re-projection after corrector steps to maintain column constraint
-- [x] Combine with FlowDPS projection
-- [x] `sampler="sde"` dispatch in `flowmatching.py` `inference_forward`
-- [x] Toy OSSE integration: `sample_sde()`, 5 SDE/PC configs in CONDITIONING_METHODS
-- [x] Ensemble spread metrics: `spread_3d`, `spread_xco2`, `spread_skill_ratio` in `evaluate()`
-- [x] Tests: 5 new quick tests (SDE no-NaN, corrector no-NaN, larger spread, schedule variants, sigma=0 matches FlowDPS)
-- [x] Full-scale ablation: `14_sde_ablation/` (sigma_max, noise schedule, corrector steps/eps, projection, steps)
+**Create**:
+- `neural_transport/inference/samplers/__init__.py`
+- `neural_transport/inference/samplers/base.py`
 
-**Deliverable**: Toy OSSE gate + ablation (noise schedule, corrector steps). Ensemble spread comparison: ODE vs SDE.
+```python
+class PosteriorSampler(ABC):
+    """Abstract base for all posterior samplers."""
+    def __init__(self, velocity_model, forward_model: XCO2ForwardModel, config: SamplerConfig): ...
 
-**Success**: Larger spread while maintaining RMSE. Spread-skill ratio closer to 1.0.
+    @abstractmethod
+    def sample(self, x_init: Tensor, time_grid: Tensor,
+               masking_config: dict, return_intermediates: bool = False) -> Tensor: ...
 
----
+    # Shared utilities (currently duplicated across FlowDPS/SDE/ICTM):
+    def _tweedie_estimate(self, x_t, t, v_theta) -> Tensor:
+        """x_hat_1 = x_t + (1-t) * v_theta"""
+    def _renoise(self, x_hat, z, t_next) -> Tensor:
+        """x_{t+1} = (1-t_{n+1})*z + t_{n+1}*x_hat"""
+    def _compute_velocity(self, x_t, t, masking_config) -> Tensor:
+        """Wrapper around velocity_model forward pass."""
+```
 
-## Phase 8: FIG — Flow with Interpolant Guidance
+- `neural_transport/inference/samplers/ode.py` — `ODESampler`: wraps standard ODE solver (no conditioning)
 
-**Ref**: Ricci et al. (ICLR 2025)
-
-Measurement interpolants for theoretically-justified guidance. Euler ODE step + gradient correction via measurement interpolant that ramps from noise to observation.
-
-- [x] `FIGSampler` in `posterior_samplers.py` — Euler step + analytical gradient correction
-- [x] Measurement interpolant: `y_t = next_t * y + w * (1-t) * H(noise)`
-- [x] K gradient corrections with `(1-t)/t` scheduling, `skip_first_last` option
-- [x] Dispatch in `flowmatching.py` (`sampler="fig"`)
-- [x] `sample_fig()` in `toy_column_osse.py` + CONDITIONING_METHODS entries (`fig_c10_k1`, `fig_c20_k1`, `fig_c10_k3`)
-- [x] 4 quick tests: no-NaN, k=3 valid, reduces column error, measurement noise w=0.5
-- [x] Full-scale ablation: `15_fig_ablation/` (step_size_c, k_steps, noise_scale_w, sigma_obs, steps, skip_first_last)
-
-**Deliverable**: FIG vs FlowDPS vs SDE comparison. Sweep over step size, correction steps, noise scale.
-
-**Success**: Comparable or better RMSE than FlowDPS with different conditioning approach.
+### Checklist
+- [ ] **Tests first**: Write `tests/test_samplers.py` with parametrized interface tests:
+  - Each sampler returns correct shape `[B, C, Nlat, Nlon]`
+  - No NaN in output
+  - With empty obs mask, posterior sampler reduces to unconditional
+  - `return_intermediates=True` returns list of tensors
+- [ ] Implement `PosteriorSampler` ABC with shared `_tweedie_estimate`, `_renoise`
+- [ ] Implement `ODESampler` wrapping current ODE path
+- [ ] Tests pass for `ODESampler`
 
 ---
 
-## Phase 9: ICTM — Iterative Corrupted Trajectory Matching
+## Phase 5: Sampler Registry & Migration
 
-**Ref**: arXiv 2405.18816
+**Goal**: Migrate all 4 posterior samplers to the new interface and add registry-based dispatch.
 
-Tweedie + local MAP with time-varying regularization r(t). For linear column obs: closed-form (= FlowDPS projection with sigma_eff = sigma_obs / r(t)). For nonlinear: inner gradient descent.
+**Create**:
+- `neural_transport/inference/samplers/flowdps.py` — from `posterior_samplers.py` FlowDPSSampler
+- `neural_transport/inference/samplers/sde.py` — from StochasticPosteriorSampler
+- `neural_transport/inference/samplers/fig.py` — from FIGSampler
+- `neural_transport/inference/samplers/ictm.py` — from ICTMSampler
 
-- [x] `ICTMSampler` in `posterior_samplers.py` with r(t) schedules (constant, decreasing, increasing, cosine)
-- [x] `_linear_map_solve` (closed-form MAP for linear H) and `_nonlinear_map_solve` (gradient descent for general H)
-- [x] `sampler="ictm"` dispatch in `flowmatching.py`
-- [x] `sample_ictm()` in `toy_column_osse.py` + CONDITIONING_METHODS entries (`ictm_r1.0_dec`, `ictm_r0.5_dec`, `ictm_r1.0_const`, `ictm_r1.0_inner3`)
-- [x] 4 quick tests: no-NaN, n_inner_steps=3 valid, reduces column error, r_schedule variants
-- [x] Full-scale ablation: `16_ictm_ablation/` (r_max, r_schedule, n_inner_steps, inner_lr, sigma_obs, steps)
+**Add to `__init__.py`**:
+```python
+SAMPLER_REGISTRY = {"ode": ODESampler, "flowdps": FlowDPSSampler, "sde": ..., "fig": ..., "ictm": ...}
+def create_sampler(name, velocity_model, forward_model, config) -> PosteriorSampler: ...
+```
 
-**Deliverable**: Quality vs cost comparison with FlowDPS, SDE, FIG. Sweep over r_max, r_schedule, inner steps.
+**Modify**: `flowmatching.py` `inference_forward()` — replace 100-line if/elif with:
+```python
+sampler = create_sampler(config.sampler, self.velocity_model, self.forward_model, config)
+return sampler.sample(x_init, time_grid, masking_config)
+```
 
-**Success**: Comparable or better RMSE than FlowDPS with time-varying regularization approach.
+**Delete**: `posterior_samplers.py`
 
----
-
-## Phase 10: Conjugate Integrators — Few-Step Conditioning
-
-**Ref**: arXiv 2405.17673
-
-Plug-and-play wrapper. Target: 5-step conditional generation.
-
-- [ ] `ConjugateIntegratorSampler` in `posterior_samplers.py`
-- [ ] Toy OSSE gate + efficiency benchmark
-
-**Deliverable**: Pareto front: wall-time vs RMSE across all methods.
-
----
-
-## Phase 11: Advanced FM Training (W-CFM, OAT-FM)
-
-*After training-free methods are benchmarked.*
-
-### 11a: Weighted CFM (W-CFM)
-- [ ] Gibbs kernel weighting of training pairs: `w_ij = exp(-||x_i - y_j||^2 / 2eps)`
-- [ ] Approximates entropic OT, straighter paths
-- [ ] **Modify**: `training_forward()` in `flowmatching.py`
-
-### 11b: Time-dependent loss weighting
-- [ ] `w(t) = 1/sigma(t)^2` or SNR-based weighting
-- [ ] Velocity vs noise prediction parameterization
-
-### 11c: OAT-FM fine-tuning (optional)
-- [ ] Phase 2 fine-tune: minimize acceleration in sample-velocity space
-- [ ] Straighter paths, fewer NFE needed
-
-### 11d: Retrain + re-evaluate all posterior methods
-
-**Deliverable**: Training curves. Improved unconditional RMSE. Re-evaluation of all Phases 5-10.
+### Checklist
+- [ ] **Tests first**: Extend `tests/test_samplers.py` — parametrized over all 5 samplers (ODE + 4 posterior). Test that `create_sampler()` returns correct type.
+- [ ] Migrate `FlowDPSSampler` to `samplers/flowdps.py` inheriting `PosteriorSampler`
+- [ ] Migrate `StochasticPosteriorSampler` to `samplers/sde.py`
+- [ ] Migrate `FIGSampler` to `samplers/fig.py`
+- [ ] Migrate `ICTMSampler` to `samplers/ictm.py`
+- [ ] Verify shared `_tweedie_estimate` and `_renoise` replace duplicated code in each sampler
+- [ ] Implement registry + `create_sampler()` factory
+- [ ] Refactor `FlowMatching.inference_forward()` to use `create_sampler()`
+- [ ] Delete `posterior_samplers.py`
+- [ ] Update imports in `test_toy_column_osse.py` and any other consumers
+- [ ] All existing tests still pass
 
 ---
 
-## Phase 12: Conditional Flow Matching (Retraining)
+## Phase 6: Masking Module Extraction
 
-**Ref**: Lipman et al. 2023
+**Goal**: Extract all masking logic from `generative.py` and `flowmatching.py` into a dedicated module.
 
-Train `u(x,t|y)` directly. Most principled approach.
+Currently spread across:
+- `generative.py`: `create_mask()`, `create_column_mask()`, `create_oco2_mask()`, satellite patterns (~300 lines)
+- `flowmatching.py`: `MaskedVelocityWrapper.masking_*` methods (4 methods, ~80 lines), `_get_temporal_weight()` (~30 lines)
 
-### 12a: Architecture
+**Create**: `neural_transport/inference/masking.py`
+
+Contents:
+- Mask creation: `create_mask()`, `create_column_mask()`, `create_oco2_mask()`, satellite pattern logic
+- Masking methods: `masking_simple()`, `masking_interpolate()`, `masking_total_column_average_simple()`, `masking_total_column_average_mult()` (as standalone functions, not methods)
+- Temporal weighting: `compute_temporal_weight()` (was `_get_temporal_weight`)
+- All use `MaskingConstants` from configs (no more hardcoded values)
+
+### Checklist
+- [ ] **Tests first**: Write `tests/test_masking.py`:
+  - `create_mask()` produces correct shapes and coverage fractions for each pattern
+  - Satellite mask respects tilt angle and swath width from `MaskingConstants`
+  - `masking_total_column_average_simple` correctly constrains column mean
+  - `compute_temporal_weight` returns correct schedule shapes (smooth_late, smooth_early, step)
+  - Edge cases: obs_fraction=0, obs_fraction=1, single-pixel masks
+- [ ] Extract mask creation functions from `generative.py` to `masking.py`
+- [ ] Extract `masking_*` methods from `MaskedVelocityWrapper` to standalone functions in `masking.py`
+- [ ] Extract `_get_temporal_weight` to `masking.py`
+- [ ] Replace all hardcoded masking constants with `MaskingConstants`
+- [ ] Update imports in `generative.py`, `flowmatching.py`
+- [ ] All existing tests still pass
+
+---
+
+## Phase 7: Noise & Spatial Utilities
+
+**Goal**: Extract noise generation and shared spatial utilities into dedicated modules.
+
+**Create**: `neural_transport/inference/noise.py`
+- `generate_noise()` — main entry point
+- Noise patterns: `spiral_noise()`, `geodesic_noise()`, `linear_noise()`, `antipodal_noise()`
+- Currently embedded in `generative.py` (~80 lines)
+
+**Create**: `neural_transport/tools/spatial.py`
+- `gaussian_smooth_2d()` — currently `_gaussian_smooth_2d` in `flowmatching.py` (lines 325-378)
+- Used by both `flowmatching.py` (guidance smoothing) and posterior samplers (gradient smoothing)
+- Periodic longitude padding, separable 2D convolution
+
+### Checklist
+- [ ] **Tests first**: Write `tests/test_noise.py`:
+  - Each noise pattern produces correct shape
+  - No NaN/Inf in outputs
+  - Noise patterns are deterministic given seed
+- [ ] **Tests first**: Write `tests/test_spatial.py`:
+  - `gaussian_smooth_2d` with sigma=0 returns input unchanged
+  - Periodic boundary: smoothing at lon=0 uses lon=360 data
+  - Output shape matches input shape
+  - Kernel size = `6*sigma+1` (from current code)
+- [ ] Extract noise functions to `noise.py`
+- [ ] Extract `_gaussian_smooth_2d` to `tools/spatial.py`
+- [ ] Update all imports in `flowmatching.py`, `samplers/*.py`, `generative.py`
+- [ ] All existing tests still pass
+
+---
+
+## Phase 8: Unified Generation Pipeline
+
+**Goal**: Merge `iterative_generate()` and `iterative_generate_oco2()` into a single `GenerationPipeline`. These share ~65% of code; the key differences are:
+- `iterative_generate`: per-sample conditioning, sample-dimension output, synthetic obs
+- `iterative_generate_oco2`: time-series with dual dataset alignment, window aggregation, real OCO-2
+
+**Create**: `neural_transport/inference/generation.py`
+
+```python
+class GenerationPipeline:
+    """Unified generation for all use cases."""
+    def __init__(self, model, data_loader, config: GenerateConfig): ...
+
+    def run(self, out_dir: Path) -> xr.Dataset:
+        """Single entry point — dispatches based on config."""
+
+    def run_distributional(self, out_dir, n_gt, n_gen, batch_size) -> tuple[xr.Dataset, xr.Dataset]:
+        """Replaces generate_for_distributional_eval()."""
+
+    # Internal methods (shared across modes):
+    def _prepare_batch(self, idx, device): ...
+    def _apply_masking(self, batch, masking_config): ...
+    def _run_inference(self, batch, noise): ...
+    def _postprocess_and_save(self, preds, out_dir): ...
+
+    # Mode-specific batch collection:
+    def _collect_sample_batch(self, ...): ...       # per-sample (OSSE)
+    def _collect_timeseries_batch(self, ...): ...   # windowed (OCO-2)
+```
+
+**Delete**: `generative.py` (all content now in `generation.py`, `masking.py`, `noise.py`)
+
+### Checklist
+- [ ] **Tests first**: Write `tests/test_generation_pipeline.py`:
+  - `GenerationPipeline.run()` with synthetic data produces correct output shape
+  - Sample mode: output has `sample` dimension
+  - Time-series mode: output has `time` dimension
+  - `run_distributional()` returns GT and gen datasets with correct sample counts
+  - Config with `masking=False` produces unconditional samples
+- [ ] Implement `GenerationPipeline` with shared + mode-specific methods
+- [ ] Integrate distributional eval as `run_distributional()`
+- [ ] Delete `generative.py`, update all imports across both repos
+- [ ] Verify: unconditional generation produces identical output to before
+- [ ] Verify: OSSE conditioning produces identical output
+- [ ] All existing tests still pass
+
+---
+
+## Phase 9: MaskedVelocityWrapper Slim-Down
+
+**Goal**: Reduce `MaskedVelocityWrapper` from ~260 to ~100 lines. After phases 3, 6, 7 most of its responsibilities have been extracted.
+
+**Remove from `MaskedVelocityWrapper`**:
+- `compute_xco2` → delegates to `XCO2ForwardModel` (Phase 3)
+- `masking_*` methods → now in `inference/masking.py` (Phase 6)
+- `_get_temporal_weight` → now in `inference/masking.py` (Phase 6)
+- `_gaussian_smooth_2d` → now in `tools/spatial.py` (Phase 7)
+
+**Keep**: Only the 5 conditioning modes (correction, velocity_projection, guidance, repaint, velocity_projection_repaint) as the forward pass logic.
+
+**Refactor**: `__init__` receives `XCO2ForwardModel` instance instead of constructing internally.
+
+### Checklist
+- [ ] **Tests first**: Verify all 17 `test_forward_model.py` tests still define expected behavior
+- [ ] Remove extracted methods from `MaskedVelocityWrapper`
+- [ ] Refactor `__init__` to receive `XCO2ForwardModel`
+- [ ] Update `FlowMatching` to construct and pass `XCO2ForwardModel`
+- [ ] Remove `dt=0.1` hardcoded fallback (now in `GenerateConfig`)
+- [ ] All 17 `test_forward_model.py` tests still pass
+- [ ] Toy OSSE still passes end-to-end
+- [ ] `MaskedVelocityWrapper` is now ~100 lines
+
+---
+
+## Phase 10: Evaluation — Metric Consolidation
+
+**Goal**: Create a single source of truth for all metric functions. Currently metrics are defined in 4 places:
+- `inference/metrics.py`: rmse_3d, rmse_xco2, crps_ensemble, spread_skill_ratio, etc.
+- `inference/distributional_metrics.py`: energy_distance, mmd_rbf, wasserstein_distance
+- `inference/analyse.py`: compute_score_df, compute_score_df_generate (contain inline metric logic)
+- `plots/plot_results.py` lines 66-107: rmse(), bias(), r2(), nse() (duplicates!)
+
+**Create** evaluation subpackage:
+- `neural_transport/evaluation/__init__.py`
+- `neural_transport/evaluation/pointwise.py` — **THE** single source for: RMSE, R2, bias, NSE, RelRMSE, AbsBias, mass balance. Both transport and generative models use these.
+- `neural_transport/evaluation/ensemble.py` — CRPS, spread-skill, calibration, rank histogram
+- `neural_transport/evaluation/distributional.py` — energy distance, MMD, Wasserstein, KL
+
+### Checklist
+- [ ] **Tests first**: Write `tests/test_evaluation_metrics.py`:
+  - Each metric function: known input → known output (e.g. RMSE of zeros = 0)
+  - Metric symmetry/invariance properties where applicable
+  - Latitude-weighted RMSE differs from unweighted
+  - CRPS with perfect ensemble = 0
+  - Energy distance of identical distributions = 0
+- [ ] Implement `pointwise.py` consolidating all metric definitions
+- [ ] Implement `ensemble.py` migrating from `metrics.py`
+- [ ] Implement `distributional.py` migrating from `distributional_metrics.py`
+- [ ] Delete duplicate metric definitions from `plot_results.py` (lines 66-107), import from `evaluation.pointwise`
+- [ ] Extract `max_n=200` energy distance cutoff into `EvalConfig`
+- [ ] Update `analyse.py` to import from `evaluation.*` instead of defining inline
+- [ ] All existing metric tests still pass (`test_distributional_metrics.py`)
+
+---
+
+## Phase 11: Evaluation — EvaluationSuite Orchestrator
+
+**Goal**: Unified orchestrator that runs the right metrics for any experiment type.
+
+**Create**: `neural_transport/evaluation/suite.py`
+
+```python
+@dataclass
+class EvalResult:
+    pointwise: dict[str, float]      # RMSE, R2, bias per variable/level
+    ensemble: dict[str, float] | None # CRPS, spread-skill (None for transport)
+    distributional: dict[str, float] | None
+    maps: dict[str, np.ndarray]      # spatial error maps (RMSE, bias, CRPS)
+    diagnostics: dict                # rank histogram data, calibration curves
+    metadata: dict                   # experiment name, config, timestamps
+
+class EvaluationSuite:
+    """Unified evaluation for transport and generative models."""
+    def __init__(self, config: EvalConfig, forward_model: XCO2ForwardModel | None = None): ...
+    def evaluate_deterministic(self, preds, gt, lat_weights=None) -> EvalResult:
+        """For transport models: RMSE, R2, bias, NSE, mass balance."""
+    def evaluate_ensemble(self, samples, gt, mask_2d=None) -> EvalResult:
+        """For FM models: pointwise + ensemble metrics (CRPS, spread-skill, rank hist)."""
+    def evaluate_distributional(self, gt_pool, gen_pool, lat, lon) -> EvalResult:
+        """For unconditional FM: energy distance, MMD, Wasserstein."""
+    def to_dataframe(self, result: EvalResult) -> pd.DataFrame:
+    def to_json(self, result: EvalResult, path: Path): ...
+```
+
+**Modify**:
+- `compute_score_df` in `analyse.py` → thin wrapper around `evaluate_deterministic()`
+- `compute_score_df_generate` in `analyse.py` → thin wrapper around `evaluate_ensemble()`
+- `gen_eval_callback.py` → use `EvaluationSuite` instead of ad-hoc metrics
+
+### Checklist
+- [ ] **Tests first**: Write `tests/test_evaluation_suite.py`:
+  - `evaluate_deterministic` returns `EvalResult` with populated `pointwise`, `None` ensemble
+  - `evaluate_ensemble` returns `EvalResult` with both `pointwise` and `ensemble`
+  - `evaluate_distributional` returns `EvalResult` with `distributional` populated
+  - `to_dataframe` produces correct columns
+  - `to_json` roundtrips with `from_json`
+- [ ] Implement `EvaluationSuite`
+- [ ] Implement `EvalResult` with serialization
+- [ ] Migrate `analyse.py` functions to be thin wrappers
+- [ ] Refactor `gen_eval_callback.py` to use `EvaluationSuite`
+- [ ] Verify transport model validation still produces correct metrics
+- [ ] All existing tests still pass
+
+---
+
+## Phase 12: Plotting — Base Infrastructure & Always-On Plots
+
+**Goal**: Establish plotting framework and implement plots that are always produced regardless of experiment type.
+
+**Create**: `neural_transport/plots/base.py`
+
+```python
+class PlotContext:
+    """Manages figure saving, style, and output paths."""
+    def __init__(self, config: PlotConfig): ...
+    def savefig(self, fig, name: str): ...         # auto-saves to all configured formats
+    def subplot_grid(self, nrows, ncols): ...      # consistent sizing
+    @contextmanager
+    def figure(self, name: str, **kwargs): ...     # auto-save on exit
+
+PLOT_REGISTRY: dict[str, dict] = {}  # name -> {func, categories, description}
+
+def register_plot(name: str, categories: list[str]):
+    """Decorator to register a plot function."""
+
+PLOT_CATEGORIES = {
+    "always":         ["field_maps", "xco2_maps", "lat_height"],
+    "ensemble":       ["spread_maps", "rank_histogram", "calibration"],
+    "distributional": ["marginals", "power_spectrum", "qq_plot", "sample_grid"],
+    "conditioning":   ["conditioning_comparison", "error_maps", "zonal_mean"],
+    "transport":      ["metric_curves", "obspack_stations"],
+    "ablation":       ["sweep_plots", "summary_bars", "pareto_front"],
+    "animation":      ["field_animation"],
+}
+
+def run_plots(result: EvalResult, ctx: PlotContext, categories: list[str] | None = None): ...
+```
+
+**Create**: `neural_transport/plots/field_plots.py` — always-on plots shared across all experiment types:
+- `plot_field_maps()` — CO2 at key pressure levels (configurable via `PlotConfig.target_pressures`)
+- `plot_xco2_maps()` — column-averaged XCO2
+- `plot_lat_height()` — zonal-mean latitude-height cross-section
+- All accept `EvalResult` and use `PlotContext`
+
+### Checklist
+- [ ] **Tests first**: Write `tests/test_plots.py`:
+  - `PlotContext.savefig` creates files in expected formats
+  - `register_plot` adds to `PLOT_REGISTRY`
+  - `run_plots(categories=["always"])` calls exactly the "always" plots
+  - `run_plots(categories=None)` infers categories from `EvalResult` content
+  - Plot functions don't crash with minimal synthetic data
+- [ ] Implement `PlotContext` with publication rcParams (font sizes, IPCC colormaps, consistent figure sizing)
+- [ ] Implement `register_plot` decorator and `run_plots` dispatcher
+- [ ] Implement `field_plots.py` with always-on plots
+- [ ] Extract hardcoded target pressures `[1013, 843, 441, 73]` into `PlotConfig.target_pressures`
+- [ ] Verify always-on plots render correctly with sample data
+
+---
+
+## Phase 13: Plotting — Specialized Plots & Smart Categories
+
+**Goal**: Migrate all existing plot functions to use `PlotContext` + `EvalResult`, organize by category.
+
+**Refactor**: `conditioning_diagnostics.py` → registered in "conditioning" category:
+- `plot_conditioning_comparison()` accepts `EvalResult`
+- `plot_ensemble_diagnostics()` → split into registered "ensemble" plots
+- `plot_zonal_mean()` → registered in "conditioning"
+
+**Refactor**: `distributional_plots.py` → registered in "distributional" category:
+- `plot_marginal_distributions()`, `plot_spatial_pattern_comparison()`, `plot_power_spectrum_comparison()`, `plot_qq()`, `plot_lat_height_comparison()`, `plot_sample_grid()` — all accept `EvalResult`, use `PlotContext`
+
+**Create**: `neural_transport/plots/metrics_plots.py` — "ablation" category:
+- `plot_ablation_sweep()` — generic sweep plot (metric vs hyperparameter)
+- `plot_summary_bars()` — bar chart comparing methods
+- `plot_pareto_front()` — wall-time vs RMSE
+- Extracted from the 5 carbonbench `plot_ablation.py` scripts
+
+**Create**: `neural_transport/plots/ensemble_plots.py` — "ensemble" category:
+- `plot_rank_histogram()`, `plot_calibration_curve()`, `plot_spread_map()`
+
+**Refactor**: `plot_results.py` transport-specific plots → registered in "transport" category:
+- `plot_metric_curves()` (RMSE/R2/NSE over lead time)
+- `plot_obspack_stations()` (station time series)
+
+**Extract**: `animate_predictions()` → `neural_transport/plots/animation.py`, registered in "animation" category
+
+**Smart inference**: `run_plots()` with `categories=None` auto-selects based on `EvalResult`:
+- Has `ensemble` → add "ensemble" category
+- Has `distributional` → add "distributional"
+- Has `metadata.experiment_type == "transport"` → add "transport"
+- Always includes "always"
+
+### Checklist
+- [ ] **Tests first**: Extend `tests/test_plots.py`:
+  - Each refactored plot function accepts `EvalResult` without error
+  - Category auto-inference selects correct categories for different `EvalResult` contents
+  - Ablation plots render with synthetic sweep data
+- [ ] Refactor `conditioning_diagnostics.py` to use `PlotContext` + `EvalResult`
+- [ ] Refactor `distributional_plots.py` similarly
+- [ ] Create `metrics_plots.py` (extracted from carbonbench `plot_ablation.py`)
+- [ ] Create `ensemble_plots.py`
+- [ ] Refactor transport plots in `plot_results.py` to use framework
+- [ ] Extract `animate_predictions()` to `animation.py`
+- [ ] Implement smart category inference in `run_plots()`
+- [ ] Verify all plots visually on one ablation result + one transport result
+
+---
+
+## Phase 14: Inference Data Loading
+
+**Goal**: Clean data loading API for generation, decoupled from Lightning.
+
+**Create**: `neural_transport/neural_transport/data/__init__.py`
+**Create**: `neural_transport/neural_transport/data/inference_loader.py`
+
+```python
+class InferenceDataLoader:
+    """Lightweight data loader for generation (no Lightning dependency)."""
+    def __init__(self, data_config: DataConfig): ...
+    def load_dataset(self) -> CarbonDataset: ...
+    def get_batch(self, idx: int, device: str = "cuda") -> dict[str, Tensor]: ...
+    def get_gt_field(self, idx: int) -> np.ndarray: ...
+    def get_normalization_stats(self) -> dict: ...
+    @property
+    def grid_info(self) -> GridInfo: ...  # nlat, nlon, lat, lon, levels, cos_lat_weights
+
+@dataclass
+class GridInfo:
+    nlat: int
+    nlon: int
+    nlev: int
+    lat: np.ndarray
+    lon: np.ndarray
+    levels: np.ndarray
+    cos_lat_weights: np.ndarray  # currently computed ad-hoc in every run_ablation.py
+```
+
+Note: `cos_lat_weights` is currently recomputed in every experiment script — this centralizes it.
+
+### Checklist
+- [ ] **Tests first**: Write `tests/test_data_loading.py`:
+  - `InferenceDataLoader` constructs from `DataConfig`
+  - `get_batch` returns tensors with correct shapes
+  - `grid_info` matches expected dimensions
+  - `cos_lat_weights` matches manually computed values
+- [ ] Implement `InferenceDataLoader` and `GridInfo`
+- [ ] Update `GenerationPipeline` (Phase 8) to use `InferenceDataLoader`
+- [ ] Verify generation produces identical output
+
+---
+
+## Phase 15: OCO-2 Data Loading
+
+**Goal**: Separate OCO-2 observation handling from generation logic. The time alignment, window aggregation, and per-sounding AK logic currently live inside `iterative_generate_oco2()` — they belong in the data layer.
+
+**Create**: `neural_transport/neural_transport/data/oco2_loader.py`
+
+```python
+@dataclass
+class ObservationBatch:
+    """Structured observation data (replaces raw dicts in masking_config)."""
+    obs_values: Tensor           # XCO2 observations
+    obs_mask: Tensor             # Binary mask
+    pressure_weights: Tensor | None
+    averaging_kernel: Tensor | None
+    xco2_prior: Tensor | None
+    co2_profile_prior: Tensor | None
+
+class OCO2DataLoader(InferenceDataLoader):
+    """Extends InferenceDataLoader with OCO-2 observation handling."""
+    def __init__(self, data_config: DataConfig, oco2_dataset=None): ...
+    def get_observations(self, time_idx: int, window_steps: int = 1) -> ObservationBatch: ...
+    def align_time(self, ct_times, oco2_times) -> int: ...  # offset computation
+    def aggregate_window(self, start_idx, window_steps) -> ObservationBatch: ...
+```
+
+**Modify**: `GenerationPipeline._collect_timeseries_batch()` now delegates to `OCO2DataLoader.get_observations()` instead of inline logic.
+
+### Checklist
+- [ ] **Tests first**: Write `tests/test_oco2_loader.py`:
+  - `ObservationBatch` has correct tensor shapes
+  - `align_time` computes correct offset for known time arrays
+  - `aggregate_window` unions sparse observations correctly
+  - Window of size 1 returns single-timestep observations
+- [ ] Implement `ObservationBatch` dataclass
+- [ ] Implement `OCO2DataLoader` with time alignment and window aggregation
+- [ ] Update `GenerationPipeline` time-series mode to use `OCO2DataLoader`
+- [ ] Verify OCO-2 generation produces identical output to before
+
+---
+
+## Phase 16: Experiment Runner (Carbonbench Deduplication)
+
+**Goal**: Eliminate ~3,000 lines of duplication across carbonbench experiments.
+
+**Create**: `neural_transport/neural_transport/experiments/ablation_runner.py`
+
+```python
+class AblationRunner:
+    def __init__(self, experiment_dir: Path, data_config: DataConfig,
+                 model_dirs: list[Path], device: str = "cuda"): ...
+    def load_model(self) -> NeuralTransport: ...
+    def run_single_eval(self, config: GenerateConfig, name: str) -> EvalResult: ...
+    def run_ablation(self, base_config: GenerateConfig,
+                     ablation_configs: dict[str, dict],
+                     filter_str: str | None = None) -> dict[str, EvalResult]: ...
+    def run_distributional_eval(self, config: GenerateConfig) -> EvalResult: ...
+    def save_results(self, results: dict[str, EvalResult]): ...
+    def plot_results(self, results: dict[str, EvalResult]): ...
+    def main_cli(self, base_config: GenerateConfig, ablation_configs: dict): ...
+```
+
+Internally uses: `InferenceDataLoader`, `GenerationPipeline`, `EvaluationSuite`, `run_plots()`.
+
+**Rewrite each carbonbench experiment** to ~50 lines:
+```python
+# Example: 13_flowdps_ablation/run_ablation.py
+from neural_transport.configs import GenerateConfig, SamplerConfig
+from neural_transport.experiments.ablation_runner import AblationRunner
+
+BASE_CONFIG = GenerateConfig(
+    n_samples=100, masking=True, conditioning_mode="velocity_projection",
+    sampler=SamplerConfig(sampler="flowdps", sigma_obs=1.0),
+)
+ABLATIONS = {"unconditional": {"masking": False}, "sigma_0.5": {"sampler.sigma_obs": 0.5}, ...}
+
+if __name__ == "__main__":
+    AblationRunner(EXP_DIR, DATA_CONFIG, MODEL_DIRS).main_cli(BASE_CONFIG, ABLATIONS)
+```
+
+### Checklist
+- [ ] **Tests first**: Write `tests/test_ablation_runner.py`:
+  - `AblationRunner` constructs without error
+  - `run_single_eval` with mock model returns `EvalResult`
+  - `run_ablation` iterates over configs correctly
+  - `save_results` produces valid JSON
+  - `main_cli` parses `--ablation` filter correctly
+- [ ] Implement `AblationRunner`
+- [ ] Rewrite `12_dps_guidance_ablation/run_ablation.py` as template
+- [ ] Rewrite remaining 4 experiment runners
+- [ ] Rewrite all 5 `plot_ablation.py` files (use `run_plots()` with "ablation" category)
+- [ ] Verify one experiment produces identical metrics JSON to pre-refactor output
+- [ ] Delete old duplicated code from all 5 experiments
+
+---
+
+## Phase 17: Logging & Type Annotations
+
+**Goal**: Replace print statements with structured logging; add type annotations to public APIs.
+
+**Logging**:
+- Replace `print()` calls with `logging.getLogger(__name__)` throughout
+- Structured log format: timestamp, module, level, message
+- Configurable verbosity via `ExperimentConfig` or CLI flag
+- Key locations: `GenerationPipeline`, `AblationRunner`, `EvaluationSuite`, samplers
+
+**Type annotations**:
+- Add return types and parameter types to all public functions in refactored modules
+- Add `py.typed` marker file
+- Run `mypy` on refactored modules (non-strict, just catch obvious errors)
+
+### Checklist
+- [ ] Replace `print()` with `logging` in: `generation.py`, `ablation_runner.py`, `suite.py`, all samplers
+- [ ] Configure logging format in `ExperimentConfig`
+- [ ] Add type annotations to all public APIs in: `configs.py`, `forward_model.py`, `samplers/base.py`, `evaluation/suite.py`, `plots/base.py`, `data/inference_loader.py`, `experiments/ablation_runner.py`
+- [ ] Add `py.typed` marker
+- [ ] Run `mypy` on refactored modules, fix obvious errors
+- [ ] Run `ruff` on all modified files
+
+---
+
+## Phase 18: E2E Validation — FM Training & Optuna Tuning
+
+**Goal**: Validate the refactored codebase end-to-end by training a flow matching model and tuning hyperparameters.
+
+This is both a validation of the refactor AND a re-establishment of the best unconditional model.
+
+**Training validation**:
+- Train FM model for 100 steps using refactored pipeline
+- Verify: `gen_eval_callback` uses `EvaluationSuite` + `run_plots()` correctly
+- Verify: checkpointing, EMA, LR scheduling all still work
+- Compare validation metrics to pre-refactor baseline
+
+**Optuna integration**:
+- Create `neural_transport/training/tuning.py` with Optuna objective function
+- Search space: lr, weight_decay, batch_size, OT coupling, time sampling distribution, loss weighting
+- Objective: distributional metrics (energy distance + MMD) from `EvaluationSuite`
+- Pruner: median pruning after 1000 steps
+- Storage: SQLite for reproducibility
+
+**Full training run**:
+- Train best config to convergence via SLURM
+- Evaluate with full `EvaluationSuite` (pointwise + distributional)
+- Produce publication plots via `run_plots()`
+
+### Checklist
+- [ ] **Tests first**: Write `tests/test_training_e2e.py` (`@pytest.mark.slow`):
+  - Train 10 steps → validate → metrics are finite
+  - `gen_eval_callback` produces plots in expected directory
+- [ ] Run 100-step training, verify identical metrics to pre-refactor
+- [ ] Create `training/tuning.py` with Optuna objective
+- [ ] Run Optuna study (50 trials, SLURM)
+- [ ] Train best config to convergence
+- [ ] Evaluate: distributional metrics + all plots
+- [ ] Compare to pre-refactor model quality
+
+---
+
+## Phase 19: E2E Validation — OSSE with Real OCO-2 Mask
+
+**Goal**: Run OSSE experiments using the real OCO-2 observation mask pattern (sparse, irregular, orbit tracks) applied to synthetic CarbonTracker data. Compare all posterior sampling methods.
+
+This validates the full pipeline: data loading → masking → generation → evaluation → plotting.
+
+**OSSE setup**:
+- Ground truth: CarbonTracker test data
+- Observations: synthetic XCO2 computed from CarbonTracker, masked with real OCO-2 coverage pattern
+- Methods to compare: unconditional, DPS guidance, FlowDPS, SDE, FIG, ICTM (best config from each ablation)
+
+**Method comparison**:
+- Use `AblationRunner` with one config per method
+- `EvaluationSuite.evaluate_ensemble()` for each method
+- Metrics: RMSE_3D, RMSE_XCO2, CRPS, spread-skill ratio, calibration
+- Spatial metrics: RMSE at observed vs unobserved locations
+
+**Plots** via `run_plots()`:
+- "always" + "conditioning" + "ensemble" categories
+- Side-by-side method comparison grid
+- Ablation summary bars
+- Pareto front: wall-time vs RMSE
+
+### Checklist
+- [ ] Create experiment config with real OCO-2 mask on synthetic CT data
+- [ ] Run all 6 methods (unconditional + 5 posterior) via `AblationRunner`
+- [ ] Compute ensemble metrics for each method
+- [ ] Generate comparison plots
+- [ ] Verify: best method achieves RMSE_xco2_obs < 75% of unconditional
+- [ ] Verify: spread-skill ratios in [0.5, 2.0]
+- [ ] Document results in experiment directory
+
+---
+
+## Phase 20: E2E Validation — Real OCO-2 Inversion
+
+**Goal**: Run actual inversion using real OCO-2 data via `OCO2DataLoader` + `GenerationPipeline`. Validate the complete real-data pipeline.
+
+**Setup**:
+- Use `OCO2DataLoader` to load real OCO-2 XCO2, averaging kernels, a priori profiles
+- Run best 2-3 methods from Phase 19
+- Time-series generation over test period
+
+**Evaluation**:
+- Qualitative: global posterior maps, uncertainty maps
+- Quantitative (where possible): comparison to CarbonTracker analysis, TCCON stations
+- `EvaluationSuite` for available validation targets
+
+**Plots** via `run_plots()`:
+- "always" + "conditioning" + "ensemble" categories
+- Global XCO2 posterior maps
+- Uncertainty (ensemble spread) maps
+- Time series at TCCON stations (if available)
+
+### Checklist
+- [ ] Load real OCO-2 data via `OCO2DataLoader`
+- [ ] Run 2-3 methods in time-series mode via `GenerationPipeline`
+- [ ] Evaluate against CarbonTracker analysis
+- [ ] Generate publication-quality plots
+- [ ] Document results and observations
+
+---
+
+## Phase 21: Conjugate Integrators — Few-Step Conditioning
+
+*Ref: arXiv 2405.17673*
+
+- [ ] **Tests first**: Add to `test_samplers.py` parametrized tests for `ConjugateIntegratorSampler`
+- [ ] `ConjugateIntegratorSampler` in `samplers/conjugate.py`
+- [ ] Register in `SAMPLER_REGISTRY`
+- [ ] Toy OSSE gate
+- [ ] Efficiency benchmark (wall-time vs RMSE Pareto front)
+
+**Deliverable**: 5-step conditional generation. Pareto front across all methods.
+
+---
+
+## Phase 22: Advanced FM Training (W-CFM, OAT-FM)
+
+- [ ] Weighted CFM: Gibbs kernel weighting in `training_forward()`
+- [ ] Time-dependent loss weighting: `w(t) = 1/sigma(t)^2` or SNR-based
+- [ ] OAT-FM fine-tuning (optional): minimize acceleration
+- [ ] Retrain + re-evaluate all posterior methods via `AblationRunner`
+
+**Deliverable**: Training curves. Improved unconditional RMSE. Re-evaluation via `EvaluationSuite`.
+
+---
+
+## Phase 23: Conditional Flow Matching (Retraining)
+
+*Ref: Lipman et al. 2023*
+
 - [ ] +2 UNet input channels: obs_channel + mask_channel
-- [ ] Training: synthetic XCO2 from target x_1, random mask patterns, noise on obs
-- [ ] Mix conditional (80%) + unconditional (20%) for classifier-free guidance
-
-### 12b: Training
-- [ ] Fine-tune from Phase 4/11 checkpoint
-- [ ] 50k conditional + 50k mixed steps
-
-### 12c: Classifier-Free Guidance
-- [ ] `v_guided = (1+w) * v(x,t|y) - w * v(x,t|empty)`
-
-### 12d: Evaluate via osse_runner
+- [ ] Training: synthetic XCO2 from target, random masks, noise on obs
+- [ ] 50k conditional + 50k mixed steps, 80/20 conditional/unconditional
+- [ ] Classifier-free guidance: `v_guided = (1+w) * v(x,t|y) - w * v(x,t|empty)`
+- [ ] Evaluate via `EvaluationSuite`
 
 **Success**: RMSE < 3.0 ppm on column OSSE.
 
 ---
 
-## Phase 13: Grand Comparison
+## Phase 24: Grand Comparison
 
-Aggregate all phase results into publication-quality comparison.
-
-- [ ] Collect OSSEResults from Phases 5-12
+- [ ] Aggregate `EvalResult` from all methods
 - [ ] Statistical significance tests (paired t-test on per-timestep metrics)
-- [ ] **Plots**: methods x patterns heatmap, Pareto front (time vs RMSE), visual comparison grid, calibration diagrams, rank histograms, zonal mean error, per-level RMSE
-- [ ] **Experiment**: `carbonbench/.../11_grand_comparison/`
+- [ ] Publication plots via `run_plots()` with all categories
+- [ ] Experiment: `carbonbench/.../grand_comparison/`
 
 ---
 
-## Phase 14: Real OCO-2 Application
+## Phase 25: Real OCO-2 Full Application
 
-Apply best 2-3 methods to real satellite data.
-
-- [ ] Real OCO-2 via `iterative_generate_oco2()`: per-sounding AK, retrieval uncertainty
+- [ ] Apply all top methods to real satellite data via `GenerationPipeline` + `OCO2DataLoader`
 - [ ] Validate vs CarbonTracker posterior, TCCON, ObsPack surface flasks
-- [ ] **Experiment**: `carbonbench/.../12_real_oco2_posterior/`
-- [ ] **Plots**: posterior global maps + spread, station time series, XCO2 vs TCCON scatter
+- [ ] Full publication-quality evaluation
 
 ---
 
-## Phase 15: Multi-step Temporal Conditioning
+## Phase 26: Multi-step Temporal Conditioning
 
-### 15a: Sequential (autoregressive)
-- [ ] Generate step-by-step, carry posterior mean forward
-
-### 15b: Temporal consistency metrics
-- [ ] Autocorrelation, mass conservation
-
-### 15c: Sliding-window 4D-Var style (stretch goal)
+- [ ] Sequential/autoregressive generation
+- [ ] Temporal consistency metrics (autocorrelation, mass conservation)
+- [ ] Sliding-window 4D-Var style (stretch goal)
 
 ---
 
-## Phase 16: Advanced Ideas (Brainstorm)
+## Phase 27: Advanced Ideas (Brainstorm)
 
-- [ ] **Physics-informed guidance**: torchtransport as physics constraint
-- [ ] **Latent-space FM**: encoder/decoder + compressed flow matching
-- [ ] **Score distillation**: 1-step generator via consistency models
-- [ ] **Ensemble Kalman Flow**: EnKF analysis + flow particles
-- [ ] **Amortized posterior**: direct (obs, mask) -> posterior network
-- [ ] **Multi-resolution**: coarse-to-fine conditioning
-- [ ] **SWAG UQ**: Bayesian velocity model uncertainty (per turbulence paper)
+- [ ] Physics-informed guidance via torchtransport
+- [ ] Latent-space FM with encoder/decoder
+- [ ] Score distillation / consistency models
+- [ ] Ensemble Kalman Flow
+- [ ] Amortized posterior network
+- [ ] Multi-resolution conditioning
+- [ ] SWAG UQ for velocity model
 
 ---
 
-## Phase 17: Publication (ACP/GMD)
+## Phase 28: Publication (ACP/GMD)
 
 1. Introduction: CO2 inverse modeling, generative approaches
 2. Background: flow matching, OCO-2, CarbonTracker
@@ -382,48 +927,95 @@ Apply best 2-3 methods to real satellite data.
 6. Discussion: methods, physics, cost, vs 4D-Var
 7. Conclusion
 
-**Key figures**: pipeline schematic, OSSE table, visual grid, Pareto front, OCO-2 maps, TCCON scatter, calibration diagrams.
-
 ---
 
 ## Dependency Graph
 
 ```
-Phase 1 (eval infra) ──> Phase 2 (cleanup) ──> Phase 3 (toy OSSE baseline)
-                                                    │
-                                    ┌───────────────┤
-                                    v               v
-                              Phase 4 (vanilla FM)  Phase 5 (DPS guidance)
-                                    │               │
-                                    v               ├──> Phase 6 (FlowDPS)
-                              Phase 11 (adv. FM)    ├──> Phase 7 (SDE)
-                                    │               ├──> Phase 8 (FIG)
-                                    v               ├──> Phase 9 (ICTM)
-                              Phase 12 (CFM)        └──> Phase 10 (CCI)
-                                    │                       │
-                                    └───────┬───────────────┘
-                                            v
-                                      Phase 13 (comparison)
-                                            │
-                                    ┌───────┴───────┐
-                                    v               v
-                              Phase 14 (OCO-2) Phase 15 (temporal)
-                                    │               │
-                                    └───────┬───────┘
-                                            v
-                                      Phase 17 (paper)
+Phase 0 (Update implementation.md)
+  │
+Phase 1 (Test Infrastructure — TDD foundation)
+  │
+Phase 2 (Configs)
+  ├── Phase 3 (Forward Model)
+  │     ├── Phase 4 (Sampler ABC)
+  │     │     └── Phase 5 (Sampler Registry & Migration)
+  │     │           └── Phase 9 (MaskedVelocityWrapper Slim-Down)
+  │     └── Phase 10 (Metric Consolidation)
+  │           └── Phase 11 (EvaluationSuite)
+  │                 └── Phase 12 (Plot Base & Always-On)
+  │                       └── Phase 13 (Specialized Plots)
+  ├── Phase 6 (Masking Extraction)
+  │     └── Phase 7 (Noise & Spatial)
+  │           └── Phase 8 (Unified Generation Pipeline)
+  ├── Phase 14 (Inference Data Loading)
+  │     └── Phase 15 (OCO-2 Data Loading)
+  └── Phase 16 (Experiment Runner) [depends on 8 + 11 + 13 + 14]
 
-Phase 4 and Phases 5-10 can proceed in parallel after Phase 3.
-Phase 11-12 are deferred until training-free methods benchmarked.
-Each phase self-evaluates via osse_runner.
+Phase 17 (Logging & Types) — after all refactor phases
+
+Phase 18 (E2E: Training & Tuning)     ┐
+Phase 19 (E2E: OSSE + OCO-2 Mask)     ├── Validate refactored codebase
+Phase 20 (E2E: Real OCO-2 Inversion)  ┘
+
+Phases 21-28: Development & Publication
 ```
 
----
+## Lines of Code Impact (Estimated)
 
-## Verification Checklist (every phase)
+| Module | Before | After | Change |
+|--------|--------|-------|--------|
+| `flowmatching.py` (MaskedVelocityWrapper) | 770 | ~350 | -55% |
+| `generative.py` | 1031 | 0 → `generation.py` + `masking.py` + `noise.py` (~500) | -52% |
+| `posterior_samplers.py` | 702 | 0 → `samplers/*.py` (~800, DRYer) | +14% (better organized) |
+| metrics + distributional + analyse | ~820 | ~700 (in `evaluation/`) | -15% |
+| `plot_results.py` duplicate metrics | ~40 | 0 (import from evaluation) | -100% |
+| 5× `run_ablation.py` (carbonbench) | ~1800 | ~250 (5×50) | **-86%** |
+| 5× `plot_ablation.py` (carbonbench) | ~1350 | ~150 (5×30) | **-89%** |
+| New: configs, forward_model, runner, data loaders, spatial | 0 | ~700 | new |
+| Tests | ~360 | ~1200 | +233% |
 
-- [ ] **Toy OSSE gate**: passes column XCO2 constraint, no NaN, no divergence
-- [ ] **osse_runner**: metrics JSON + comparison plots auto-produced
-- [ ] Column constraint: RMSE_xco2_obs < unconditional
-- [ ] Spatial quality: roughness comparable to unconditional
-- [ ] Ensemble diversity: spread-skill ratio in [0.5, 2.0]
+## Verification Strategy
+
+After **every** phase:
+1. `pytest tests/ -m "not slow and not gpu"` — all quick tests pass
+2. `pytest tests/test_toy_column_osse.py -m quick` — toy OSSE gate passes
+3. `ruff check neural_transport/` — no linting errors
+
+Phase-specific gates:
+- After Phase 5: sampler registry creates all samplers correctly
+- After Phase 8: `GenerationPipeline.run()` matches old `iterative_generate()` output
+- After Phase 9: `MaskedVelocityWrapper` is ~100 lines
+- After Phase 13: `run_plots()` produces all expected plot files
+- After Phase 16: one carbonbench experiment produces identical metrics JSON
+- After Phase 18: trained model matches pre-refactor quality
+- After Phase 19: OSSE RMSE_xco2_obs < 75% of unconditional, spread-skill in [0.5, 2.0]
+
+## Key Files Reference
+
+**Core (neural_transport)** — files to be refactored:
+- `neural_transport/models/flowmatching.py` — FlowMatching + MaskedVelocityWrapper (770 lines)
+- `neural_transport/inference/posterior_samplers.py` — 4 sampler classes (702 lines)
+- `neural_transport/inference/generative.py` — 2 generation functions (1031 lines)
+- `neural_transport/inference/metrics.py` — evaluation metrics
+- `neural_transport/inference/distributional_metrics.py` — distributional metrics
+- `neural_transport/inference/analyse.py` — scoring dataframes (489 lines)
+- `neural_transport/plots/plot_results.py` — transport + gen plots (1721 lines)
+- `neural_transport/plots/conditioning_diagnostics.py` — conditioning plots (373 lines)
+- `neural_transport/plots/distributional_plots.py` — distribution plots (708 lines)
+- `neural_transport/plots/one_to_rule_them_all.py` — existing unified interface (162 lines)
+- `neural_transport/datamodule.py` — CarbonDataset, CarbonDataModule
+- `neural_transport/litmodule.py` — NeuralTransport Lightning module
+- `neural_transport/training/train.py` — training entry points (860 lines)
+- `neural_transport/training/gen_eval_callback.py` — generative eval callback (133 lines)
+- `neural_transport/experiments/toy_column_osse.py` — toy OSSE testbed
+- `tests/` — 4 test files (~360 lines total)
+
+**Experiments (carbonbench)** — files to be deduplicated:
+- `carbonbench/.../12_dps_guidance_ablation/{run,plot}_ablation.py`
+- `carbonbench/.../13_flowdps_ablation/{run,plot}_ablation.py`
+- `carbonbench/.../14_sde_ablation/{run,plot}_ablation.py`
+- `carbonbench/.../15_fig_ablation/{run,plot}_ablation.py`
+- `carbonbench/.../16_ictm_ablation/{run,plot}_ablation.py`
+
+**implementation.md**: `/Net/Groups/BGI/people/vbenson/CarbonBench/dryrun/neural_transport/implementation.md`
