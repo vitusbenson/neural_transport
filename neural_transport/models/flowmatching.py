@@ -726,6 +726,26 @@ class FlowMatching(RegularGridModel):
             )
             return fig_sampler.sample(x_init, time_grid, self.return_intermediates)
 
+        elif sampler == "ictm":
+            from neural_transport.inference.posterior_samplers import ICTMSampler
+
+            velocity_model = VelocityWrapper(
+                submodel=self.submodel,
+                nlev=self.nlev,
+            )
+            ictm_sampler = ICTMSampler(
+                velocity_model=velocity_model,
+                masking_config=masking_config,
+                sigma_obs=generate_kwargs.get("sigma_obs", 0.1),
+                spatial_smoothing_sigma=generate_kwargs.get("spatial_smoothing_sigma", 0.0),
+                fresh_noise=generate_kwargs.get("fresh_noise", True),
+                r_max=generate_kwargs.get("r_max", 1.0),
+                r_schedule=generate_kwargs.get("r_schedule", "decreasing"),
+                n_inner_steps=generate_kwargs.get("n_inner_steps", 1),
+                inner_lr=generate_kwargs.get("inner_lr", 0.1),
+            )
+            return ictm_sampler.sample(x_init, time_grid, self.return_intermediates)
+
         # UNet expects normalization parameters
         velocity_model = self.return_velocity_wrapper(
             submodel=self.submodel,

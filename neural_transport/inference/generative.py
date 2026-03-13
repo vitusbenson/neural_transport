@@ -666,16 +666,7 @@ def iterative_generate_oco2(
 
         dss.append(ds)
 
-    ### !!! Caution: need to fix this properly!!!
-    good_dss = []
-    for i, ds in enumerate(dss):
-        if is_bad_sample(ds[target_vars_3d[0]].values):
-            print(f"Skipping bad sample {i}")
-            continue
-        good_dss.append(ds)
-
-    ds_all = xr.concat(good_dss, dim="time")
-    ### !!!
+    ds_all = xr.concat(dss, dim="time")
 
     if save_obs:
         obs_all = xr.concat(obss, dim="time").fillna({"obs_filename": ""})
@@ -869,16 +860,7 @@ def iterative_generate(
 
         dss.append(ds)
 
-    ### !!! Caution: need to fix this properly!!!
-    good_dss = []
-    for i, ds in enumerate(dss):
-        if is_bad_sample(ds["co2massmix"].values):
-            print(f"Skipping bad sample {i}")
-            continue
-        good_dss.append(ds)
-
-    ds_all = xr.concat(good_dss, dim="sample")
-    ### !!!
+    ds_all = xr.concat(dss, dim="sample")
 
     if save_obs:
         obs_all = xr.concat(obss, dim="sample").fillna({"obs_filename": ""})

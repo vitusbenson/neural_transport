@@ -27,6 +27,7 @@ from neural_transport.experiments.toy_column_osse import (
     sample_conditioned,
     sample_fig,
     sample_flowdps,
+    sample_ictm,
     sample_sde,
     sample_unconditional,
     train_flow_matching,
@@ -72,6 +73,10 @@ RMSE_THRESHOLDS = {
     "fig_c10_k1": 100.0,
     "fig_c20_k1": 100.0,
     "fig_c10_k3": 100.0,
+    "ictm_r1.0_dec": 100.0,
+    "ictm_r0.5_dec": 100.0,
+    "ictm_r1.0_const": 100.0,
+    "ictm_r1.0_inner3": 100.0,
 }
 
 # ── Quick fixtures (tiny model, shared across quick tests) ────────────────
@@ -521,6 +526,113 @@ def test_fig_with_measurement_noise(quick_model_and_data):
     assert samples.shape == (5, ctx["nlev"], ctx["nlat"], ctx["nlon"])
     assert not torch.isnan(samples).any(), "NaN in FIG w=0.5 samples"
     assert not torch.isinf(samples).any(), "Inf in FIG w=0.5 samples"
+
+
+# ── ICTM quick tests ─────────────────────────────────────────────────────
+
+
+@pytest.mark.quick
+def test_ictm_no_nan(quick_model_and_data):
+    """ICTM samples have no NaN/Inf, correct shape, and bounded values."""
+    ctx = quick_model_and_data
+    torch.manual_seed(42)
+    masking_config = ctx["masking_config"]
+    config = {"sigma_obs": 0.1, "r_max": 1.0, "r_schedule": "decreasing"}
+    samples = sample_ictm(
+        ctx["velocity_wrapper"],
+        masking_config,
+        config,
+        5,
+        ctx["nlev"],
+        ctx["nlat"],
+        ctx["nlon"],
+        ctx["device"],
+    )
+    assert samples.shape == (5, ctx["nlev"], ctx["nlat"], ctx["nlon"])
+    assert not torch.isnan(samples).any(), "NaN in ICTM samples"
+    assert not torch.isinf(samples).any(), "Inf in ICTM samples"
+    assert samples.abs().max() < 1000, f"Divergence in ICTM: max={samples.abs().max():.1f}"
+
+
+@pytest.mark.quick
+def test_ictm_multiple_inner_steps(quick_model_and_data):
+    """ICTM with n_inner_steps=3 produces valid samples."""
+    ctx = quick_model_and_data
+    torch.manual_seed(42)
+    masking_config = ctx["masking_config"]
+    config = {"sigma_obs": 0.1, "r_max": 1.0, "n_inner_steps": 3, "inner_lr": 0.1}
+    samples = sample_ictm(
+        ctx["velocity_wrapper"],
+        masking_config,
+        config,
+        5,
+        ctx["nlev"],
+        ctx["nlat"],
+        ctx["nlon"],
+        ctx["device"],
+    )
+    assert samples.shape == (5, ctx["nlev"], ctx["nlat"], ctx["nlon"])
+    assert not torch.isnan(samples).any(), "NaN in ICTM n_inner=3 samples"
+    assert not torch.isinf(samples).any(), "Inf in ICTM n_inner=3 samples"
+
+
+@pytest.mark.quick
+def test_ictm_reduces_column_error(quick_model_and_data):
+    """ICTM XCO2 RMSE at observed locations < 1.5x unconditional RMSE."""
+    ctx = quick_model_and_data
+    masking_config = ctx["masking_config"]
+
+    # Unconditional baseline
+    torch.manual_seed(42)
+    uncond_samples = sample_unconditional(
+        ctx["velocity_wrapper"], 10, ctx["nlev"], ctx["nlat"], ctx["nlon"], ctx["device"]
+    )
+    uncond_metrics = evaluate(
+        uncond_samples, ctx["gt_norm"], ctx["obs_mask"], ctx["column_weights"], ctx["data_mean"], ctx["data_std"]
+    )
+
+    # ICTM
+    torch.manual_seed(42)
+    ictm_samples = sample_ictm(
+        ctx["velocity_wrapper"],
+        masking_config,
+        {"sigma_obs": 0.1, "r_max": 1.0, "r_schedule": "decreasing"},
+        10,
+        ctx["nlev"],
+        ctx["nlat"],
+        ctx["nlon"],
+        ctx["device"],
+    )
+    ictm_metrics = evaluate(
+        ictm_samples, ctx["gt_norm"], ctx["obs_mask"], ctx["column_weights"], ctx["data_mean"], ctx["data_std"]
+    )
+
+    assert ictm_metrics["rmse_xco2_obs"] < uncond_metrics["rmse_xco2_obs"] * 1.5, (
+        f"ICTM xco2_obs RMSE ({ictm_metrics['rmse_xco2_obs']:.4f}) should be < "
+        f"1.5x unconditional ({uncond_metrics['rmse_xco2_obs']:.4f})"
+    )
+
+
+@pytest.mark.quick
+@pytest.mark.parametrize("schedule", ["constant", "decreasing", "increasing", "cosine"])
+def test_ictm_r_schedule_variants(quick_model_and_data, schedule):
+    """All r_schedule variants produce valid samples."""
+    ctx = quick_model_and_data
+    torch.manual_seed(42)
+    masking_config = ctx["masking_config"]
+    config = {"sigma_obs": 0.1, "r_max": 1.0, "r_schedule": schedule}
+    samples = sample_ictm(
+        ctx["velocity_wrapper"],
+        masking_config,
+        config,
+        5,
+        ctx["nlev"],
+        ctx["nlat"],
+        ctx["nlon"],
+        ctx["device"],
+    )
+    assert not torch.isnan(samples).any(), f"NaN in ICTM {schedule} samples"
+    assert not torch.isinf(samples).any(), f"Inf in ICTM {schedule} samples"
 
 
 # ── Slow tests ───────────────────────────────────────────────────────────

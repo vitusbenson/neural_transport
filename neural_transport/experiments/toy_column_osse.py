@@ -28,7 +28,12 @@ from flow_matching.path.scheduler import CondOTScheduler
 from flow_matching.solver import ODESolver
 from torch.utils.data import DataLoader, TensorDataset
 
-from neural_transport.inference.posterior_samplers import FIGSampler, FlowDPSSampler, StochasticPosteriorSampler
+from neural_transport.inference.posterior_samplers import (
+    FIGSampler,
+    FlowDPSSampler,
+    ICTMSampler,
+    StochasticPosteriorSampler,
+)
 from neural_transport.models.flowmatching import MaskedVelocityWrapper, compute_ot_coupling
 
 # ── Data generation ──────────────────────────────────────────────────────
@@ -312,6 +317,27 @@ def sample_fig(model_wrapper, masking_config, generate_kwargs, n_samples, nlev, 
     return samples
 
 
+def sample_ictm(model_wrapper, masking_config, generate_kwargs, n_samples, nlev, nlat, nlon, device, steps=20):
+    """Generate conditioned samples using ICTM (Iterative Corrupted Trajectory Matching)."""
+    x_init = torch.randn(n_samples, nlev, nlat, nlon, device=device)
+    time_grid = torch.linspace(0, 1, steps, device=device)
+
+    sampler = ICTMSampler(
+        velocity_model=model_wrapper,
+        masking_config=masking_config,
+        sigma_obs=generate_kwargs.get("sigma_obs", 0.1),
+        spatial_smoothing_sigma=generate_kwargs.get("spatial_smoothing_sigma", 0.0),
+        fresh_noise=generate_kwargs.get("fresh_noise", True),
+        r_max=generate_kwargs.get("r_max", 1.0),
+        r_schedule=generate_kwargs.get("r_schedule", "decreasing"),
+        n_inner_steps=generate_kwargs.get("n_inner_steps", 1),
+        inner_lr=generate_kwargs.get("inner_lr", 0.1),
+    )
+
+    samples = sampler.sample(x_init, time_grid, return_intermediates=False)
+    return samples
+
+
 def build_masking_config(obs_mask, obs_values, data_mean, data_std, column_weights, device):
     """Build masking config for MaskedVelocityWrapper."""
     obs_mean = torch.tensor(data_mean, device=device).view(1, 1, 1, 1)
@@ -579,6 +605,11 @@ CONDITIONING_METHODS = {
     "fig_c10_k1": dict(_sampler="fig", sigma_obs=0.1, step_size_c=10.0, k_steps=1),
     "fig_c20_k1": dict(_sampler="fig", sigma_obs=0.1, step_size_c=20.0, k_steps=1),
     "fig_c10_k3": dict(_sampler="fig", sigma_obs=0.1, step_size_c=10.0, k_steps=3),
+    # ICTM (Phase 9) — Iterative Corrupted Trajectory Matching
+    "ictm_r1.0_dec": dict(_sampler="ictm", sigma_obs=0.1, r_max=1.0, r_schedule="decreasing"),
+    "ictm_r0.5_dec": dict(_sampler="ictm", sigma_obs=0.1, r_max=0.5, r_schedule="decreasing"),
+    "ictm_r1.0_const": dict(_sampler="ictm", sigma_obs=0.1, r_max=1.0, r_schedule="constant"),
+    "ictm_r1.0_inner3": dict(_sampler="ictm", sigma_obs=0.1, r_max=1.0, n_inner_steps=3, inner_lr=0.1),
 }
 
 
@@ -703,6 +734,9 @@ def run_toy_osse(
         elif sampler_type == "fig":
             masking_config = build_masking_config(obs_mask, obs_values, data_mean, data_std, column_weights, device)
             samples = sample_fig(velocity_wrapper, masking_config, config, n_samples, nlev, nlat, nlon, device)
+        elif sampler_type == "ictm":
+            masking_config = build_masking_config(obs_mask, obs_values, data_mean, data_std, column_weights, device)
+            samples = sample_ictm(velocity_wrapper, masking_config, config, n_samples, nlev, nlat, nlon, device)
         else:
             masking_config = build_masking_config(obs_mask, obs_values, data_mean, data_std, column_weights, device)
             samples = sample_conditioned(velocity_wrapper, masking_config, config, n_samples, nlev, nlat, nlon, device)

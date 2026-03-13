@@ -29,6 +29,45 @@ from neural_transport.plots.plot_results import (
 from neural_transport.tools.conversion import massmix_to_molemix
 
 
+def load_model(exp_dir, ckpt="best", device="cuda"):
+    """Load a trained NeuralTransport model from an experiment directory.
+
+    Args:
+        exp_dir: Path to experiment directory (e.g., 11_fm_unet_final/).
+            Expects checkpoints at {exp_dir}/singlestep/checkpoints/.
+        ckpt: "best" or "last".
+        device: Device to load model onto.
+
+    Returns:
+        NeuralTransport LightningModule in eval mode.
+    """
+    exp_dir = Path(exp_dir)
+    ckptdir = exp_dir / "singlestep" / "checkpoints"
+
+    if ckpt == "best":
+        # Find checkpoint with lowest val loss
+        val_ckpts = [p for p in ckptdir.glob("*.ckpt") if "LossVal" in p.name]
+        if not val_ckpts:
+            # Fallback to best.ckpt symlink
+            ckptpath = ckptdir / "best.ckpt"
+        else:
+            ckptpath = sorted(
+                val_ckpts,
+                key=lambda p: float(p.name.split("=")[-1].split(".c")[0].split("-v")[0]),
+            )[0]
+    else:
+        ckptpath = ckptdir / "last.ckpt"
+
+    if not ckptpath.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {ckptpath}")
+
+    print(f"Loading model from {ckptpath}")
+    model = NeuralTransport.load_from_checkpoint(str(ckptpath), map_location=device)
+    model = model.to(device)
+    model.eval()
+    return model
+
+
 def train_singlestep(
     run_dir,
     data_kwargs,

@@ -251,12 +251,18 @@ Measurement interpolants for theoretically-justified guidance. Euler ODE step + 
 
 **Ref**: arXiv 2405.18816
 
-Tweedie + local MAP. For linear column obs: closed-form (= FlowDPS projection). For nonlinear: inner gradient descent.
+Tweedie + local MAP with time-varying regularization r(t). For linear column obs: closed-form (= FlowDPS projection with sigma_eff = sigma_obs / r(t)). For nonlinear: inner gradient descent.
 
-- [ ] `ICTMSampler` in `posterior_samplers.py`
-- [ ] Toy OSSE gate + full OSSE
+- [x] `ICTMSampler` in `posterior_samplers.py` with r(t) schedules (constant, decreasing, increasing, cosine)
+- [x] `_linear_map_solve` (closed-form MAP for linear H) and `_nonlinear_map_solve` (gradient descent for general H)
+- [x] `sampler="ictm"` dispatch in `flowmatching.py`
+- [x] `sample_ictm()` in `toy_column_osse.py` + CONDITIONING_METHODS entries (`ictm_r1.0_dec`, `ictm_r0.5_dec`, `ictm_r1.0_const`, `ictm_r1.0_inner3`)
+- [x] 4 quick tests: no-NaN, n_inner_steps=3 valid, reduces column error, r_schedule variants
+- [x] Full-scale ablation: `16_ictm_ablation/` (r_max, r_schedule, n_inner_steps, inner_lr, sigma_obs, steps)
 
-**Deliverable**: Quality vs cost comparison with FlowDPS.
+**Deliverable**: Quality vs cost comparison with FlowDPS, SDE, FIG. Sweep over r_max, r_schedule, inner steps.
+
+**Success**: Comparable or better RMSE than FlowDPS with time-varying regularization approach.
 
 ---
 
