@@ -273,9 +273,15 @@ def score(target_path: str,
           freq: str | None = "QS",
           target_var: str | None = "co2massmix",
           generate_kwargs: dict | None = None) -> None:
+    condition_one_timestep = generate_kwargs.get("condition_one_timestep", False)
+
     co2targ, co2pred = load_pred_targ(target_path, pred_path)
-    co2pred = co2pred.isel(time=slice(1, None))
-    co2targ = co2targ.isel(time=slice(1, None)).isel(time=slice(len(co2pred.time)))
+    if condition_one_timestep:
+        co2pred = co2pred.isel(time=[0])
+        co2targ = co2targ.isel(time=[0])
+    else:
+        co2pred = co2pred.isel(time=slice(1, None))
+        co2targ = co2targ.isel(time=slice(1, None)).isel(time=slice(len(co2pred.time)))
 
     model_name = pred_path.parent.parent.parent.parent.name
     singlestep_or_rollout = pred_path.parent.parent.parent.name
@@ -335,16 +341,20 @@ def plot(
 ):
     if generate_kwargs is None:
         generate_kwargs = {}
+    condition_one_timestep = generate_kwargs.get("condition_one_timestep", False)
 
     co2targ, co2pred = load_pred_targ(target_path, pred_path)
+    if condition_one_timestep:
+        co2pred = co2pred.isel(time=[0])
+        co2targ = co2targ.isel(time=[0])
+    else:
+        co2pred = co2pred.isel(time=slice(1, None))
+        co2targ = co2targ.isel(time=slice(1, None)).isel(time=slice(len(co2pred.time)))
 
     ckpt_name = pred_path.parent.name
     plot_path = pred_path.parent.parent.parent / "plots" / ckpt_name
     score_path = pred_path.parent.parent.parent / "scores" / ckpt_name
 
-    co2pred = co2pred.isel(time=slice(1, None))
-    co2targ = co2targ.isel(time=slice(1, None))
-    co2targ = co2targ.isel(time=slice(None, len(co2pred.time)))
     co2massmix = data_kwargs['target_vars'][0]
     co2pred["co2molemix"] = massmix_to_molemix(co2pred[co2massmix])
     co2targ["co2molemix"] = massmix_to_molemix(co2targ[co2massmix])

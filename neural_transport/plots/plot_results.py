@@ -456,6 +456,8 @@ def plot_zonal_spectrum_heatmap(pred, targ, figsize=(8, 5), freq="QS", **kwargs)
     result = result.rename(rename_dict)
 
     with mpl.rc_context(mpl_rc_params):
+        if "sample" in result.dims:
+            result = result.mean("sample")
         if result.sizes.get("Lead time [days]", 0) > 1:
             result.plot(
                 cmap="Spectral",
@@ -1451,6 +1453,9 @@ def plot_masking_diagnostics(
             raise KeyError(f"{varname} not found in preds")
 
         preds_var = preds[varname]
+        print(preds_var.dims)
+        print(preds_var.shape)
+        print(preds_var.coords)
 
         fig = plot_obs_mask_and_samples_x(
             batch,

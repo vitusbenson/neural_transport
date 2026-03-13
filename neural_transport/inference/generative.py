@@ -618,7 +618,7 @@ def iterative_generate(
     save_obs=True,
     **generate_kwargs,
 ):
-    condition_one_timestep = generate_kwargs.get("condition_one_timestep", True)
+    condition_one_timestep = generate_kwargs.get("condition_one_timestep", False)
     n_samples = generate_kwargs.get("n_samples", 10)
     masking = generate_kwargs.get("masking", False)
     mask_pattern = generate_kwargs.get("mask_pattern", "vertical")
@@ -704,9 +704,11 @@ def iterative_generate(
             trajectory_steps=("trajectory_steps", np.arange(traj.shape[1]) if traj.ndim > 0 else [0]),
             sample=("sample", [i]),
         )   
-        time_value = prototype_zarr.isel(time=i).time.values  ### time=0 for condition_one_timestep=True but this breaks the plotting functions.
-        time_coords = [time_value]
-        ds = ds.expand_dims(time=time_coords)
+        if condition_one_timestep:
+            time_value = prototype_zarr.isel(time=0).time.values
+        else:
+            time_value = prototype_zarr.isel(time=i).time.values
+        ds = ds.expand_dims(time=[time_value])
 
         if remap:
             ds = remap_with_cdo(dataset, prototype_zarr.isel(time=0), ds)
@@ -718,6 +720,9 @@ def iterative_generate(
 
         dss.append(ds)
 
+        if i == 0 and analyze_masking and masking:
+            batch_analyze = batch
+
     ### !!! Caution: need to fix this properly!!!
     good_dss = []
     for i, ds in enumerate(dss):
@@ -726,21 +731,26 @@ def iterative_generate(
             continue
         good_dss.append(ds)
 
-    ds_all = xr.concat(good_dss, dim="sample")
+    if condition_one_timestep:
+        ds_all = xr.concat(good_dss, dim="sample")
+    else:
+        ds_all = xr.concat(good_dss, dim="time")
     ### !!!
 
     if save_obs:
-        obs_all = xr.concat(obss, dim="sample").fillna({"obs_filename": ""})
+        if condition_one_timestep:
+            obs_all = xr.concat(obss, dim="sample").fillna({"obs_filename": ""})
+        else:
+            obs_all = xr.concat(obss, dim="time").fillna({"obs_filename": ""})
         obs_all.to_zarr(obspath, mode="w")
         ds_all = ds_all.fillna({"obs_filename": ""})
 
     ds_all.to_zarr(zarrpath, mode="w")
 
     if analyze_masking and masking:
-        plot_masking_diagnostics(batch, ds_all,
+        plot_masking_diagnostics(batch_analyze, ds_all,
                                  str(outpath).replace("preds", "plots"),
                                  varnames=target_vars_3d, nlat=nlat, nlon=nlon,
                                  imgformats=["png"])
 
     return ds_all
-        
