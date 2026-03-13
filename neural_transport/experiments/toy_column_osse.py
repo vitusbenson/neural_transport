@@ -28,7 +28,7 @@ from flow_matching.path.scheduler import CondOTScheduler
 from flow_matching.solver import ODESolver
 from torch.utils.data import DataLoader, TensorDataset
 
-from neural_transport.inference.posterior_samplers import FlowDPSSampler, StochasticPosteriorSampler
+from neural_transport.inference.posterior_samplers import FIGSampler, FlowDPSSampler, StochasticPosteriorSampler
 from neural_transport.models.flowmatching import MaskedVelocityWrapper, compute_ot_coupling
 
 # ── Data generation ──────────────────────────────────────────────────────
@@ -286,6 +286,26 @@ def sample_sde(model_wrapper, masking_config, generate_kwargs, n_samples, nlev, 
         corrector_step_size=generate_kwargs.get("corrector_step_size", 0.01),
         corrector_snr=generate_kwargs.get("corrector_snr", 0.16),
         use_projection=generate_kwargs.get("use_projection", True),
+    )
+
+    samples = sampler.sample(x_init, time_grid, return_intermediates=False)
+    return samples
+
+
+def sample_fig(model_wrapper, masking_config, generate_kwargs, n_samples, nlev, nlat, nlon, device, steps=20):
+    """Generate conditioned samples using FIG (Flow with Interpolant Guidance)."""
+    x_init = torch.randn(n_samples, nlev, nlat, nlon, device=device)
+    time_grid = torch.linspace(0, 1, steps, device=device)
+
+    sampler = FIGSampler(
+        velocity_model=model_wrapper,
+        masking_config=masking_config,
+        sigma_obs=generate_kwargs.get("sigma_obs", 0.1),
+        spatial_smoothing_sigma=generate_kwargs.get("spatial_smoothing_sigma", 0.0),
+        k_steps=generate_kwargs.get("k_steps", 1),
+        step_size_c=generate_kwargs.get("step_size_c", 10.0),
+        noise_scale_w=generate_kwargs.get("noise_scale_w", 0.0),
+        skip_first_last=generate_kwargs.get("skip_first_last", True),
     )
 
     samples = sampler.sample(x_init, time_grid, return_intermediates=False)
@@ -555,6 +575,10 @@ CONDITIONING_METHODS = {
     # Predictor-Corrector (Phase 7)
     "pc_c1_s0.3": dict(_sampler="sde", sigma_obs=0.1, sigma_max=0.3, n_corrector_steps=1, corrector_step_size=0.01),
     "pc_c3_s0.3": dict(_sampler="sde", sigma_obs=0.1, sigma_max=0.3, n_corrector_steps=3, corrector_step_size=0.01),
+    # FIG (Phase 8) — Flow with Interpolant Guidance
+    "fig_c10_k1": dict(_sampler="fig", sigma_obs=0.1, step_size_c=10.0, k_steps=1),
+    "fig_c20_k1": dict(_sampler="fig", sigma_obs=0.1, step_size_c=20.0, k_steps=1),
+    "fig_c10_k3": dict(_sampler="fig", sigma_obs=0.1, step_size_c=10.0, k_steps=3),
 }
 
 
@@ -676,6 +700,9 @@ def run_toy_osse(
         elif sampler_type == "sde":
             masking_config = build_masking_config(obs_mask, obs_values, data_mean, data_std, column_weights, device)
             samples = sample_sde(velocity_wrapper, masking_config, config, n_samples, nlev, nlat, nlon, device)
+        elif sampler_type == "fig":
+            masking_config = build_masking_config(obs_mask, obs_values, data_mean, data_std, column_weights, device)
+            samples = sample_fig(velocity_wrapper, masking_config, config, n_samples, nlev, nlat, nlon, device)
         else:
             masking_config = build_masking_config(obs_mask, obs_values, data_mean, data_std, column_weights, device)
             samples = sample_conditioned(velocity_wrapper, masking_config, config, n_samples, nlev, nlat, nlon, device)

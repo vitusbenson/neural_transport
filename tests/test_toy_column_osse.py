@@ -25,6 +25,7 @@ from neural_transport.experiments.toy_column_osse import (
     get_column_weights,
     run_toy_osse,
     sample_conditioned,
+    sample_fig,
     sample_flowdps,
     sample_sde,
     sample_unconditional,
@@ -68,6 +69,9 @@ RMSE_THRESHOLDS = {
     "sde_s1.0": 100.0,
     "pc_c1_s0.3": 100.0,
     "pc_c3_s0.3": 100.0,
+    "fig_c10_k1": 100.0,
+    "fig_c20_k1": 100.0,
+    "fig_c10_k3": 100.0,
 }
 
 # ── Quick fixtures (tiny model, shared across quick tests) ────────────────
@@ -410,6 +414,113 @@ def test_sde_sigma_zero_matches_flowdps(quick_model_and_data):
     assert torch.allclose(sde_samples, flowdps_samples, atol=1e-5), (
         f"SDE(sigma=0) should match FlowDPS. Max diff: {(sde_samples - flowdps_samples).abs().max():.6f}"
     )
+
+
+# ── FIG quick tests ──────────────────────────────────────────────────────
+
+
+@pytest.mark.quick
+def test_fig_no_nan(quick_model_and_data):
+    """FIG samples have no NaN/Inf, correct shape, and bounded values."""
+    ctx = quick_model_and_data
+    torch.manual_seed(42)
+    masking_config = ctx["masking_config"]
+    config = {"sigma_obs": 0.1, "step_size_c": 10.0, "k_steps": 1}
+    samples = sample_fig(
+        ctx["velocity_wrapper"],
+        masking_config,
+        config,
+        5,
+        ctx["nlev"],
+        ctx["nlat"],
+        ctx["nlon"],
+        ctx["device"],
+    )
+    assert samples.shape == (5, ctx["nlev"], ctx["nlat"], ctx["nlon"])
+    assert not torch.isnan(samples).any(), "NaN in FIG samples"
+    assert not torch.isinf(samples).any(), "Inf in FIG samples"
+    assert samples.abs().max() < 1000, f"Divergence in FIG: max={samples.abs().max():.1f}"
+
+
+@pytest.mark.quick
+def test_fig_multiple_correction_steps(quick_model_and_data):
+    """FIG with k=3 correction steps produces valid samples."""
+    ctx = quick_model_and_data
+    torch.manual_seed(42)
+    masking_config = ctx["masking_config"]
+    config = {"sigma_obs": 0.1, "step_size_c": 10.0, "k_steps": 3}
+    samples = sample_fig(
+        ctx["velocity_wrapper"],
+        masking_config,
+        config,
+        5,
+        ctx["nlev"],
+        ctx["nlat"],
+        ctx["nlon"],
+        ctx["device"],
+    )
+    assert samples.shape == (5, ctx["nlev"], ctx["nlat"], ctx["nlon"])
+    assert not torch.isnan(samples).any(), "NaN in FIG k=3 samples"
+    assert not torch.isinf(samples).any(), "Inf in FIG k=3 samples"
+
+
+@pytest.mark.quick
+def test_fig_reduces_column_error(quick_model_and_data):
+    """FIG XCO2 RMSE at observed locations < 1.5x unconditional RMSE."""
+    ctx = quick_model_and_data
+    masking_config = ctx["masking_config"]
+
+    # Unconditional baseline
+    torch.manual_seed(42)
+    uncond_samples = sample_unconditional(
+        ctx["velocity_wrapper"], 10, ctx["nlev"], ctx["nlat"], ctx["nlon"], ctx["device"]
+    )
+    uncond_metrics = evaluate(
+        uncond_samples, ctx["gt_norm"], ctx["obs_mask"], ctx["column_weights"], ctx["data_mean"], ctx["data_std"]
+    )
+
+    # FIG
+    torch.manual_seed(42)
+    fig_samples = sample_fig(
+        ctx["velocity_wrapper"],
+        masking_config,
+        {"sigma_obs": 0.1, "step_size_c": 10.0, "k_steps": 1},
+        10,
+        ctx["nlev"],
+        ctx["nlat"],
+        ctx["nlon"],
+        ctx["device"],
+    )
+    fig_metrics = evaluate(
+        fig_samples, ctx["gt_norm"], ctx["obs_mask"], ctx["column_weights"], ctx["data_mean"], ctx["data_std"]
+    )
+
+    assert fig_metrics["rmse_xco2_obs"] < uncond_metrics["rmse_xco2_obs"] * 1.5, (
+        f"FIG xco2_obs RMSE ({fig_metrics['rmse_xco2_obs']:.4f}) should be < "
+        f"1.5x unconditional ({uncond_metrics['rmse_xco2_obs']:.4f})"
+    )
+
+
+@pytest.mark.quick
+def test_fig_with_measurement_noise(quick_model_and_data):
+    """FIG with measurement interpolant noise (w=0.5) produces valid samples."""
+    ctx = quick_model_and_data
+    torch.manual_seed(42)
+    masking_config = ctx["masking_config"]
+    config = {"sigma_obs": 0.1, "step_size_c": 10.0, "k_steps": 1, "noise_scale_w": 0.5}
+    samples = sample_fig(
+        ctx["velocity_wrapper"],
+        masking_config,
+        config,
+        5,
+        ctx["nlev"],
+        ctx["nlat"],
+        ctx["nlon"],
+        ctx["device"],
+    )
+    assert samples.shape == (5, ctx["nlev"], ctx["nlat"], ctx["nlon"])
+    assert not torch.isnan(samples).any(), "NaN in FIG w=0.5 samples"
+    assert not torch.isinf(samples).any(), "Inf in FIG w=0.5 samples"
 
 
 # ── Slow tests ───────────────────────────────────────────────────────────

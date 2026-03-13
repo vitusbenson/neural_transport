@@ -707,6 +707,25 @@ class FlowMatching(RegularGridModel):
             )
             return sde_sampler.sample(x_init, time_grid, self.return_intermediates)
 
+        elif sampler == "fig":
+            from neural_transport.inference.posterior_samplers import FIGSampler
+
+            velocity_model = VelocityWrapper(
+                submodel=self.submodel,
+                nlev=self.nlev,
+            )
+            fig_sampler = FIGSampler(
+                velocity_model=velocity_model,
+                masking_config=masking_config,
+                sigma_obs=generate_kwargs.get("sigma_obs", 0.1),
+                spatial_smoothing_sigma=generate_kwargs.get("spatial_smoothing_sigma", 0.0),
+                k_steps=generate_kwargs.get("k_steps", 1),
+                step_size_c=generate_kwargs.get("step_size_c", 10.0),
+                noise_scale_w=generate_kwargs.get("noise_scale_w", 0.0),
+                skip_first_last=generate_kwargs.get("skip_first_last", True),
+            )
+            return fig_sampler.sample(x_init, time_grid, self.return_intermediates)
+
         # UNet expects normalization parameters
         velocity_model = self.return_velocity_wrapper(
             submodel=self.submodel,

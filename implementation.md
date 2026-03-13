@@ -229,15 +229,21 @@ ODE = deterministic given noise. SDE = noise injection for better posterior expl
 
 ## Phase 8: FIG — Flow with Interpolant Guidance
 
-**Ref**: Ricci et al.
+**Ref**: Ricci et al. (ICLR 2025)
 
-Measurement interpolants for theoretically-justified guidance. Modifies velocity directly (no re-noising).
+Measurement interpolants for theoretically-justified guidance. Euler ODE step + gradient correction via measurement interpolant that ramps from noise to observation.
 
-- [ ] `FIGSampler` in `posterior_samplers.py`
-- [ ] Unconditional step + conditional correction via measurement interpolant
-- [ ] Toy OSSE gate + full OSSE
+- [x] `FIGSampler` in `posterior_samplers.py` — Euler step + analytical gradient correction
+- [x] Measurement interpolant: `y_t = next_t * y + w * (1-t) * H(noise)`
+- [x] K gradient corrections with `(1-t)/t` scheduling, `skip_first_last` option
+- [x] Dispatch in `flowmatching.py` (`sampler="fig"`)
+- [x] `sample_fig()` in `toy_column_osse.py` + CONDITIONING_METHODS entries (`fig_c10_k1`, `fig_c20_k1`, `fig_c10_k3`)
+- [x] 4 quick tests: no-NaN, k=3 valid, reduces column error, measurement noise w=0.5
+- [x] Full-scale ablation: `15_fig_ablation/` (step_size_c, k_steps, noise_scale_w, sigma_obs, steps, skip_first_last)
 
-**Deliverable**: FIG vs FlowDPS vs DPS vs SDE comparison. Correction magnitude over time.
+**Deliverable**: FIG vs FlowDPS vs SDE comparison. Sweep over step size, correction steps, noise scale.
+
+**Success**: Comparable or better RMSE than FlowDPS with different conditioning approach.
 
 ---
 
