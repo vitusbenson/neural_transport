@@ -11,6 +11,7 @@ from flow_matching.path.scheduler import CondOTScheduler
 from flow_matching.solver import ODESolver
 
 # neural_transport
+from neural_transport.configs import DT_FALLBACK
 from neural_transport.models import MODELS
 from neural_transport.models.regulargrid import RegularGridModel
 
@@ -232,7 +233,7 @@ class MaskedVelocityWrapper(VelocityWrapper):
             else:
                 dt = self.time_grid[idx] - self.time_grid[idx - 1]
         else:
-            dt = 0.1  # fallback
+            dt = DT_FALLBACK
         return dt
 
     def masking_simple(self, x):

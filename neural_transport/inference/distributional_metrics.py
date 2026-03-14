@@ -8,6 +8,8 @@ import numpy as np
 from scipy.spatial.distance import cdist
 from scipy.stats import wasserstein_distance
 
+from neural_transport.configs import MAX_N_DISTRIBUTIONAL
+
 
 def remove_spatial_mean(fields):
     """Remove per-sample spatial mean.
@@ -47,7 +49,7 @@ def energy_distance(samples_p, samples_q):
 
     # E[||X-Y||] - 0.5*E[||X-X'||] - 0.5*E[||Y-Y'||]
     # Use subset for efficiency if large
-    max_n = min(200, len(p), len(q))
+    max_n = min(MAX_N_DISTRIBUTIONAL, len(p), len(q))
     if len(p) > max_n:
         idx = np.random.choice(len(p), max_n, replace=False)
         p = p[idx]
@@ -76,7 +78,7 @@ def mmd_rbf(samples_p, samples_q, bandwidth="median"):
     p = _flatten_samples(samples_p).astype(np.float64)
     q = _flatten_samples(samples_q).astype(np.float64)
 
-    max_n = min(200, len(p), len(q))
+    max_n = min(MAX_N_DISTRIBUTIONAL, len(p), len(q))
     if len(p) > max_n:
         p = p[np.random.choice(len(p), max_n, replace=False)]
     if len(q) > max_n:
@@ -306,7 +308,7 @@ def coverage_density(real, gen, k=5):
     gen_flat = _flatten_samples(gen).astype(np.float64)
 
     # Subsample if too large
-    max_n = 200
+    max_n = MAX_N_DISTRIBUTIONAL
     if len(real_flat) > max_n:
         real_flat = real_flat[np.random.choice(len(real_flat), max_n, replace=False)]
     if len(gen_flat) > max_n:
@@ -350,7 +352,7 @@ def vendi_score(samples, kernel="rbf"):
     """
     flat = _flatten_samples(samples).astype(np.float64)
 
-    max_n = 200
+    max_n = MAX_N_DISTRIBUTIONAL
     if len(flat) > max_n:
         flat = flat[np.random.choice(len(flat), max_n, replace=False)]
 

@@ -7,6 +7,7 @@ import xarray as xr
 from cdo import Cdo
 from tqdm import tqdm
 
+from neural_transport.configs import DEFAULT_T, SATELLITE_TILT_RAD, SWATH_SPACING_FACTOR
 from neural_transport.plots.plot_results import plot_masking_diagnostics, plot_noise_diagnostics
 from neural_transport.tools.conversion import molemix_to_massmix
 
@@ -385,10 +386,10 @@ def create_column_mask(
             obs_indices = grid[mask2d].reshape(-1)
         elif mask_pattern == "satellite":
             grid = torch.arange(N, device=device).reshape(nlat, nlon)
-            swath_width = max(1, int(obs_fraction * nlon / 8))
-            tilt = -5 * np.pi / 180.0
+            swath_width = max(1, int(obs_fraction * nlon / SWATH_SPACING_FACTOR))
+            tilt = SATELLITE_TILT_RAD
             cols = []
-            for i in range(0, nlon, swath_width * 8):
+            for i in range(0, nlon, swath_width * SWATH_SPACING_FACTOR):
                 for w in range(swath_width):
                     col_idx = i + w
                     if col_idx < nlon:
@@ -466,11 +467,11 @@ def create_mask(batch, target_var="co2massmix", obs_fraction=0.1, mask_pattern="
             # grid = [nlat, nlon]
             grid = torch.arange(N, device=device).reshape(nlat, nlon)
             # choose swath width (fraction of nlon)
-            swath_width = max(1, int(obs_fraction * nlon / 8))
+            swath_width = max(1, int(obs_fraction * nlon / SWATH_SPACING_FACTOR))
             # tilt angle in radians (small tilt)
-            tilt = -5 * np.pi / 180.0
+            tilt = SATELLITE_TILT_RAD
             cols = []
-            for i in range(0, nlon, swath_width * 8):  # spacing between swaths
+            for i in range(0, nlon, swath_width * SWATH_SPACING_FACTOR):  # spacing between swaths
                 for w in range(swath_width):
                     col_idx = i + w
                     if col_idx < nlon:
@@ -575,7 +576,7 @@ def iterative_generate_oco2(
     dss = []
     obss = []
     if mask_pattern is None:
-        T = 5
+        T = DEFAULT_T
         # T = len(dataset_gen)
     else:
         T = min(len(dataset), len(dataset_gen))

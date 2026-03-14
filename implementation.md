@@ -128,13 +128,13 @@ Key dataclasses:
 Each class: `from_dict()`, `to_dict()`, `merge(overrides: dict)`, YAML serialization support.
 
 ### Checklist
-- [ ] **Tests first**: Write `tests/test_configs.py` — serialization roundtrip, defaults, merge with nested overrides, validation (e.g. sampler name must be in known set), YAML round-trip
-- [ ] Implement `configs.py` with all dataclasses
-- [ ] Extract all magic numbers from `generative.py` (satellite tilt `-5*π/180`, swath width `obs_fraction*nlon/8`, `T=5` default) and `flowmatching.py` (`dt=0.1` fallback) into `MaskingConstants` / `GenerateConfig`
-- [ ] Add `compat_to_generate_kwargs()` bridge: `GenerateConfig → dict` for backward compat
-- [ ] Add `compat_from_generate_kwargs()` bridge: `dict → GenerateConfig`
-- [ ] Update `toy_column_osse.py` to use configs as proof-of-concept
-- [ ] All existing tests still pass
+- [x] **Tests first**: Write `tests/test_configs.py` — serialization roundtrip, defaults, merge with nested overrides, validation (e.g. sampler name must be in known set), YAML round-trip
+- [x] Implement `configs.py` with all dataclasses
+- [x] Extract all magic numbers from `generative.py` (satellite tilt `-5*π/180`, swath width `obs_fraction*nlon/8`, `T=5` default) and `flowmatching.py` (`dt=0.1` fallback) into `MaskingConstants` / `GenerateConfig`
+- [x] Add `compat_to_generate_kwargs()` bridge: `GenerateConfig → dict` for backward compat
+- [x] Add `compat_from_generate_kwargs()` bridge: `dict → GenerateConfig`
+- [x] Update `toy_column_osse.py` to use configs as proof-of-concept
+- [x] All existing tests still pass
 
 ---
 

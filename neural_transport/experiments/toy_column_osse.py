@@ -28,6 +28,12 @@ from flow_matching.path.scheduler import CondOTScheduler
 from flow_matching.solver import ODESolver
 from torch.utils.data import DataLoader, TensorDataset
 
+from neural_transport.configs import (
+    ConditioningConfig,
+    GenerateConfig,
+    SamplerParams,
+    compat_to_generate_kwargs,
+)
 from neural_transport.inference.posterior_samplers import (
     FIGSampler,
     FlowDPSSampler,
@@ -497,119 +503,137 @@ def plot_results(all_results, gt_field, obs_mask, column_weights, data_mean, dat
 
 # ── Main ────────────────────────────────────────────────────────────────
 
+
+def _col_cond(**kwargs):
+    """Shorthand: ConditioningConfig with masking=True, total_column_average_simple."""
+    defaults = dict(masking=True, masking_method="total_column_average_simple")
+    defaults.update(kwargs)
+    return ConditioningConfig(**defaults)
+
+
 CONDITIONING_METHODS = {
-    "unconditional": dict(_unconditional=True),
-    "correction": dict(
-        conditioning_mode="correction",
-        masking_method="total_column_average_simple",
-        masking_time=None,
+    "unconditional": GenerateConfig(),  # no sampler, no conditioning
+    "correction": GenerateConfig(
+        conditioning=_col_cond(conditioning_mode="correction"),
     ),
-    "correction_late": dict(
-        conditioning_mode="correction",
-        masking_method="total_column_average_simple",
-        masking_time="smooth_late_masking",
-        t_threshold=0.8,
+    "correction_late": GenerateConfig(
+        conditioning=_col_cond(conditioning_mode="correction", masking_time="smooth_late_masking", t_threshold=0.8),
     ),
-    "velocity_proj_late": dict(
-        conditioning_mode="velocity_projection",
-        masking_method="total_column_average_simple",
-        masking_time="smooth_late_masking",
-        t_threshold=0.8,
+    "velocity_proj_late": GenerateConfig(
+        conditioning=_col_cond(
+            conditioning_mode="velocity_projection", masking_time="smooth_late_masking", t_threshold=0.8
+        ),
     ),
-    "guidance_0.5": dict(
-        conditioning_mode="guidance",
-        guidance_scale=0.5,
-        masking_method="total_column_average_simple",
-        masking_time=None,
+    "guidance_0.5": GenerateConfig(
+        conditioning=_col_cond(conditioning_mode="guidance", guidance_scale=0.5),
     ),
-    "guidance_1": dict(
-        conditioning_mode="guidance",
-        guidance_scale=1.0,
-        masking_method="total_column_average_simple",
-        masking_time=None,
+    "guidance_1": GenerateConfig(
+        conditioning=_col_cond(conditioning_mode="guidance", guidance_scale=1.0),
     ),
-    "guidance_1_late": dict(
-        conditioning_mode="guidance",
-        guidance_scale=1.0,
-        masking_method="total_column_average_simple",
-        masking_time="smooth_late_masking",
-        t_threshold=0.8,
+    "guidance_1_late": GenerateConfig(
+        conditioning=_col_cond(
+            conditioning_mode="guidance", guidance_scale=1.0, masking_time="smooth_late_masking", t_threshold=0.8
+        ),
     ),
-    "repaint_late": dict(
-        conditioning_mode="repaint",
-        masking_method="total_column_average_simple",
-        masking_time="smooth_late_masking",
-        t_threshold=0.8,
+    "repaint_late": GenerateConfig(
+        conditioning=_col_cond(conditioning_mode="repaint", masking_time="smooth_late_masking", t_threshold=0.8),
     ),
     # DPS guidance ablation (Phase 5)
-    "dps_s1.0": dict(
-        conditioning_mode="guidance",
-        guidance_scale=1.0,
-        masking_method="total_column_average_simple",
-        sigma_obs=1.0,
+    "dps_s1.0": GenerateConfig(
+        sampler_params=SamplerParams(sigma_obs=1.0),
+        conditioning=_col_cond(conditioning_mode="guidance", guidance_scale=1.0),
     ),
-    "dps_s0.5": dict(
-        conditioning_mode="guidance",
-        guidance_scale=1.0,
-        masking_method="total_column_average_simple",
-        sigma_obs=0.5,
+    "dps_s0.5": GenerateConfig(
+        sampler_params=SamplerParams(sigma_obs=0.5),
+        conditioning=_col_cond(conditioning_mode="guidance", guidance_scale=1.0),
     ),
-    "dps_s0.1": dict(
-        conditioning_mode="guidance",
-        guidance_scale=1.0,
-        masking_method="total_column_average_simple",
-        sigma_obs=0.1,
+    "dps_s0.1": GenerateConfig(
+        sampler_params=SamplerParams(sigma_obs=0.1),
+        conditioning=_col_cond(conditioning_mode="guidance", guidance_scale=1.0),
     ),
-    "dps_s0.5_smooth2": dict(
-        conditioning_mode="guidance",
-        guidance_scale=1.0,
-        masking_method="total_column_average_simple",
-        sigma_obs=0.5,
-        spatial_smoothing_sigma=2.0,
+    "dps_s0.5_smooth2": GenerateConfig(
+        sampler_params=SamplerParams(sigma_obs=0.5, spatial_smoothing_sigma=2.0),
+        conditioning=_col_cond(conditioning_mode="guidance", guidance_scale=1.0),
     ),
-    "dps_s0.5_smooth2_late": dict(
-        conditioning_mode="guidance",
-        guidance_scale=1.0,
-        masking_method="total_column_average_simple",
-        sigma_obs=0.5,
-        spatial_smoothing_sigma=2.0,
-        masking_time="smooth_late_masking",
-        t_threshold=0.8,
+    "dps_s0.5_smooth2_late": GenerateConfig(
+        sampler_params=SamplerParams(sigma_obs=0.5, spatial_smoothing_sigma=2.0),
+        conditioning=_col_cond(
+            conditioning_mode="guidance", guidance_scale=1.0, masking_time="smooth_late_masking", t_threshold=0.8
+        ),
     ),
     # FlowDPS (Phase 6) — projection-based posterior sampling
-    "flowdps_s0.1": dict(
-        _sampler="flowdps",
-        sigma_obs=0.1,
+    "flowdps_s0.1": GenerateConfig(
+        sampler="flowdps",
+        sampler_params=SamplerParams(sigma_obs=0.1),
+        conditioning=_col_cond(),
     ),
-    "flowdps_s0.5": dict(
-        _sampler="flowdps",
-        sigma_obs=0.5,
+    "flowdps_s0.5": GenerateConfig(
+        sampler="flowdps",
+        sampler_params=SamplerParams(sigma_obs=0.5),
+        conditioning=_col_cond(),
     ),
-    "flowdps_s1.0": dict(
-        _sampler="flowdps",
-        sigma_obs=1.0,
+    "flowdps_s1.0": GenerateConfig(
+        sampler="flowdps",
+        sampler_params=SamplerParams(sigma_obs=1.0),
+        conditioning=_col_cond(),
     ),
-    "flowdps_s0.1_smooth2": dict(
-        _sampler="flowdps",
-        sigma_obs=0.1,
-        spatial_smoothing_sigma=2.0,
+    "flowdps_s0.1_smooth2": GenerateConfig(
+        sampler="flowdps",
+        sampler_params=SamplerParams(sigma_obs=0.1, spatial_smoothing_sigma=2.0),
+        conditioning=_col_cond(),
     ),
     # SDE (Phase 7) -- stochastic posterior sampling with FlowDPS projection
-    "sde_s0.3": dict(_sampler="sde", sigma_obs=0.1, sigma_max=0.3),
-    "sde_s0.5": dict(_sampler="sde", sigma_obs=0.1, sigma_max=0.5),
-    "sde_s1.0": dict(_sampler="sde", sigma_obs=0.1, sigma_max=1.0),
+    "sde_s0.3": GenerateConfig(
+        sampler="sde",
+        sampler_params=SamplerParams(sigma_obs=0.1, sigma_max=0.3),
+    ),
+    "sde_s0.5": GenerateConfig(
+        sampler="sde",
+        sampler_params=SamplerParams(sigma_obs=0.1, sigma_max=0.5),
+    ),
+    "sde_s1.0": GenerateConfig(
+        sampler="sde",
+        sampler_params=SamplerParams(sigma_obs=0.1, sigma_max=1.0),
+    ),
     # Predictor-Corrector (Phase 7)
-    "pc_c1_s0.3": dict(_sampler="sde", sigma_obs=0.1, sigma_max=0.3, n_corrector_steps=1, corrector_step_size=0.01),
-    "pc_c3_s0.3": dict(_sampler="sde", sigma_obs=0.1, sigma_max=0.3, n_corrector_steps=3, corrector_step_size=0.01),
+    "pc_c1_s0.3": GenerateConfig(
+        sampler="sde",
+        sampler_params=SamplerParams(sigma_obs=0.1, sigma_max=0.3, n_corrector_steps=1, corrector_step_size=0.01),
+    ),
+    "pc_c3_s0.3": GenerateConfig(
+        sampler="sde",
+        sampler_params=SamplerParams(sigma_obs=0.1, sigma_max=0.3, n_corrector_steps=3, corrector_step_size=0.01),
+    ),
     # FIG (Phase 8) — Flow with Interpolant Guidance
-    "fig_c10_k1": dict(_sampler="fig", sigma_obs=0.1, step_size_c=10.0, k_steps=1),
-    "fig_c20_k1": dict(_sampler="fig", sigma_obs=0.1, step_size_c=20.0, k_steps=1),
-    "fig_c10_k3": dict(_sampler="fig", sigma_obs=0.1, step_size_c=10.0, k_steps=3),
+    "fig_c10_k1": GenerateConfig(
+        sampler="fig",
+        sampler_params=SamplerParams(sigma_obs=0.1, step_size_c=10.0, k_steps=1),
+    ),
+    "fig_c20_k1": GenerateConfig(
+        sampler="fig",
+        sampler_params=SamplerParams(sigma_obs=0.1, step_size_c=20.0, k_steps=1),
+    ),
+    "fig_c10_k3": GenerateConfig(
+        sampler="fig",
+        sampler_params=SamplerParams(sigma_obs=0.1, step_size_c=10.0, k_steps=3),
+    ),
     # ICTM (Phase 9) — Iterative Corrupted Trajectory Matching
-    "ictm_r1.0_dec": dict(_sampler="ictm", sigma_obs=0.1, r_max=1.0, r_schedule="decreasing"),
-    "ictm_r0.5_dec": dict(_sampler="ictm", sigma_obs=0.1, r_max=0.5, r_schedule="decreasing"),
-    "ictm_r1.0_const": dict(_sampler="ictm", sigma_obs=0.1, r_max=1.0, r_schedule="constant"),
-    "ictm_r1.0_inner3": dict(_sampler="ictm", sigma_obs=0.1, r_max=1.0, n_inner_steps=3, inner_lr=0.1),
+    "ictm_r1.0_dec": GenerateConfig(
+        sampler="ictm",
+        sampler_params=SamplerParams(sigma_obs=0.1, r_max=1.0, r_schedule="decreasing"),
+    ),
+    "ictm_r0.5_dec": GenerateConfig(
+        sampler="ictm",
+        sampler_params=SamplerParams(sigma_obs=0.1, r_max=0.5, r_schedule="decreasing"),
+    ),
+    "ictm_r1.0_const": GenerateConfig(
+        sampler="ictm",
+        sampler_params=SamplerParams(sigma_obs=0.1, r_max=1.0, r_schedule="constant"),
+    ),
+    "ictm_r1.0_inner3": GenerateConfig(
+        sampler="ictm",
+        sampler_params=SamplerParams(sigma_obs=0.1, r_max=1.0, n_inner_steps=3, inner_lr=0.1),
+    ),
 }
 
 
@@ -715,11 +739,11 @@ def run_toy_osse(
     # 5. Test each conditioning method
     all_results = {}
 
-    for method_name, method_config in selected.items():
+    for method_name, gen_config in selected.items():
         print(f"\nTesting: {method_name}")
-        config = {k: v for k, v in method_config.items()}
-        is_unconditional = config.pop("_unconditional", False)
-        sampler_type = config.pop("_sampler", None)
+        generate_kwargs = compat_to_generate_kwargs(gen_config)
+        is_unconditional = gen_config.sampler is None and not gen_config.conditioning.masking
+        sampler_type = gen_config.sampler
 
         torch.manual_seed(42)
 
@@ -727,19 +751,25 @@ def run_toy_osse(
             samples = sample_unconditional(velocity_wrapper, n_samples, nlev, nlat, nlon, device)
         elif sampler_type == "flowdps":
             masking_config = build_masking_config(obs_mask, obs_values, data_mean, data_std, column_weights, device)
-            samples = sample_flowdps(velocity_wrapper, masking_config, config, n_samples, nlev, nlat, nlon, device)
+            samples = sample_flowdps(
+                velocity_wrapper, masking_config, generate_kwargs, n_samples, nlev, nlat, nlon, device
+            )
         elif sampler_type == "sde":
             masking_config = build_masking_config(obs_mask, obs_values, data_mean, data_std, column_weights, device)
-            samples = sample_sde(velocity_wrapper, masking_config, config, n_samples, nlev, nlat, nlon, device)
+            samples = sample_sde(velocity_wrapper, masking_config, generate_kwargs, n_samples, nlev, nlat, nlon, device)
         elif sampler_type == "fig":
             masking_config = build_masking_config(obs_mask, obs_values, data_mean, data_std, column_weights, device)
-            samples = sample_fig(velocity_wrapper, masking_config, config, n_samples, nlev, nlat, nlon, device)
+            samples = sample_fig(velocity_wrapper, masking_config, generate_kwargs, n_samples, nlev, nlat, nlon, device)
         elif sampler_type == "ictm":
             masking_config = build_masking_config(obs_mask, obs_values, data_mean, data_std, column_weights, device)
-            samples = sample_ictm(velocity_wrapper, masking_config, config, n_samples, nlev, nlat, nlon, device)
+            samples = sample_ictm(
+                velocity_wrapper, masking_config, generate_kwargs, n_samples, nlev, nlat, nlon, device
+            )
         else:
             masking_config = build_masking_config(obs_mask, obs_values, data_mean, data_std, column_weights, device)
-            samples = sample_conditioned(velocity_wrapper, masking_config, config, n_samples, nlev, nlat, nlon, device)
+            samples = sample_conditioned(
+                velocity_wrapper, masking_config, generate_kwargs, n_samples, nlev, nlat, nlon, device
+            )
 
         metrics = evaluate(samples, gt_norm, obs_mask, column_weights, data_mean, data_std)
         all_results[method_name] = {"samples": samples.cpu(), "metrics": metrics}
