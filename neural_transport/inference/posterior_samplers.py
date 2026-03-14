@@ -9,6 +9,7 @@ This REPLACES the ODE solver loop — no velocity integration.
 
 import torch
 
+from neural_transport.forward_model import XCO2ForwardModel
 from neural_transport.models.flowmatching import _gaussian_smooth_2d
 
 
@@ -47,41 +48,7 @@ class FlowDPSSampler:
         self.co2_profile_prior = masking_config.get("co2_profile_prior", None)
         self.targshift_mean = masking_config.get("targshift_mean", None)
 
-    def _get_h_ak(self, x):
-        """Return h*ak as a tensor [B, nlev, Nlat, Nlon] (or broadcastable).
-
-        When pressure_weights and ak are None, returns uniform 1/nlev tensor.
-        """
-        nlev = x.shape[1]
-        h = self.pressure_weights
-        if h is None:
-            h = 1.0 / nlev
-        if self.ak is not None:
-            return h * self.ak
-        else:
-            return torch.full((1, nlev, 1, 1), 1.0 / nlev, device=x.device, dtype=x.dtype)
-
-    def compute_xco2(self, x):
-        """OCO-2 forward model: XCO2 = xco2_prior + sum(h * a * (x - x_prior)).
-
-        Copied from MaskedVelocityWrapper.compute_xco2 for consistency.
-        """
-        h = self.pressure_weights
-        if h is None:
-            h = 1.0 / x.shape[1]
-
-        if self.xco2_prior is not None and self.co2_profile_prior is not None:
-            x_corrected = x + self.targshift_mean if self.targshift_mean is not None else x
-            x_phys = x_corrected * self.target_std + self.target_mean
-            xco2 = self.xco2_prior + (h * self.ak * (x_phys - self.co2_profile_prior)).sum(dim=1, keepdim=True)
-            return (xco2 - self.obs_mean) / self.obs_std
-        else:
-            h_ak = self._get_h_ak(x)
-            h_ak_sum = h_ak.sum(dim=1, keepdim=True).clamp(min=1e-12)
-            result = (h_ak * x).sum(dim=1, keepdim=True) + (self.target_mean / self.target_std) * (h_ak_sum - 1.0)
-            if self.targshift_mean is not None:
-                result = result + self.targshift_mean * h_ak_sum
-            return result
+        self.forward_model = XCO2ForwardModel.from_masking_config(masking_config)
 
     def _tweedie_estimate(self, x_t, t, v_theta):
         """Tweedie denoising estimate: x_hat_1 = x_t + (1 - t) * v_theta(x_t, t).
@@ -95,29 +62,15 @@ class FlowDPSSampler:
     def _project_column(self, x_hat):
         """Project Tweedie estimate onto column measurement manifold.
 
-        x_hat_k += (h_k * a_k) * (y - H(x_hat)) / (||h*a||_2^2 + sigma^2)
-
-        Only modifies at observed locations (via obs_mask).
+        Delegates to self.forward_model.project().
         """
-        h_ak = self._get_h_ak(x_hat)
-
-        # Forward model: H(x_hat)
-        xco2_hat = self.compute_xco2(x_hat)  # [B, 1, Nlat, Nlon]
-
-        # Column error: y - H(x_hat), zeroed at unobserved locations
-        obs_safe = torch.where(self.obs_mask, self.obs_values.detach(), torch.zeros_like(xco2_hat))
-        column_error = torch.where(self.obs_mask, obs_safe - xco2_hat, torch.zeros_like(xco2_hat))
-
-        # Optional spatial smoothing of column error
-        if self.spatial_smoothing_sigma > 0:
-            column_error = _gaussian_smooth_2d(column_error, self.spatial_smoothing_sigma)
-
-        # Denominator: sum_j (h_j * a_j)^2 per spatial location
-        h_ak_sq_sum = (h_ak**2).sum(dim=1, keepdim=True)
-        denom = h_ak_sq_sum + self.sigma_obs**2
-
-        correction = h_ak * column_error / denom
-        return x_hat + correction
+        return self.forward_model.project(
+            x_hat,
+            self.obs_values,
+            self.obs_mask,
+            self.sigma_obs,
+            self.spatial_smoothing_sigma,
+        )
 
     def _renoise(self, x_hat_proj, t_next, z):
         """Re-noise: x_{t+1} = (1 - t_{n+1}) * z + t_{n+1} * x_hat_proj.
@@ -255,26 +208,13 @@ class ICTMSampler:
         Same as FlowDPS projection but with sigma_eff = sigma_obs / r(t).
         """
         sigma_eff = self.sigma_obs / self.r(t)
-
-        h_ak = self.flowdps._get_h_ak(x_hat)
-
-        # Forward model: H(x_hat)
-        xco2_hat = self.flowdps.compute_xco2(x_hat)
-
-        # Column error at observed locations
-        obs_safe = torch.where(self.flowdps.obs_mask, self.flowdps.obs_values.detach(), torch.zeros_like(xco2_hat))
-        column_error = torch.where(self.flowdps.obs_mask, obs_safe - xco2_hat, torch.zeros_like(xco2_hat))
-
-        # Optional spatial smoothing
-        if self.spatial_smoothing_sigma > 0:
-            column_error = _gaussian_smooth_2d(column_error, self.spatial_smoothing_sigma)
-
-        # Denominator with effective sigma
-        h_ak_sq_sum = (h_ak**2).sum(dim=1, keepdim=True)
-        denom = h_ak_sq_sum + sigma_eff**2
-
-        correction = h_ak * column_error / denom
-        return x_hat + correction
+        return self.flowdps.forward_model.project(
+            x_hat,
+            self.flowdps.obs_values,
+            self.flowdps.obs_mask,
+            sigma_eff,
+            self.spatial_smoothing_sigma,
+        )
 
     def _nonlinear_map_solve(self, x_hat, t):
         """Gradient descent MAP solve for general (nonlinear) forward model H.
@@ -282,14 +222,14 @@ class ICTMSampler:
         Minimizes: ||H(x) - y||^2 / (2*sigma_obs^2) + ||x - x_hat||^2 / (2*r(t)^2)
         """
         r_t = self.r(t)
-
-        h_ak = self.flowdps._get_h_ak(x_hat)
+        fm = self.flowdps.forward_model
+        h_ak = fm._get_h_ak_for_x(x_hat)
 
         x = x_hat.clone()
 
         for _ in range(self.n_inner_steps):
             # Observation gradient: H^T(H(x) - y) / sigma_obs^2
-            xco2_x = self.flowdps.compute_xco2(x)
+            xco2_x = fm.forward(x)
             obs_safe = torch.where(self.flowdps.obs_mask, self.flowdps.obs_values.detach(), torch.zeros_like(xco2_x))
             column_error = torch.where(self.flowdps.obs_mask, xco2_x - obs_safe, torch.zeros_like(xco2_x))
 
@@ -464,9 +404,10 @@ class StochasticPosteriorSampler:
             # Likelihood gradient (same as DPS Phase 5)
             x_hat = self.flowdps._tweedie_estimate(x_t, t_tensor, v_theta)
 
-            h_ak = self.flowdps._get_h_ak(x_t)
+            fm = self.flowdps.forward_model
+            h_ak = fm._get_h_ak_for_x(x_t)
 
-            xco2_hat = self.flowdps.compute_xco2(x_hat)
+            xco2_hat = fm.forward(x_hat)
             obs_safe = torch.where(self.flowdps.obs_mask, self.flowdps.obs_values.detach(), torch.zeros_like(xco2_hat))
             column_error = torch.where(self.flowdps.obs_mask, obs_safe - xco2_hat, torch.zeros_like(xco2_hat))
 
@@ -603,7 +544,7 @@ class FIGSampler:
 
         Smoothly ramps from noise toward the true observation as t -> 1.
         """
-        h_noise = self.flowdps.compute_xco2(noise)  # [B, 1, Nlat, Nlon]
+        h_noise = self.flowdps.forward_model.forward(noise)  # [B, 1, Nlat, Nlon]
         return next_t * y + self.noise_scale_w * (1.0 - t) * h_noise
 
     def _compute_gradient(self, x, y_t):
@@ -612,11 +553,13 @@ class FIGSampler:
         grad_k = h_k * a_k * (H(x) - y_t) / (||h*a||^2 + sigma_obs^2)
 
         Only applies at observed locations (via obs_mask).
+        Note: FIG uses H(x) - y_t (positive error sign), so cannot use project() directly.
         """
-        h_ak = self.flowdps._get_h_ak(x)
+        fm = self.flowdps.forward_model
+        h_ak = fm._get_h_ak_for_x(x)
 
         # Forward model: H(x)
-        xco2_x = self.flowdps.compute_xco2(x)  # [B, 1, Nlat, Nlon]
+        xco2_x = fm.forward(x)  # [B, 1, Nlat, Nlon]
 
         # Column error at observed locations: H(x) - y_t
         column_error = torch.where(

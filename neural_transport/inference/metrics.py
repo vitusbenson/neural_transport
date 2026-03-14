@@ -25,6 +25,10 @@ def compute_xco2_column(field, pressure_weights, ak):
 
     XCO2 = sum(h_k * a_k * x_k) over levels axis.
 
+    This is the simple NumPy/physical-space version. For the full normalized
+    PyTorch forward model (with prior correction, targshift, obs normalization),
+    see :class:`neural_transport.forward_model.XCO2ForwardModel`.
+
     Parameters
     ----------
     field : np.ndarray, shape [..., nlev]

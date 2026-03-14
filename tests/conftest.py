@@ -91,3 +91,11 @@ def sample_masking_config(synthetic_pressure_weights, synthetic_averaging_kernel
         "xco2_prior": xco2_prior,
         "co2_profile_prior": co2_profile_prior,
     }
+
+
+@pytest.fixture
+def sample_forward_model(sample_masking_config):
+    """XCO2ForwardModel built from sample_masking_config."""
+    from neural_transport.forward_model import XCO2ForwardModel
+
+    return XCO2ForwardModel.from_masking_config(sample_masking_config)

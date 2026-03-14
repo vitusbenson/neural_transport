@@ -164,17 +164,17 @@ class XCO2ForwardModel:
 ```
 
 ### Checklist
-- [ ] **Tests first**: Extend `tests/test_forward_model.py`:
+- [x] **Tests first**: Extend `tests/test_forward_model.py`:
   - Roundtrip: `H(project(x, y)) ≈ y` at observed locations
   - Linearity: `H(ax + by) = aH(x) + bH(y)`
   - Projection idempotence: `project(project(x)) ≈ project(x)`
   - NumPy/PyTorch parity: `forward(x).numpy() ≈ forward_numpy(x.numpy())`
   - `from_masking_config` produces identical results to current `compute_xco2`
-- [ ] Implement `XCO2ForwardModel` in `forward_model.py`
-- [ ] Refactor `MaskedVelocityWrapper.compute_xco2` to delegate to `XCO2ForwardModel`
-- [ ] Refactor all 4 samplers to use shared `forward_model.project()`
-- [ ] Refactor `metrics.py` `compute_xco2_column` to wrap `forward_model.forward_numpy()`
-- [ ] All existing tests still pass
+- [x] Implement `XCO2ForwardModel` in `forward_model.py`
+- [x] Refactor `MaskedVelocityWrapper.compute_xco2` to delegate to `XCO2ForwardModel`
+- [x] Refactor all 4 samplers to use shared `forward_model.project()`
+- [x] Refactor `metrics.py` `compute_xco2_column` — kept as-is (simple NumPy one-liner), added cross-reference docstring
+- [x] All existing tests still pass (40 in test_forward_model.py, 100 total quick suite)
 
 ---
 

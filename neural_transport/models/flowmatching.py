@@ -12,6 +12,7 @@ from flow_matching.solver import ODESolver
 
 # neural_transport
 from neural_transport.configs import DT_FALLBACK
+from neural_transport.forward_model import XCO2ForwardModel
 from neural_transport.models import MODELS
 from neural_transport.models.regulargrid import RegularGridModel
 
@@ -71,31 +72,16 @@ class MaskedVelocityWrapper(VelocityWrapper):
         self.sigma_obs = generate_kwargs.get("sigma_obs", 1.0)
         self.spatial_smoothing_sigma = generate_kwargs.get("spatial_smoothing_sigma", 0.0)
 
+        self.forward_model = XCO2ForwardModel.from_masking_config(masking_config)
+
     def compute_xco2(self, x):
         """OCO-2 forward model: XCO2 = xco2_prior + sum(h * a * (x - x_prior)).
 
         h = pressure_weights (h_k = dp_k / p_surface), a = averaging kernel.
         Returns XCO2 in normalized observation space.
+        Delegates to self.forward_model.forward().
         """
-        h = self.pressure_weights
-        if h is None:
-            h = 1.0 / x.shape[1]
-
-        if self.xco2_prior is not None and self.co2_profile_prior is not None:
-            # Correct for targshift: when targshift is active, x is shifted by
-            # the batch spatial mean, so x * std + mean doesn't recover physical values.
-            # We need to add back the targshift_mean to get the true normalized value.
-            x_corrected = x + self.targshift_mean if self.targshift_mean is not None else x
-            x_phys = x_corrected * self.target_std + self.target_mean
-            xco2 = self.xco2_prior + (h * self.ak * (x_phys - self.co2_profile_prior)).sum(dim=1, keepdim=True)
-            return (xco2 - self.obs_mean) / self.obs_std
-        else:
-            h_ak = h * self.ak if self.ak is not None else h
-            h_ak_sum = h_ak.sum(dim=1, keepdim=True).clamp(min=1e-12)
-            result = (h_ak * x).sum(dim=1, keepdim=True) + (self.target_mean / self.target_std) * (h_ak_sum - 1.0)
-            if self.targshift_mean is not None:
-                result = result + self.targshift_mean * h_ak_sum
-            return result
+        return self.forward_model.forward(x)
 
     def forward(self, x, t):
         if self.conditioning_mode == "velocity_projection":
@@ -149,8 +135,7 @@ class MaskedVelocityWrapper(VelocityWrapper):
         v = super().forward(x, t)  # learned velocity on UNMODIFIED state
 
         if self.ak is not None:
-            h = self.pressure_weights if self.pressure_weights is not None else 1.0 / x.shape[1]
-            h_ak = h * self.ak
+            h_ak = self.forward_model._get_h_ak_for_x(x)
             xco2 = self.compute_xco2(x)
             # Use torch.where to avoid NaN from obs_values at unobserved locations
             obs_safe = torch.where(self.obs_mask, self.obs_values.detach(), torch.zeros_like(xco2))

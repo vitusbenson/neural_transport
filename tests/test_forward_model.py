@@ -1,9 +1,11 @@
-"""Unit tests for MaskedVelocityWrapper: compute_xco2 and guidance fixes."""
+"""Unit tests for MaskedVelocityWrapper and XCO2ForwardModel."""
 
+import numpy as np
 import pytest
 import torch
 from conftest import MockSubmodel
 
+from neural_transport.forward_model import XCO2ForwardModel
 from neural_transport.models.flowmatching import MaskedVelocityWrapper, _gaussian_smooth_2d
 
 
@@ -341,3 +343,293 @@ class TestSpatialSmoothingSigma:
         t = torch.tensor(0.5)
         v = wrapper.forward(x_norm, t)
         assert not torch.isnan(v).any()
+
+
+# ── XCO2ForwardModel tests ──────────────────────────────────────────────
+
+
+class TestXCO2ForwardModelConstruction:
+    def test_from_masking_config(self, sample_masking_config):
+        """from_masking_config() creates a valid model."""
+        fm = XCO2ForwardModel.from_masking_config(sample_masking_config)
+        assert fm.has_priors
+        assert fm.h_ak is not None
+        assert fm.pressure_weights is not None
+        assert fm.ak is not None
+
+    def test_minimal_construction(self):
+        """Minimal construction with just pw + ak."""
+        pw = torch.tensor([0.5, 0.5]).view(1, 2, 1, 1)
+        ak = torch.tensor([1.0, 1.0]).view(1, 2, 1, 1)
+        fm = XCO2ForwardModel(pressure_weights=pw, ak=ak)
+        assert not fm.has_priors
+        assert fm.h_ak is not None
+
+    def test_uniform_weights_with_nlev(self):
+        """When pressure_weights is None, uses 1/nlev if nlev provided."""
+        ak = torch.tensor([1.0, 1.0, 1.0]).view(1, 3, 1, 1)
+        fm = XCO2ForwardModel(pressure_weights=None, ak=ak, nlev=3)
+        expected_h_ak = (1.0 / 3.0) * ak
+        assert torch.allclose(fm.h_ak, expected_h_ak)
+
+
+class TestXCO2ForwardModelParityWithWrapper:
+    """forward() matches MaskedVelocityWrapper.compute_xco2() exactly."""
+
+    def test_parity_with_prior(self):
+        """With-prior path matches wrapper."""
+        wrapper, x_norm, _ = _make_wrapper(use_prior=True)
+        fm = XCO2ForwardModel.from_masking_config(
+            {
+                "pressure_weights": wrapper.pressure_weights,
+                "ak": wrapper.ak,
+                "xco2_prior": wrapper.xco2_prior,
+                "co2_profile_prior": wrapper.co2_profile_prior,
+                "obs_mean": wrapper.obs_mean,
+                "obs_std": wrapper.obs_std,
+                "target_mean": wrapper.target_mean,
+                "target_std": wrapper.target_std,
+                "targshift_mean": wrapper.targshift_mean,
+            }
+        )
+        expected = wrapper.compute_xco2(x_norm)
+        actual = fm.forward(x_norm)
+        assert torch.allclose(actual, expected, atol=1e-7), f"Max error: {(actual - expected).abs().max().item()}"
+
+    def test_parity_fallback(self):
+        """Fallback (no prior) path matches wrapper."""
+        wrapper, x_norm, _ = _make_wrapper(use_prior=False)
+        fm = XCO2ForwardModel.from_masking_config(
+            {
+                "pressure_weights": wrapper.pressure_weights,
+                "ak": wrapper.ak,
+                "xco2_prior": None,
+                "co2_profile_prior": None,
+                "obs_mean": wrapper.obs_mean,
+                "obs_std": wrapper.obs_std,
+                "target_mean": wrapper.target_mean,
+                "target_std": wrapper.target_std,
+                "targshift_mean": wrapper.targshift_mean,
+            }
+        )
+        expected = wrapper.compute_xco2(x_norm)
+        actual = fm.forward(x_norm)
+        assert torch.allclose(actual, expected, atol=1e-7), f"Max error: {(actual - expected).abs().max().item()}"
+
+    def test_parity_with_targshift(self):
+        """With-prior + targshift path matches wrapper."""
+        targshift_mean = torch.tensor(0.3).view(1, 1, 1, 1)
+        wrapper, x_norm, _ = _make_wrapper(use_prior=True, targshift_mean=targshift_mean)
+        fm = XCO2ForwardModel.from_masking_config(
+            {
+                "pressure_weights": wrapper.pressure_weights,
+                "ak": wrapper.ak,
+                "xco2_prior": wrapper.xco2_prior,
+                "co2_profile_prior": wrapper.co2_profile_prior,
+                "obs_mean": wrapper.obs_mean,
+                "obs_std": wrapper.obs_std,
+                "target_mean": wrapper.target_mean,
+                "target_std": wrapper.target_std,
+                "targshift_mean": wrapper.targshift_mean,
+            }
+        )
+        x_shifted = x_norm - targshift_mean
+        expected = wrapper.compute_xco2(x_shifted)
+        actual = fm.forward(x_shifted)
+        assert torch.allclose(actual, expected, atol=1e-7)
+
+
+class TestXCO2ForwardModelParityWithFlowDPS:
+    """FlowDPSSampler.forward_model.forward() matches standalone XCO2ForwardModel."""
+
+    def test_parity_with_prior(self, sample_masking_config):
+        from neural_transport.inference.posterior_samplers import FlowDPSSampler
+
+        velocity_model = MockSubmodel(nlev=5)
+        sampler = FlowDPSSampler(velocity_model, sample_masking_config)
+        fm = XCO2ForwardModel.from_masking_config(sample_masking_config)
+
+        torch.manual_seed(99)
+        x = torch.randn(2, 5, 4, 8)
+        expected = sampler.forward_model.forward(x)
+        actual = fm.forward(x)
+        assert torch.allclose(actual, expected, atol=1e-7), f"Max error: {(actual - expected).abs().max().item()}"
+
+    def test_parity_fallback(self):
+        from neural_transport.inference.posterior_samplers import FlowDPSSampler
+
+        B, nlev, nlat, nlon = 2, 5, 4, 8
+        pw = torch.tensor([0.4, 0.25, 0.15, 0.12, 0.08]).view(1, nlev, 1, 1).expand(B, nlev, nlat, nlon)
+        ak = torch.tensor([0.95, 0.85, 0.60, 0.30, 0.10]).view(1, nlev, 1, 1).expand(B, nlev, nlat, nlon)
+        config = {
+            "obs_mask": torch.ones(B, 1, nlat, nlon, dtype=torch.bool),
+            "obs_values": torch.zeros(B, 1, nlat, nlon),
+            "obs_mean": None,
+            "obs_std": None,
+            "target_mean": torch.tensor(400.0).view(1, 1, 1, 1),
+            "target_std": torch.tensor(5.0).view(1, 1, 1, 1),
+            "ak": ak,
+            "pressure_weights": pw,
+            "xco2_prior": None,
+            "co2_profile_prior": None,
+            "targshift_mean": None,
+        }
+        velocity_model = MockSubmodel(nlev=5)
+        sampler = FlowDPSSampler(velocity_model, config)
+        fm = XCO2ForwardModel.from_masking_config(config)
+
+        torch.manual_seed(99)
+        x = torch.randn(B, nlev, nlat, nlon)
+        expected = sampler.forward_model.forward(x)
+        actual = fm.forward(x)
+        assert torch.allclose(actual, expected, atol=1e-7)
+
+
+class TestXCO2ForwardModelLinearity:
+    def test_linearity_fallback(self):
+        """H(a*x1 + b*x2) == a*H(x1) + b*H(x2) for fallback path (no priors, no targshift)."""
+        pw = torch.tensor([0.4, 0.25, 0.15, 0.12, 0.08]).view(1, 5, 1, 1)
+        ak = torch.tensor([0.95, 0.85, 0.60, 0.30, 0.10]).view(1, 5, 1, 1)
+        fm = XCO2ForwardModel(
+            pressure_weights=pw,
+            ak=ak,
+            target_mean=torch.zeros(1, 1, 1, 1),
+            target_std=torch.ones(1, 1, 1, 1),
+        )
+
+        torch.manual_seed(42)
+        x1 = torch.randn(2, 5, 4, 8)
+        x2 = torch.randn(2, 5, 4, 8)
+        a, b = 0.7, 0.3
+
+        lhs = fm.forward(a * x1 + b * x2)
+        rhs = a * fm.forward(x1) + b * fm.forward(x2)
+        assert torch.allclose(lhs, rhs, atol=1e-6), f"Max error: {(lhs - rhs).abs().max().item()}"
+
+    def test_affine_linearity_with_prior(self):
+        """With-prior path is affine: H(a*x1+(1-a)*x2) == a*H(x1)+(1-a)*H(x2)."""
+        wrapper, _, _ = _make_wrapper(use_prior=True)
+        fm = XCO2ForwardModel.from_masking_config(
+            {
+                "pressure_weights": wrapper.pressure_weights,
+                "ak": wrapper.ak,
+                "xco2_prior": wrapper.xco2_prior,
+                "co2_profile_prior": wrapper.co2_profile_prior,
+                "obs_mean": wrapper.obs_mean,
+                "obs_std": wrapper.obs_std,
+                "target_mean": wrapper.target_mean,
+                "target_std": wrapper.target_std,
+                "targshift_mean": None,
+            }
+        )
+
+        torch.manual_seed(42)
+        x1 = torch.randn(2, 5, 4, 4)
+        x2 = torch.randn(2, 5, 4, 4)
+        a = 0.6
+
+        lhs = fm.forward(a * x1 + (1 - a) * x2)
+        rhs = a * fm.forward(x1) + (1 - a) * fm.forward(x2)
+        assert torch.allclose(lhs, rhs, atol=1e-5), f"Max error: {(lhs - rhs).abs().max().item()}"
+
+
+class TestXCO2ForwardModelProjection:
+    def test_projection_reduces_error(self):
+        """|y - H(project(x))| < |y - H(x)| at observed locations."""
+        wrapper, x_norm, x_phys = _make_wrapper(use_prior=True)
+        fm = XCO2ForwardModel.from_masking_config(
+            {
+                "pressure_weights": wrapper.pressure_weights,
+                "ak": wrapper.ak,
+                "xco2_prior": wrapper.xco2_prior,
+                "co2_profile_prior": wrapper.co2_profile_prior,
+                "obs_mean": wrapper.obs_mean,
+                "obs_std": wrapper.obs_std,
+                "target_mean": wrapper.target_mean,
+                "target_std": wrapper.target_std,
+                "targshift_mean": None,
+            }
+        )
+
+        # Add noise to create a gap between H(x) and obs
+        x_noisy = x_norm + 0.5 * torch.randn_like(x_norm)
+        y = wrapper.obs_values
+        mask = wrapper.obs_mask
+
+        error_before = (y - fm.forward(x_noisy)).abs()
+        x_proj = fm.project(x_noisy, y, mask, sigma=0.1)
+        error_after = (y - fm.forward(x_proj)).abs()
+
+        # Error should decrease at observed locations
+        obs_error_before = error_before[mask].mean()
+        obs_error_after = error_after[mask].mean()
+        assert obs_error_after < obs_error_before, (
+            f"Projection didn't reduce error: {obs_error_after:.6f} >= {obs_error_before:.6f}"
+        )
+
+    def test_projection_idempotence(self):
+        """project(project(x)) ≈ project(x)."""
+        wrapper, x_norm, _ = _make_wrapper(use_prior=True)
+        fm = XCO2ForwardModel.from_masking_config(
+            {
+                "pressure_weights": wrapper.pressure_weights,
+                "ak": wrapper.ak,
+                "xco2_prior": wrapper.xco2_prior,
+                "co2_profile_prior": wrapper.co2_profile_prior,
+                "obs_mean": wrapper.obs_mean,
+                "obs_std": wrapper.obs_std,
+                "target_mean": wrapper.target_mean,
+                "target_std": wrapper.target_std,
+                "targshift_mean": None,
+            }
+        )
+
+        y = wrapper.obs_values
+        mask = wrapper.obs_mask
+
+        x_proj1 = fm.project(x_norm, y, mask, sigma=0.01)
+        x_proj2 = fm.project(x_proj1, y, mask, sigma=0.01)
+        assert torch.allclose(x_proj1, x_proj2, atol=1e-4), f"Max diff: {(x_proj1 - x_proj2).abs().max().item()}"
+
+
+class TestXCO2ForwardModelNumPyParity:
+    def test_numpy_pytorch_parity(self):
+        """forward_numpy(x_np) ≈ forward(x_torch).numpy() for simple case."""
+        B, nlev, nlat, nlon = 1, 5, 4, 8
+        pw = torch.tensor([0.4, 0.25, 0.15, 0.12, 0.08]).view(1, nlev, 1, 1).expand(B, nlev, nlat, nlon)
+        ak = torch.tensor([0.95, 0.85, 0.60, 0.30, 0.10]).view(1, nlev, 1, 1).expand(B, nlev, nlat, nlon)
+
+        fm = XCO2ForwardModel(pressure_weights=pw, ak=ak)
+
+        torch.manual_seed(42)
+        x_torch = 400.0 + 2.0 * torch.randn(B, nlev, nlat, nlon)
+        x_np = x_torch.numpy()
+
+        # PyTorch forward (simple sum, no normalization — use forward_numpy equivalent)
+        result_np = fm.forward_numpy(x_np, levels_axis=1)
+
+        # Manual PyTorch computation for comparison
+        result_torch = (pw * ak * x_torch).sum(dim=1).numpy()
+
+        np.testing.assert_allclose(result_np, result_torch, atol=1e-5)
+
+    def test_forward_numpy_matches_metrics(self):
+        """forward_numpy matches metrics.compute_xco2_column for levels-last data."""
+        from neural_transport.inference.metrics import compute_xco2_column
+
+        nlat, nlon, nlev = 4, 8, 5
+        pw_np = np.array([0.4, 0.25, 0.15, 0.12, 0.08]).reshape(1, 1, nlev)
+        ak_np = np.array([0.95, 0.85, 0.60, 0.30, 0.10]).reshape(1, 1, nlev)
+
+        np.random.seed(42)
+        x_np = 400.0 + 2.0 * np.random.randn(nlat, nlon, nlev)
+
+        expected = compute_xco2_column(x_np, pw_np, ak_np)
+
+        # forward_numpy with levels_axis=-1
+        pw_torch = torch.tensor(pw_np.reshape(1, 1, nlev))
+        ak_torch = torch.tensor(ak_np.reshape(1, 1, nlev))
+        fm = XCO2ForwardModel(pressure_weights=pw_torch, ak=ak_torch)
+        actual = fm.forward_numpy(x_np, levels_axis=-1)
+
+        np.testing.assert_allclose(actual, expected, atol=1e-10)
