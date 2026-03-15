@@ -273,10 +273,10 @@ def score(target_path: str,
           freq: str | None = "QS",
           target_var: str | None = "co2massmix",
           generate_kwargs: dict | None = None) -> None:
-    condition_one_timestep = generate_kwargs.get("condition_one_timestep", False)
+    n_steps = generate_kwargs.get("n_timesteps", 5)
 
     co2targ, co2pred = load_pred_targ(target_path, pred_path)
-    if condition_one_timestep:
+    if n_steps == 1:
         co2pred = co2pred.isel(time=[0])
         co2targ = co2targ.isel(time=[0])
     else:
@@ -341,10 +341,10 @@ def plot(
 ):
     if generate_kwargs is None:
         generate_kwargs = {}
-    condition_one_timestep = generate_kwargs.get("condition_one_timestep", False)
+    n_timesteps = generate_kwargs.get("n_timesteps", 5)
 
     co2targ, co2pred = load_pred_targ(target_path, pred_path)
-    if condition_one_timestep:
+    if n_timesteps == 1:
         co2pred = co2pred.isel(time=[0])
         co2targ = co2targ.isel(time=[0])
     else:
@@ -359,6 +359,13 @@ def plot(
     co2pred["co2molemix"] = massmix_to_molemix(co2pred[co2massmix])
     co2targ["co2molemix"] = massmix_to_molemix(co2targ[co2massmix])
 
+    if "trajectory_steps" in co2pred.dims:
+        co2pred = co2pred.isel(trajectory_steps=-1).drop("trajectory_steps")
+    ### Start of debug
+    print("\nDEBUG plotting")
+    print(f"co2pred time: {co2pred.time.values}")
+    print(f"co2targ time: {co2targ.time.values}")
+    ### End of debug
     plot_path.mkdir(parents=True, exist_ok=True)
     if "metrics" in plot_types:
         plot_metrics(co2pred, co2targ, plot_path, imgformats=["pdf"])

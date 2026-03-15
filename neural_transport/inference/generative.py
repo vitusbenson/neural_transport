@@ -150,7 +150,7 @@ def generate_noise(batch, target_var="co2massmix", n_samples=10, noise_pattern=N
         raise ValueError(f"Unknown noise type: {noise_pattern}")
 
 
-def get_batches(t, offset, dataset, dataset_gen, window_steps, device):
+def get_batches(t: int, offset: int, dataset: dict, dataset_gen: dict, window_steps: int, device: torch.device):
     """
     Collect batches over a time window.
     For sparse observation variables (target_vars_2d, xco2*): union all non-NaN observations
@@ -180,6 +180,12 @@ def get_batches(t, offset, dataset, dataset_gen, window_steps, device):
         batch_gen[k] = torch.nanmean(torch.stack([b[k] for b in batch_gen_list], dim=0), dim=0)
 
     return batch, batch_gen
+
+
+def get_batch(t: int, dataset: dict, device: torch.device):
+    """Get batch from dataset for time t and move to device."""
+    batch = {k: v.unsqueeze(0).to(device) for k, v in dataset[t].items()}
+    return batch
 
 
 def noise(batch: dict,
@@ -495,7 +501,8 @@ def iterative_generate_oco2(
 
         # Noise
         noise_list = noise(dataset_gen[0],  # only shape matters
-                           target_var=generate_kwargs["generate_data_kwargs"]["forcing_vars"][0],n_samples=n_samples,
+                           target_var=generate_kwargs["generate_data_kwargs"]["forcing_vars"][0],
+                           n_samples=n_samples,
                            noise_pattern=noise_pattern,
                            analyze_noise=analyze_noise,
                            outpath=outpath)
@@ -533,6 +540,7 @@ def iterative_generate_oco2(
         for k in batch.keys():
             batch[k] = batch[k].expand(n_samples, -1, -1, -1)  # [B=n_samples T N C]
         batch["noise"] = torch.cat(noise_list, dim=0).to(device)  # [B=n_samples T N C]
+
         if zero_surfflux:
             for var in ["co2flux_anthro", "co2flux_land", "co2flux_ocean"]:
                 batch[var] = torch.zeros_like(batch[var])
@@ -618,7 +626,7 @@ def iterative_generate(
     save_obs=True,
     **generate_kwargs,
 ):
-    condition_one_timestep = generate_kwargs.get("condition_one_timestep", False)
+    n_timesteps = generate_kwargs.get("n_timesteps", 5)
     n_samples = generate_kwargs.get("n_samples", 10)
     masking = generate_kwargs.get("masking", False)
     mask_pattern = generate_kwargs.get("mask_pattern", "vertical")
@@ -645,37 +653,30 @@ def iterative_generate(
     dss = []
     obss = []
 
-    # Noise
-    noise_list = noise(dataset[0],
-                       target_var=target_vars_3d[0],
-                       n_samples=n_samples,
-                       noise_pattern=noise_pattern,
-                       analyze_noise=analyze_noise,
-                       outpath=outpath)
+    for t in tqdm(range(n_timesteps), desc="Generating samples") if verbose else range(n_timesteps):
+        # batches: dict of tensors [B T N C] conditioned on different timesteps
+        base_batch = get_batch(t, dataset, device)
 
-    if condition_one_timestep:
-        base_batch = {k: v.unsqueeze(0).to(device) for k, v in dataset[0].items()} # condition on the first timestep
+        # Noise
+        noise_list = noise(dataset[0],  # only shape matters
+                        target_var=target_vars_3d[0],
+                        n_samples=n_samples,
+                        noise_pattern=noise_pattern,
+                        analyze_noise=analyze_noise,
+                        outpath=outpath)
+        
+        # Masking
         if masking:
             target_var = target_vars_3d[0]
-            if mask_pattern is None:
-                obs_mask, obs_values = create_oco2_mask(base_batch, target_var=target_var)
-            else:
-                obs_mask, obs_values = create_mask(base_batch, target_var=target_var, obs_fraction=obs_fraction, mask_pattern=mask_pattern, nlat=nlat, nlon=nlon)
+            obs_mask, obs_values = create_mask(base_batch, target_var=target_var, obs_fraction=obs_fraction, mask_pattern=mask_pattern, nlat=nlat, nlon=nlon)
             base_batch["obs_mask"] = obs_mask
             obs_values_normed = model.model.normalize_observations(obs_values, base_batch, target_var=target_var)
             base_batch["obs_values"] = obs_values_normed
 
-    for i in tqdm(range(n_samples), desc="Generating samples") if verbose else range(n_samples):
-        if not condition_one_timestep:
-            base_batch = {k: v.unsqueeze(0).to(device) for k, v in dataset[i].items()} # condition on different timesteps
-            if masking:
-                target_var = target_vars_3d[0]
-                obs_mask, obs_values = create_mask(base_batch, target_var=target_var, obs_fraction=obs_fraction, mask_pattern=mask_pattern, nlat=nlat, nlon=nlon)
-                base_batch["obs_mask"] = obs_mask
-                obs_values_normed = model.model.normalize_observations(obs_values, base_batch, target_var=target_var)
-                base_batch["obs_values"] = obs_values_normed
         batch = {k: v.clone() for k, v in base_batch.items()}
-        batch["noise"] = noise_list[i].to(device)
+        for k in batch.keys():
+            batch[k] = batch[k].expand(n_samples, -1, -1, -1)  # [B=n_samples T N C]
+        batch["noise"] = torch.cat(noise_list, dim=0).to(device)  # [B=n_samples T N C]
 
         if zero_surfflux:
             for var in ["co2flux_anthro", "co2flux_land", "co2flux_ocean"]:
@@ -699,16 +700,12 @@ def iterative_generate(
             {k: dataset.tensor_to_xarray(pred) for k, pred in preds_fixed.items()}
         )
 
-        ds = ds.rename({"time": "trajectory_steps"})
+        ds = ds.rename({"batch": "sample", "time": "trajectory_steps"})
         ds = ds.assign_coords(
             trajectory_steps=("trajectory_steps", np.arange(traj.shape[1]) if traj.ndim > 0 else [0]),
-            sample=("sample", [i]),
+            sample=("sample", np.arange(n_samples)),
         )   
-        if condition_one_timestep:
-            time_value = prototype_zarr.isel(time=0).time.values
-        else:
-            time_value = prototype_zarr.isel(time=i).time.values
-        ds = ds.expand_dims(time=[time_value])
+        ds = ds.expand_dims(time=[prototype_zarr.isel(time=t).time.values])
 
         if remap:
             ds = remap_with_cdo(dataset, prototype_zarr.isel(time=0), ds)
@@ -720,7 +717,7 @@ def iterative_generate(
 
         dss.append(ds)
 
-        if i == 0 and analyze_masking and masking:
+        if t == 0 and analyze_masking and masking:
             batch_analyze = batch
 
     ### !!! Caution: need to fix this properly!!!
@@ -731,17 +728,11 @@ def iterative_generate(
             continue
         good_dss.append(ds)
 
-    if condition_one_timestep:
-        ds_all = xr.concat(good_dss, dim="sample")
-    else:
-        ds_all = xr.concat(good_dss, dim="time")
+    ds_all = xr.concat(good_dss, dim="time")
     ### !!!
 
     if save_obs:
-        if condition_one_timestep:
-            obs_all = xr.concat(obss, dim="sample").fillna({"obs_filename": ""})
-        else:
-            obs_all = xr.concat(obss, dim="time").fillna({"obs_filename": ""})
+        obs_all = xr.concat(obss, dim="time").fillna({"obs_filename": ""})
         obs_all.to_zarr(obspath, mode="w")
         ds_all = ds_all.fillna({"obs_filename": ""})
 

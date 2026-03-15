@@ -1453,9 +1453,6 @@ def plot_masking_diagnostics(
             raise KeyError(f"{varname} not found in preds")
 
         preds_var = preds[varname]
-        print(preds_var.dims)
-        print(preds_var.shape)
-        print(preds_var.coords)
 
         fig = plot_obs_mask_and_samples_x(
             batch,
@@ -1531,6 +1528,15 @@ def plot_samples(
                         avg_over_levels=avg_over_levels,
                         normalize=normalize,
                         center_to_test_mean=False,
+                        imgformats=imgformats,)
+        
+        plot_sample_mean_cdf(preds_var, out_dir,
+                        tests=tests,
+                        varname=varname,
+                        avg_over_levels=avg_over_levels,
+                        normalize=normalize,
+                        center_to_test_mean=False,
+                        remove_low_pressure=True,
                         imgformats=imgformats,)
 
         plot_sample_mean_cdf(preds_var, out_dir,
@@ -1834,6 +1840,7 @@ def plot_sample_mean_cdf(preds_var, out_dir, tests=None,
                     varname="co2molemix", avg_over_levels=True,
                     normalize=False,
                     center_to_test_mean=False,
+                    remove_low_pressure=False,
                     imgformats=["svg", "png", "pdf"]):
     """
     Plot cumulative distribution functions (CDFs) of normalized mean values per sample for one or multiple variables. Optionally compare to test data.
@@ -1859,6 +1866,8 @@ def plot_sample_mean_cdf(preds_var, out_dir, tests=None,
 
     if not avg_over_levels:
         levels = preds_var.level.values
+        if remove_low_pressure:
+            levels = levels[:-1]
         colors = sns.color_palette("crest", len(levels))
         levels_plot = levels[::-1]
 
@@ -1934,7 +1943,7 @@ def plot_sample_mean_cdf(preds_var, out_dir, tests=None,
     fig.tight_layout(rect=[0, 0, 0.75, 1])
 
     for fmt in imgformats:
-        fig.savefig(out_dir / f"cdf{'_centered' if center_to_test_mean else ''}_{varname}.{fmt}", dpi=300, bbox_inches='tight')
+        fig.savefig(out_dir / f"cdf{'_centered' if center_to_test_mean else ''}{'_low_pressure_removed' if remove_low_pressure else ''}_{varname}.{fmt}", dpi=300, bbox_inches='tight')
 
     plt.close(fig)
 
@@ -2092,7 +2101,7 @@ def plot_scatter_preds_vs_tests(maps, df_global_scalars,
     n_points = np.prod(preds_var.sizes.get("lat", 1) * preds_var.sizes.get("lon", 1))
 
     if level is not None:
-        title=f"Predicted vs Ground Truth ({varname}) - level {level:.0f}"
+        title=f"Predicted vs Ground Truth\n({varname}) - level {level:.0f}"
         level_str = f"_level{level:.0f}"
         ens_mean = maps[f"Mean_map_co2molemix_level{level:.0f}"].values
         slope = df_global_scalars[f"LinReg_Slope_level{level:.0f}"].iloc[0]
@@ -2102,7 +2111,7 @@ def plot_scatter_preds_vs_tests(maps, df_global_scalars,
         bias = df_global_scalars[f"Bias_scalar_level{level:.0f}"].iloc[0]
         crps = df_global_scalars[f"CRPS_ensemble_mean_level{level:.0f}"].iloc[0]
     else:
-        title=f"Predicted vs Ground Truth ({varname}) - mean over levels"
+        title=f"Predicted vs Ground Truth\n({varname}) - mean over levels"
         level_str = ""
         ens_mean = maps["Mean_map_co2molemix"].values
         slope = df_global_scalars["LinReg_Slope"].iloc[0]

@@ -505,14 +505,14 @@ class CarbonDataset(Dataset):
 
         return prototype_zarr
 
-    def tensor_to_xarray(self, tensor):
+    def tensor_to_xarray(self, tensor, squeeze=True):
         return tensor_to_xarray(
             tensor,
             grid=self.grid,
             dataset=self.dataset,
             gridnc=self.grid_ds,
             vertical_levels=self.vertical_levels,
-        ).squeeze(drop=True)
+        ).squeeze(drop=squeeze)
 
 
 class CarbonDataModule(pl.LightningDataModule):
