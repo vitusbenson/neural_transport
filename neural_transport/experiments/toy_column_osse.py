@@ -34,7 +34,7 @@ from neural_transport.configs import (
     SamplerParams,
     compat_to_generate_kwargs,
 )
-from neural_transport.inference.posterior_samplers import (
+from neural_transport.inference.samplers import (
     FIGSampler,
     FlowDPSSampler,
     ICTMSampler,

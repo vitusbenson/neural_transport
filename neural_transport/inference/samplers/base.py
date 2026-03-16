@@ -7,6 +7,7 @@ FlowDPS, SDE, FIG, and ICTM posterior samplers.
 
 from abc import ABC, abstractmethod
 
+import torch
 from torch import Tensor
 
 from neural_transport.forward_model import XCO2ForwardModel
@@ -64,6 +65,10 @@ class PosteriorSampler(BaseSampler):
         self.targshift_mean = masking_config.get("targshift_mean", None)
 
         self.forward_model = XCO2ForwardModel.from_masking_config(masking_config)
+
+        # Ensure obs_mask is bool for torch.where operations
+        if self.obs_mask is not None and self.obs_mask.dtype != torch.bool:
+            self.obs_mask = self.obs_mask.bool()
 
     def _tweedie_estimate(self, x_t: Tensor, t: Tensor, v_theta: Tensor) -> Tensor:
         """Tweedie denoising estimate: x_hat_1 = x_t + (1 - t) * v_theta.

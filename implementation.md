@@ -245,17 +245,17 @@ return sampler.sample(x_init, time_grid, masking_config)
 **Delete**: `posterior_samplers.py`
 
 ### Checklist
-- [ ] **Tests first**: Extend `tests/test_samplers.py` — parametrized over all 5 samplers (ODE + 4 posterior). Test that `create_sampler()` returns correct type.
-- [ ] Migrate `FlowDPSSampler` to `samplers/flowdps.py` inheriting `PosteriorSampler`
-- [ ] Migrate `StochasticPosteriorSampler` to `samplers/sde.py`
-- [ ] Migrate `FIGSampler` to `samplers/fig.py`
-- [ ] Migrate `ICTMSampler` to `samplers/ictm.py`
-- [ ] Verify shared `_tweedie_estimate` and `_renoise` replace duplicated code in each sampler
-- [ ] Implement registry + `create_sampler()` factory
-- [ ] Refactor `FlowMatching.inference_forward()` to use `create_sampler()`
-- [ ] Delete `posterior_samplers.py`
-- [ ] Update imports in `test_toy_column_osse.py` and any other consumers
-- [ ] All existing tests still pass
+- [x] **Tests first**: Extend `tests/test_samplers.py` — parametrized over all 5 samplers (ODE + 4 posterior). Test that `create_sampler()` returns correct type.
+- [x] Migrate `FlowDPSSampler` to `samplers/flowdps.py` inheriting `PosteriorSampler`
+- [x] Migrate `StochasticPosteriorSampler` to `samplers/sde.py`
+- [x] Migrate `FIGSampler` to `samplers/fig.py`
+- [x] Migrate `ICTMSampler` to `samplers/ictm.py`
+- [x] Verify shared `_tweedie_estimate` and `_renoise` replace duplicated code in each sampler
+- [x] Implement registry + `create_sampler()` factory
+- [x] Refactor `FlowMatching.inference_forward()` to use `create_sampler()`
+- [x] Delete `posterior_samplers.py`
+- [x] Update imports in `test_toy_column_osse.py` and any other consumers
+- [x] All existing tests still pass
 
 ---
 

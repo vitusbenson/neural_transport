@@ -443,7 +443,7 @@ class TestXCO2ForwardModelParityWithFlowDPS:
     """FlowDPSSampler.forward_model.forward() matches standalone XCO2ForwardModel."""
 
     def test_parity_with_prior(self, sample_masking_config):
-        from neural_transport.inference.posterior_samplers import FlowDPSSampler
+        from neural_transport.inference.samplers import FlowDPSSampler
 
         velocity_model = MockSubmodel(nlev=5)
         sampler = FlowDPSSampler(velocity_model, sample_masking_config)
@@ -456,7 +456,7 @@ class TestXCO2ForwardModelParityWithFlowDPS:
         assert torch.allclose(actual, expected, atol=1e-7), f"Max error: {(actual - expected).abs().max().item()}"
 
     def test_parity_fallback(self):
-        from neural_transport.inference.posterior_samplers import FlowDPSSampler
+        from neural_transport.inference.samplers import FlowDPSSampler
 
         B, nlev, nlat, nlon = 2, 5, 4, 8
         pw = torch.tensor([0.4, 0.25, 0.15, 0.12, 0.08]).view(1, nlev, 1, 1).expand(B, nlev, nlat, nlon)

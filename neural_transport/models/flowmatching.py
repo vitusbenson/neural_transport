@@ -16,6 +16,38 @@ from neural_transport.forward_model import XCO2ForwardModel
 from neural_transport.models import MODELS
 from neural_transport.models.regulargrid import RegularGridModel
 
+_SAMPLER_KWARGS_MAP = {
+    "flowdps": ["sigma_obs", "spatial_smoothing_sigma", "fresh_noise"],
+    "sde": [
+        "sigma_obs",
+        "spatial_smoothing_sigma",
+        "fresh_noise",
+        "sigma_max",
+        "noise_schedule",
+        "n_corrector_steps",
+        "corrector_step_size",
+        "corrector_snr",
+        "use_projection",
+    ],
+    "fig": [
+        "sigma_obs",
+        "spatial_smoothing_sigma",
+        "k_steps",
+        "step_size_c",
+        "noise_scale_w",
+        "skip_first_last",
+    ],
+    "ictm": [
+        "sigma_obs",
+        "spatial_smoothing_sigma",
+        "fresh_noise",
+        "r_max",
+        "r_schedule",
+        "n_inner_steps",
+        "inner_lr",
+    ],
+}
+
 
 class VelocityWrapper(nn.Module):
     def __init__(
@@ -31,7 +63,11 @@ class VelocityWrapper(nn.Module):
 
     def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         B, _, Nlat, Nlon = x.shape
-        t_expanded = t.view(1, 1, 1, 1).expand(B, 1, Nlat, Nlon)
+        # Handle both scalar t and batch t [B]
+        if t.dim() == 0 or (t.dim() == 1 and t.shape[0] == 1):
+            t_expanded = t.view(1, 1, 1, 1).expand(B, 1, Nlat, Nlon)
+        else:
+            t_expanded = t.view(B, 1, 1, 1).expand(B, 1, Nlat, Nlon)
         if self.static_inputs.numel() > 0:
             static_inputs = self.static_inputs.to(x.device)
             x_in = torch.cat([x, t_expanded, static_inputs], dim=1)  # [B C_total Nlat Nlon]
@@ -653,84 +689,15 @@ class FlowMatching(RegularGridModel):
             time_grid = self._build_time_grid(steps - 1, x_init.device, spacing)
         masking_config["time_grid"] = time_grid
 
-        # FlowDPS sampler dispatch — replaces ODE solver with projection loop
-        sampler = generate_kwargs.get("sampler", None)
-        if sampler == "flowdps":
-            from neural_transport.inference.posterior_samplers import FlowDPSSampler
+        # Posterior sampler dispatch via registry
+        sampler_name = generate_kwargs.get("sampler", None)
+        if sampler_name in _SAMPLER_KWARGS_MAP:
+            from neural_transport.inference.samplers import create_sampler
 
-            velocity_model = VelocityWrapper(
-                submodel=self.submodel,
-                nlev=self.nlev,
-            )
-            dps_sampler = FlowDPSSampler(
-                velocity_model=velocity_model,
-                masking_config=masking_config,
-                sigma_obs=generate_kwargs.get("sigma_obs", 0.1),
-                spatial_smoothing_sigma=generate_kwargs.get("spatial_smoothing_sigma", 0.0),
-                fresh_noise=generate_kwargs.get("fresh_noise", True),
-            )
-            return dps_sampler.sample(x_init, time_grid, self.return_intermediates)
-
-        elif sampler == "sde":
-            from neural_transport.inference.posterior_samplers import StochasticPosteriorSampler
-
-            velocity_model = VelocityWrapper(
-                submodel=self.submodel,
-                nlev=self.nlev,
-            )
-            sde_sampler = StochasticPosteriorSampler(
-                velocity_model=velocity_model,
-                masking_config=masking_config,
-                sigma_obs=generate_kwargs.get("sigma_obs", 0.1),
-                spatial_smoothing_sigma=generate_kwargs.get("spatial_smoothing_sigma", 0.0),
-                fresh_noise=generate_kwargs.get("fresh_noise", True),
-                sigma_max=generate_kwargs.get("sigma_max", 0.5),
-                noise_schedule=generate_kwargs.get("noise_schedule", "annealed"),
-                n_corrector_steps=generate_kwargs.get("n_corrector_steps", 0),
-                corrector_step_size=generate_kwargs.get("corrector_step_size", 0.01),
-                corrector_snr=generate_kwargs.get("corrector_snr", 0.16),
-                use_projection=generate_kwargs.get("use_projection", True),
-            )
-            return sde_sampler.sample(x_init, time_grid, self.return_intermediates)
-
-        elif sampler == "fig":
-            from neural_transport.inference.posterior_samplers import FIGSampler
-
-            velocity_model = VelocityWrapper(
-                submodel=self.submodel,
-                nlev=self.nlev,
-            )
-            fig_sampler = FIGSampler(
-                velocity_model=velocity_model,
-                masking_config=masking_config,
-                sigma_obs=generate_kwargs.get("sigma_obs", 0.1),
-                spatial_smoothing_sigma=generate_kwargs.get("spatial_smoothing_sigma", 0.0),
-                k_steps=generate_kwargs.get("k_steps", 1),
-                step_size_c=generate_kwargs.get("step_size_c", 10.0),
-                noise_scale_w=generate_kwargs.get("noise_scale_w", 0.0),
-                skip_first_last=generate_kwargs.get("skip_first_last", True),
-            )
-            return fig_sampler.sample(x_init, time_grid, self.return_intermediates)
-
-        elif sampler == "ictm":
-            from neural_transport.inference.posterior_samplers import ICTMSampler
-
-            velocity_model = VelocityWrapper(
-                submodel=self.submodel,
-                nlev=self.nlev,
-            )
-            ictm_sampler = ICTMSampler(
-                velocity_model=velocity_model,
-                masking_config=masking_config,
-                sigma_obs=generate_kwargs.get("sigma_obs", 0.1),
-                spatial_smoothing_sigma=generate_kwargs.get("spatial_smoothing_sigma", 0.0),
-                fresh_noise=generate_kwargs.get("fresh_noise", True),
-                r_max=generate_kwargs.get("r_max", 1.0),
-                r_schedule=generate_kwargs.get("r_schedule", "decreasing"),
-                n_inner_steps=generate_kwargs.get("n_inner_steps", 1),
-                inner_lr=generate_kwargs.get("inner_lr", 0.1),
-            )
-            return ictm_sampler.sample(x_init, time_grid, self.return_intermediates)
+            velocity_model = VelocityWrapper(submodel=self.submodel, nlev=self.nlev)
+            sampler_kwargs = {k: generate_kwargs[k] for k in _SAMPLER_KWARGS_MAP[sampler_name] if k in generate_kwargs}
+            sampler = create_sampler(sampler_name, velocity_model, masking_config, **sampler_kwargs)
+            return sampler.sample(x_init, time_grid, self.return_intermediates)
 
         # UNet expects normalization parameters
         velocity_model = self.return_velocity_wrapper(

@@ -32,7 +32,7 @@ from neural_transport.experiments.toy_column_osse import (
     sample_unconditional,
     train_flow_matching,
 )
-from neural_transport.inference.posterior_samplers import FlowDPSSampler
+from neural_transport.inference.samplers import FlowDPSSampler
 
 # ── Expected metric keys ─────────────────────────────────────────────────
 

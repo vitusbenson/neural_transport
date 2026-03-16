@@ -1,10 +1,23 @@
-"""Tests for sampler abstract base classes and ODE sampler."""
+"""Tests for sampler abstract base classes, ODE sampler, and all posterior samplers."""
+
+import math
 
 import pytest
 import torch
 
+from neural_transport.configs import KNOWN_SAMPLERS
 from neural_transport.forward_model import XCO2ForwardModel
-from neural_transport.inference.samplers import BaseSampler, ODESampler, PosteriorSampler
+from neural_transport.inference.samplers import (
+    SAMPLER_REGISTRY,
+    BaseSampler,
+    FIGSampler,
+    FlowDPSSampler,
+    ICTMSampler,
+    ODESampler,
+    PosteriorSampler,
+    StochasticPosteriorSampler,
+    create_sampler,
+)
 
 # ── Minimal concrete subclass for testing PosteriorSampler ──────────────
 
@@ -17,10 +30,6 @@ class MockPosteriorSampler(PosteriorSampler):
         x_t = x_init
         z = x_init.clone()
         intermediates = [x_t] if return_intermediates else None
-
-        # Ensure obs_mask is bool for torch.where in forward_model.project
-        if self.obs_mask is not None and self.obs_mask.dtype != torch.bool:
-            self.obs_mask = self.obs_mask.bool()
 
         for i in range(len(time_grid) - 1):
             t_n = time_grid[i]
@@ -79,6 +88,11 @@ class TestPosteriorSamplerSharedMethods:
         assert sampler.velocity_model is mock_velocity_wrapper
 
     @pytest.mark.quick
+    def test_obs_mask_is_bool(self, sampler):
+        """PosteriorSampler.__init__ should cast obs_mask to bool."""
+        assert sampler.obs_mask.dtype == torch.bool
+
+    @pytest.mark.quick
     def test_tweedie_estimate_formula(self, sampler):
         B, C, H, W = 2, 5, 4, 8
         torch.manual_seed(0)
@@ -130,9 +144,6 @@ class TestPosteriorSamplerSharedMethods:
         torch.manual_seed(0)
         x_hat = torch.randn(B, C, H, W)
 
-        # Ensure obs_mask is bool (fixture creates float mask)
-        sampler.obs_mask = sampler.obs_mask.bool()
-
         result = sampler._project_column(x_hat)
         expected = sampler.forward_model.project(
             x_hat,
@@ -181,21 +192,40 @@ class TestODESampler:
         assert result.shape == (len(time_grid), B, C, H, W)
 
 
-# ── Sampler interface (parametrized) ────────────────────────────────────
+# ── Sampler interface (parametrized over all real samplers) ─────────────
 
 
 class TestSamplerInterface:
     """Interface tests parametrized over all sampler types."""
 
-    @pytest.fixture(params=["ode", "mock_posterior"])
+    @pytest.fixture(params=["ode", "flowdps", "sde", "fig", "ictm"])
     def sampler_instance(self, request, mock_velocity_wrapper, sample_masking_config):
         if request.param == "ode":
             return ODESampler(velocity_model=mock_velocity_wrapper, method="euler")
-        elif request.param == "mock_posterior":
-            return MockPosteriorSampler(
+        elif request.param == "flowdps":
+            return FlowDPSSampler(
                 velocity_model=mock_velocity_wrapper,
                 masking_config=sample_masking_config,
             )
+        elif request.param == "sde":
+            return StochasticPosteriorSampler(
+                velocity_model=mock_velocity_wrapper,
+                masking_config=sample_masking_config,
+            )
+        elif request.param == "fig":
+            return FIGSampler(
+                velocity_model=mock_velocity_wrapper,
+                masking_config=sample_masking_config,
+            )
+        elif request.param == "ictm":
+            return ICTMSampler(
+                velocity_model=mock_velocity_wrapper,
+                masking_config=sample_masking_config,
+            )
+
+    @pytest.mark.quick
+    def test_is_base_sampler(self, sampler_instance):
+        assert isinstance(sampler_instance, BaseSampler)
 
     @pytest.mark.quick
     def test_sample_returns_tensor(self, sampler_instance):
@@ -223,3 +253,124 @@ class TestSamplerInterface:
 
         result = sampler_instance.sample(x_init, time_grid)
         assert torch.isfinite(result).all()
+
+
+# ── create_sampler factory ──────────────────────────────────────────────
+
+
+class TestCreateSampler:
+    @pytest.mark.quick
+    @pytest.mark.parametrize(
+        "name,expected_cls",
+        [
+            ("ode", ODESampler),
+            ("flowdps", FlowDPSSampler),
+            ("sde", StochasticPosteriorSampler),
+            ("fig", FIGSampler),
+            ("ictm", ICTMSampler),
+        ],
+    )
+    def test_creates_each_type(self, name, expected_cls, mock_velocity_wrapper, sample_masking_config):
+        if name == "ode":
+            sampler = create_sampler(name, mock_velocity_wrapper)
+        else:
+            sampler = create_sampler(name, mock_velocity_wrapper, sample_masking_config)
+        assert isinstance(sampler, expected_cls)
+
+    @pytest.mark.quick
+    def test_unknown_name_raises(self, mock_velocity_wrapper):
+        with pytest.raises(KeyError, match="Unknown sampler"):
+            create_sampler("nonexistent", mock_velocity_wrapper)
+
+    @pytest.mark.quick
+    def test_posterior_without_masking_config_raises(self, mock_velocity_wrapper):
+        with pytest.raises(TypeError, match="requires masking_config"):
+            create_sampler("flowdps", mock_velocity_wrapper)
+
+    @pytest.mark.quick
+    def test_registry_contains_known_samplers(self):
+        """Registry keys should be a superset of KNOWN_SAMPLERS from configs."""
+        assert KNOWN_SAMPLERS <= set(SAMPLER_REGISTRY.keys())
+
+
+# ── ICTM schedule tests ────────────────────────────────────────────────
+
+
+class TestICTMSchedule:
+    @pytest.fixture
+    def ictm(self, mock_velocity_wrapper, sample_masking_config):
+        def _make(r_schedule="decreasing", r_max=1.0):
+            return ICTMSampler(
+                velocity_model=mock_velocity_wrapper,
+                masking_config=sample_masking_config,
+                r_schedule=r_schedule,
+                r_max=r_max,
+            )
+
+        return _make
+
+    @pytest.mark.quick
+    def test_decreasing(self, ictm):
+        s = ictm("decreasing", r_max=2.0)
+        assert s.r(0.0) == pytest.approx(2.0)
+        assert s.r(0.5) == pytest.approx(1.0)
+        assert s.r(1.0) == pytest.approx(1e-6)  # clamped
+
+    @pytest.mark.quick
+    def test_constant(self, ictm):
+        s = ictm("constant", r_max=0.5)
+        assert s.r(0.0) == pytest.approx(0.5)
+        assert s.r(0.5) == pytest.approx(0.5)
+        assert s.r(1.0) == pytest.approx(0.5)
+
+    @pytest.mark.quick
+    def test_increasing(self, ictm):
+        s = ictm("increasing", r_max=2.0)
+        assert s.r(0.0) == pytest.approx(1e-6)  # clamped
+        assert s.r(0.5) == pytest.approx(1.0)
+        assert s.r(1.0) == pytest.approx(2.0)
+
+    @pytest.mark.quick
+    def test_cosine(self, ictm):
+        s = ictm("cosine", r_max=1.0)
+        assert s.r(0.0) == pytest.approx(1.0)
+        assert s.r(0.5) == pytest.approx(math.cos(math.pi * 0.5 / 2.0))
+        assert s.r(1.0) == pytest.approx(1e-6)  # clamped
+
+
+# ── SDE noise schedule tests ───────────────────────────────────────────
+
+
+class TestSDENoiseSchedule:
+    @pytest.fixture
+    def sde(self, mock_velocity_wrapper, sample_masking_config):
+        def _make(noise_schedule="annealed", sigma_max=1.0):
+            return StochasticPosteriorSampler(
+                velocity_model=mock_velocity_wrapper,
+                masking_config=sample_masking_config,
+                noise_schedule=noise_schedule,
+                sigma_max=sigma_max,
+            )
+
+        return _make
+
+    @pytest.mark.quick
+    def test_annealed(self, sde):
+        s = sde("annealed", sigma_max=2.0)
+        assert s.sigma(0.0) == pytest.approx(2.0)
+        assert s.sigma(0.5) == pytest.approx(1.0)
+        assert s.sigma(1.0) == pytest.approx(0.0)
+
+    @pytest.mark.quick
+    def test_constant(self, sde):
+        s = sde("constant", sigma_max=0.5)
+        assert s.sigma(0.0) == pytest.approx(0.5)
+        assert s.sigma(0.5) == pytest.approx(0.5)
+        assert s.sigma(1.0) == pytest.approx(0.5)
+
+    @pytest.mark.quick
+    def test_cosine(self, sde):
+        s = sde("cosine", sigma_max=1.0)
+        assert s.sigma(0.0) == pytest.approx(1.0)
+        assert s.sigma(0.5) == pytest.approx(math.cos(math.pi * 0.5 / 2.0))
+        assert s.sigma(1.0) == pytest.approx(0.0, abs=1e-7)
