@@ -4,6 +4,8 @@ import pytest
 import torch
 import torch.nn as nn
 
+from neural_transport.models.flowmatching import VelocityWrapper
+
 
 class MockSubmodel(nn.Module):
     """Submodel that returns zero velocity."""
@@ -91,6 +93,12 @@ def sample_masking_config(synthetic_pressure_weights, synthetic_averaging_kernel
         "xco2_prior": xco2_prior,
         "co2_profile_prior": co2_profile_prior,
     }
+
+
+@pytest.fixture
+def mock_velocity_wrapper():
+    """VelocityWrapper around MockSubmodel for testing samplers."""
+    return VelocityWrapper(MockSubmodel(nlev=5), nlev=5)
 
 
 @pytest.fixture

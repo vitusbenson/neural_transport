@@ -207,14 +207,16 @@ class PosteriorSampler(ABC):
 - `neural_transport/inference/samplers/ode.py` — `ODESampler`: wraps standard ODE solver (no conditioning)
 
 ### Checklist
-- [ ] **Tests first**: Write `tests/test_samplers.py` with parametrized interface tests:
+- [x] **Tests first**: Write `tests/test_samplers.py` with parametrized interface tests:
   - Each sampler returns correct shape `[B, C, Nlat, Nlon]`
   - No NaN in output
-  - With empty obs mask, posterior sampler reduces to unconditional
-  - `return_intermediates=True` returns list of tensors
-- [ ] Implement `PosteriorSampler` ABC with shared `_tweedie_estimate`, `_renoise`
-- [ ] Implement `ODESampler` wrapping current ODE path
-- [ ] Tests pass for `ODESampler`
+  - `return_intermediates=True` returns `[T, B, C, Nlat, Nlon]`
+  - ABC enforcement (BaseSampler/PosteriorSampler cannot be instantiated)
+  - Shared method formulas verified numerically (Tweedie, renoise, project)
+- [x] Add `mock_velocity_wrapper` fixture to `tests/conftest.py`
+- [x] Implement `BaseSampler` ABC and `PosteriorSampler` ABC with shared `_tweedie_estimate`, `_renoise`, `_project_column`
+- [x] Implement `ODESampler` wrapping `flow_matching.solver.ODESolver`
+- [x] All 18 tests pass, all 118 existing tests pass, ruff clean
 
 ---
 

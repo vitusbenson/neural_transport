@@ -1,0 +1,225 @@
+"""Tests for sampler abstract base classes and ODE sampler."""
+
+import pytest
+import torch
+
+from neural_transport.forward_model import XCO2ForwardModel
+from neural_transport.inference.samplers import BaseSampler, ODESampler, PosteriorSampler
+
+# ── Minimal concrete subclass for testing PosteriorSampler ──────────────
+
+
+class MockPosteriorSampler(PosteriorSampler):
+    """Concrete subclass using simple Euler integration for testing."""
+
+    @torch.no_grad()
+    def sample(self, x_init, time_grid, return_intermediates=False):
+        x_t = x_init
+        z = x_init.clone()
+        intermediates = [x_t] if return_intermediates else None
+
+        # Ensure obs_mask is bool for torch.where in forward_model.project
+        if self.obs_mask is not None and self.obs_mask.dtype != torch.bool:
+            self.obs_mask = self.obs_mask.bool()
+
+        for i in range(len(time_grid) - 1):
+            t_n = time_grid[i]
+            t_next = time_grid[i + 1]
+
+            t_tensor = t_n * torch.ones(x_t.shape[0], device=x_t.device)
+            # VelocityWrapper expects scalar t for view(1,1,1,1)
+            v_theta = self.velocity_model(x_t, t_n)
+
+            x_hat = self._tweedie_estimate(x_t, t_tensor, v_theta)
+            x_hat_proj = self._project_column(x_hat)
+
+            t_next_tensor = t_next * torch.ones(x_t.shape[0], device=x_t.device)
+            x_t = self._renoise(x_hat_proj, t_next_tensor, z)
+
+            if return_intermediates:
+                intermediates.append(x_t)
+
+        if return_intermediates:
+            return torch.stack(intermediates, dim=0)
+        return x_t
+
+
+# ── ABC enforcement ─────────────────────────────────────────────────────
+
+
+class TestABCEnforcement:
+    @pytest.mark.quick
+    def test_base_sampler_cannot_instantiate(self):
+        with pytest.raises(TypeError):
+            BaseSampler()
+
+    @pytest.mark.quick
+    def test_posterior_sampler_cannot_instantiate(self):
+        with pytest.raises(TypeError):
+            PosteriorSampler(None, {})
+
+
+# ── PosteriorSampler shared methods ────────────────────────────────────
+
+
+class TestPosteriorSamplerSharedMethods:
+    @pytest.fixture
+    def sampler(self, mock_velocity_wrapper, sample_masking_config):
+        return MockPosteriorSampler(
+            velocity_model=mock_velocity_wrapper,
+            masking_config=sample_masking_config,
+        )
+
+    @pytest.mark.quick
+    def test_has_forward_model(self, sampler):
+        assert isinstance(sampler.forward_model, XCO2ForwardModel)
+
+    @pytest.mark.quick
+    def test_has_velocity_model(self, sampler, mock_velocity_wrapper):
+        assert sampler.velocity_model is mock_velocity_wrapper
+
+    @pytest.mark.quick
+    def test_tweedie_estimate_formula(self, sampler):
+        B, C, H, W = 2, 5, 4, 8
+        torch.manual_seed(0)
+        x_t = torch.randn(B, C, H, W)
+        v = torch.randn(B, C, H, W)
+        t = 0.3 * torch.ones(B)
+
+        x_hat = sampler._tweedie_estimate(x_t, t, v)
+        expected = x_t + (1.0 - 0.3) * v
+        assert torch.allclose(x_hat, expected, atol=1e-6)
+
+    @pytest.mark.quick
+    def test_renoise_formula(self, sampler):
+        B, C, H, W = 2, 5, 4, 8
+        torch.manual_seed(0)
+        x_hat = torch.randn(B, C, H, W)
+        z = torch.randn(B, C, H, W)
+        t_next = 0.6 * torch.ones(B)
+
+        result = sampler._renoise(x_hat, t_next, z)
+        expected = (1.0 - 0.6) * z + 0.6 * x_hat
+        assert torch.allclose(result, expected, atol=1e-6)
+
+    @pytest.mark.quick
+    def test_renoise_at_t1_gives_signal(self, sampler):
+        B, C, H, W = 2, 5, 4, 8
+        torch.manual_seed(0)
+        x_hat = torch.randn(B, C, H, W)
+        z = torch.randn(B, C, H, W)
+        t_next = torch.ones(B)
+
+        result = sampler._renoise(x_hat, t_next, z)
+        assert torch.allclose(result, x_hat, atol=1e-6)
+
+    @pytest.mark.quick
+    def test_renoise_at_t0_gives_noise(self, sampler):
+        B, C, H, W = 2, 5, 4, 8
+        torch.manual_seed(0)
+        x_hat = torch.randn(B, C, H, W)
+        z = torch.randn(B, C, H, W)
+        t_next = torch.zeros(B)
+
+        result = sampler._renoise(x_hat, t_next, z)
+        assert torch.allclose(result, z, atol=1e-6)
+
+    @pytest.mark.quick
+    def test_project_column_delegates(self, sampler):
+        B, C, H, W = 2, 5, 4, 8
+        torch.manual_seed(0)
+        x_hat = torch.randn(B, C, H, W)
+
+        # Ensure obs_mask is bool (fixture creates float mask)
+        sampler.obs_mask = sampler.obs_mask.bool()
+
+        result = sampler._project_column(x_hat)
+        expected = sampler.forward_model.project(
+            x_hat,
+            sampler.obs_values,
+            sampler.obs_mask,
+            sampler.sigma_obs,
+            sampler.spatial_smoothing_sigma,
+        )
+        assert torch.allclose(result, expected, atol=1e-6)
+
+
+# ── ODESampler ──────────────────────────────────────────────────────────
+
+
+class TestODESampler:
+    @pytest.fixture
+    def ode_sampler(self, mock_velocity_wrapper):
+        return ODESampler(velocity_model=mock_velocity_wrapper, method="euler")
+
+    @pytest.mark.quick
+    def test_sample_returns_correct_shape(self, ode_sampler):
+        B, C, H, W = 2, 5, 4, 8
+        x_init = torch.randn(B, C, H, W)
+        time_grid = torch.linspace(0, 1, 6)
+
+        result = ode_sampler.sample(x_init, time_grid)
+        assert result.shape == (B, C, H, W)
+
+    @pytest.mark.quick
+    def test_sample_no_nan(self, ode_sampler):
+        B, C, H, W = 2, 5, 4, 8
+        x_init = torch.randn(B, C, H, W)
+        time_grid = torch.linspace(0, 1, 6)
+
+        result = ode_sampler.sample(x_init, time_grid)
+        assert torch.isfinite(result).all()
+
+    @pytest.mark.quick
+    def test_sample_with_intermediates_shape(self, ode_sampler):
+        B, C, H, W = 2, 5, 4, 8
+        x_init = torch.randn(B, C, H, W)
+        time_grid = torch.linspace(0, 1, 6)
+
+        result = ode_sampler.sample(x_init, time_grid, return_intermediates=True)
+        # T time points -> T entries in trajectory
+        assert result.shape == (len(time_grid), B, C, H, W)
+
+
+# ── Sampler interface (parametrized) ────────────────────────────────────
+
+
+class TestSamplerInterface:
+    """Interface tests parametrized over all sampler types."""
+
+    @pytest.fixture(params=["ode", "mock_posterior"])
+    def sampler_instance(self, request, mock_velocity_wrapper, sample_masking_config):
+        if request.param == "ode":
+            return ODESampler(velocity_model=mock_velocity_wrapper, method="euler")
+        elif request.param == "mock_posterior":
+            return MockPosteriorSampler(
+                velocity_model=mock_velocity_wrapper,
+                masking_config=sample_masking_config,
+            )
+
+    @pytest.mark.quick
+    def test_sample_returns_tensor(self, sampler_instance):
+        B, C, H, W = 2, 5, 4, 8
+        x_init = torch.randn(B, C, H, W)
+        time_grid = torch.linspace(0, 1, 6)
+
+        result = sampler_instance.sample(x_init, time_grid)
+        assert isinstance(result, torch.Tensor)
+
+    @pytest.mark.quick
+    def test_sample_correct_spatial_shape(self, sampler_instance):
+        B, C, H, W = 2, 5, 4, 8
+        x_init = torch.randn(B, C, H, W)
+        time_grid = torch.linspace(0, 1, 6)
+
+        result = sampler_instance.sample(x_init, time_grid)
+        assert result.shape == (B, C, H, W)
+
+    @pytest.mark.quick
+    def test_no_nan_in_output(self, sampler_instance):
+        B, C, H, W = 2, 5, 4, 8
+        x_init = torch.randn(B, C, H, W)
+        time_grid = torch.linspace(0, 1, 6)
+
+        result = sampler_instance.sample(x_init, time_grid)
+        assert torch.isfinite(result).all()
