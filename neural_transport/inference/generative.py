@@ -590,15 +590,23 @@ def iterative_generate_oco2(
 
     ### !!! Caution: need to fix this properly!!!
     good_dss = []
-    for ds in dss:
+    for i, ds in enumerate(dss):
         bad_mask = is_bad_sample(ds["co2massmix"])
-        good_samples = ~bad_mask
-        if good_samples.sum() == 0:
-            print(f"Skipping timestep {ds.time.values}, all samples are bad.")
-            continue
+        if bad_mask.all():  # all samples bad
+            print(f"All samples bad at time {ds.time.values}, creating fake sample")
+            ds_good = ds.copy()
+            if i > 0:
+                prev_ds = good_dss[-1]
+                ds_good["co2massmix"] = (
+                    prev_ds["co2massmix"]
+                    .mean(dim="sample", skipna=True)
+                    .expand_dims(sample=[0])
+                )
+            else:
+                ds_good["co2massmix"] = ds["co2massmix"].isel(sample=[0]) * np.nan
         else:
-            print(f"Bad samples at {ds.time.values}: {bad_mask.sum()}/{len(bad_mask)}")
-        ds_good = ds.isel(sample=good_samples)
+            sample_mask = xr.DataArray(~bad_mask, dims=["sample"])
+            ds_good = ds.where(sample_mask)
         good_dss.append(ds_good)
     if len(good_dss) == 0:
         raise RuntimeError("All generated samples were bad")

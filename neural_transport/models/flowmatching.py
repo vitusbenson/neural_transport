@@ -1020,7 +1020,7 @@ class FlowMatching(RegularGridModel):
 
             x_flat = x_0.reshape(B, -1)
             r = torch.norm(x_flat, dim=1)
-            eps = 1e-8
+            eps = 1e-6
             r = torch.clamp(r, min=eps)
 
             reg = (d - 1) * torch.log(r) + 0.5 * r**2
