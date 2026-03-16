@@ -404,8 +404,14 @@ def create_mask(batch, target_var="co2massmix", obs_fraction=0.1, mask_pattern="
     return obs_mask, obs_values  # [B T N C] each
 
 
-def is_bad_sample(arr, thresh=1e6):
-        return np.isnan(arr).any() or np.isinf(arr).any() or np.nanmax(np.abs(arr)) > thresh
+def is_bad_sample(da: xr.DataArray, thresh: float = 1e6):
+    """Check if any sample in arr has NaN, Inf, or values exceeding the threshold."""
+    reduce_dims = [d for d in da.dims if d not in ["sample"]]
+    bad_nan = da.isnull().any(dim=reduce_dims)
+    bad_inf = np.isinf(da).any(dim=reduce_dims)
+    bad_large = np.abs(da).max(dim=reduce_dims) > thresh
+    bad_mask = bad_nan | bad_inf | bad_large
+    return bad_mask.values  # [sample] boolean array
 
 
 def parse_freq(freq: str) -> int:
@@ -515,7 +521,6 @@ def iterative_generate_oco2(
             else:
                 obs_mask, obs_values = create_oco2_mask_test(batch_gen, target_var=target_var, mask_pattern=mask_pattern, nlat=nlat, nlon=nlon)
             batch_gen["obs_mask_original"] = obs_mask.clone()
-            ### End DEBUG
             batch_gen["obs_mask"] = obs_mask
             obs_values_normed = model.model.normalize_observations(obs_values, batch_gen, target_var=target_var, targshift=False)
             for k in target_vars_2d + generate_kwargs["generate_data_kwargs"]["forcing_vars"] + ["obs_mask", "obs_mask_original"]:
@@ -585,11 +590,18 @@ def iterative_generate_oco2(
 
     ### !!! Caution: need to fix this properly!!!
     good_dss = []
-    for i, ds in enumerate(dss):
-        if is_bad_sample(ds[target_vars_3d[0]].values):
-            print(f"Skipping bad sample {i}")
+    for ds in dss:
+        bad_mask = is_bad_sample(ds["co2massmix"])
+        good_samples = ~bad_mask
+        if good_samples.sum() == 0:
+            print(f"Skipping timestep {ds.time.values}, all samples are bad.")
             continue
-        good_dss.append(ds)
+        else:
+            print(f"Bad samples at {ds.time.values}: {bad_mask.sum()}/{len(bad_mask)}")
+        ds_good = ds.isel(sample=good_samples)
+        good_dss.append(ds_good)
+    if len(good_dss) == 0:
+        raise RuntimeError("All generated samples were bad")
 
     ds_all = xr.concat(good_dss, dim="time")
     ### !!!
@@ -706,6 +718,9 @@ def iterative_generate(
             sample=("sample", np.arange(n_samples)),
         )   
         ds = ds.expand_dims(time=[prototype_zarr.isel(time=t).time.values])
+        print(f"\nDEBUG iterative_generate after creating Dataset for t={t}")
+        for v in ds.data_vars:
+            print(v, ds[v].dims)
 
         if remap:
             ds = remap_with_cdo(dataset, prototype_zarr.isel(time=0), ds)
@@ -722,11 +737,14 @@ def iterative_generate(
 
     ### !!! Caution: need to fix this properly!!!
     good_dss = []
-    for i, ds in enumerate(dss):
-        if is_bad_sample(ds["co2massmix"].values):
-            print(f"Skipping bad sample {i}")
-            continue
-        good_dss.append(ds)
+    for ds in dss:
+        bad_mask = is_bad_sample(ds["co2massmix"])
+        print(f"Bad samples at {ds.time.values}: {bad_mask.sum()}/{len(bad_mask)}")
+        sample_mask = xr.DataArray(~bad_mask, dims=["sample"])
+        ds_good = ds.where(sample_mask)
+        good_dss.append(ds_good)
+    if len(good_dss) == 0:
+        raise RuntimeError("All generated samples were bad")
 
     ds_all = xr.concat(good_dss, dim="time")
     ### !!!

@@ -957,11 +957,16 @@ class FlowMatching(RegularGridModel):
                     print("  reserved:", torch.cuda.memory_reserved()/1e9, "GB")
                     print("  peak allocated:", torch.cuda.max_memory_allocated()/1e9, "GB")
             elif dflow_optimizer == "lbfgs":
+                max_iter_outer = generate_kwargs.get("lbfgs_max_iter_outer", 10)
+                max_iter_inner = generate_kwargs.get("lbfgs_max_iter_inner", 20)
+                convergence_threshold = generate_kwargs.get("lbfgs_convergence_threshold", 1e-3)
+                reg_loss_weight = generate_kwargs.get("lbfgs_reg_loss_weight", 1e-2)
+                reg_loss_type = generate_kwargs.get("lbfgs_reg_loss", "norm_diff")
                 x_0 = torch.nn.Parameter(x_init.clone().contiguous())  # [B C Nlat Nlon]
-                optimizer_x_0 = torch.optim.LBFGS([x_0], max_iter=10, line_search_fn='strong_wolfe')  # Use L-BFGS optimizer for better convergence
+                optimizer_x_0 = torch.optim.LBFGS([x_0], max_iter=max_iter_outer, line_search_fn='strong_wolfe')  # Use L-BFGS optimizer for better convergence
                 log_state = {}
                 with torch.enable_grad():
-                    for i in range(20):
+                    for i in range(max_iter_inner):
                         def closure():
                             optimizer_x_0.zero_grad()
                             trajectory = solver.sample(time_grid=time_grid,
@@ -977,15 +982,15 @@ class FlowMatching(RegularGridModel):
                             x_final = x_final * masking_config["obs_mask"]
                             x_target = torch.where(masking_config["obs_mask"], masking_config["obs_values"], torch.zeros_like(masking_config["obs_values"]))
                             obs_loss = torch.nn.functional.mse_loss(x_final, x_target)
-                            reg_loss = 1e-2 * (torch.norm(x_0) - torch.norm(x_init))**2  # Add regularization to prevent extreme values (alternatively 1e-2 * torch.norm(x_0)**2)
-                            loss = obs_loss + reg_loss
+                            reg_loss = self.lbfgs_reg_loss(x_0, x_init, reg_loss_type)
+                            loss = obs_loss + reg_loss_weight * reg_loss
                             loss.backward()
                             log_state["obs_loss"] = obs_loss.detach().item()
                             log_state["reg_loss"] = reg_loss.detach().item()
                             return loss
                         
                         loss = optimizer_x_0.step(closure)
-                        if loss.item() < 1e-3:
+                        if loss.item() < convergence_threshold:
                             print(f"Converged at step {i} with loss {loss.item():.3f}")
                             break
                         if i % 10 == 0:
@@ -1003,3 +1008,22 @@ class FlowMatching(RegularGridModel):
         print(f"  trajectory has NaN: {torch.isnan(trajectory).any()}")
         print(f"  trajectory[-1] stats: min={trajectory[-1].min()}, max={trajectory[-1].max()}")
         return trajectory
+    
+    def lbfgs_reg_loss(self, x_0, x_init, reg_loss_type="norm_diff"):
+        if reg_loss_type == "norm_diff":
+            return (torch.norm(x_0) - torch.norm(x_init))**2
+        elif reg_loss_type == "l2":
+            return torch.norm(x_0)**2
+        elif reg_loss_type == "chi_prior":
+            B = x_0.shape[0]
+            d = x_0[0].numel()
+
+            x_flat = x_0.reshape(B, -1)
+            r = torch.norm(x_flat, dim=1)
+            eps = 1e-8
+            r = torch.clamp(r, min=eps)
+
+            reg = (d - 1) * torch.log(r) + 0.5 * r**2
+            return reg.mean()
+        else:
+            raise ValueError(f"Unknown reg_loss_type: {reg_loss_type}")
