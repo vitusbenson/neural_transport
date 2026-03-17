@@ -334,40 +334,58 @@ Contents:
 ```python
 class GenerationPipeline:
     """Unified generation for all use cases."""
-    def __init__(self, model, data_loader, config: GenerateConfig): ...
+    def __init__(self, model, dataset, *, dataset_gen=None,
+                 target_vars_3d=None, target_vars_2d=None,
+                 device="cuda", verbose=True): ...
 
-    def run(self, out_dir: Path) -> xr.Dataset:
-        """Single entry point — dispatches based on config."""
+    @property
+    def mode(self) -> str:
+        """'timeseries' if dataset_gen provided, else 'sample'."""
 
-    def run_distributional(self, out_dir, n_gt, n_gen, batch_size) -> tuple[xr.Dataset, xr.Dataset]:
+    def run(self, out_dir, *, zarr_filename=None, freq=None,
+            rollout=False, zero_surfflux=False, remap=False,
+            save_obs=True, **generate_kwargs) -> xr.Dataset:
+        """Single entry point — dispatches based on mode."""
+
+    def run_distributional(self, out_dir, *, n_gt_samples=50, n_gen_samples=200,
+                           seed=42, batch_size=20,
+                           generate_kwargs=None) -> tuple[xr.Dataset, xr.Dataset]:
         """Replaces generate_for_distributional_eval()."""
 
-    # Internal methods (shared across modes):
-    def _prepare_batch(self, idx, device): ...
-    def _apply_masking(self, batch, masking_config): ...
-    def _run_inference(self, batch, noise): ...
-    def _postprocess_and_save(self, preds, out_dir): ...
+    # Shared internal methods:
+    def _setup(self, ...): ...                    # output paths, prototype zarr, model config
+    def _run_inference(self, model, batch): ...    # model forward + fix list preds
+    def _finalize(self, dss, obss, ...): ...       # concat, save, diagnostics
+    def _apply_sample_masking(self, ...): ...      # masking dispatch for sample mode
+    def _get_grid_coords(self): ...                # lat/lon from grid prototypes
 
-    # Mode-specific batch collection:
-    def _collect_sample_batch(self, ...): ...       # per-sample (OSSE)
-    def _collect_timeseries_batch(self, ...): ...   # windowed (OCO-2)
+    # Mode-specific methods:
+    def _run_sample(self, ...): ...                # per-sample loop (OSSE)
+    def _run_timeseries(self, ...): ...            # per-timestep loop (OCO-2)
 ```
 
-**Delete**: `generative.py` (all content now in `generation.py`, `masking.py`, `noise.py`)
+Utility functions: `get_zarrpath_obspath`, `remap_with_cdo`, `get_batches`, `is_bad_sample`, `parse_freq`, `align_time` — all moved from `generative.py`.
+
+Backward-compatible wrappers: `iterative_generate()`, `iterative_generate_oco2()`, `generate_for_distributional_eval()` — thin functions that construct `GenerationPipeline` and delegate.
+
+**Replace**: `generative.py` → thin re-export shim (imports from `generation.py`) for backward compat.
 
 ### Checklist
-- [ ] **Tests first**: Write `tests/test_generation_pipeline.py`:
+- [x] **Tests first**: Write `tests/test_generation_pipeline.py` (44 tests):
   - `GenerationPipeline.run()` with synthetic data produces correct output shape
-  - Sample mode: output has `sample` dimension
-  - Time-series mode: output has `time` dimension
+  - Sample mode: output has `sample` dimension, correct count, zarr saved
+  - Time-series mode: output has `time` dimension, `sample` dimension present
   - `run_distributional()` returns GT and gen datasets with correct sample counts
-  - Config with `masking=False` produces unconditional samples
-- [ ] Implement `GenerationPipeline` with shared + mode-specific methods
-- [ ] Integrate distributional eval as `run_distributional()`
-- [ ] Delete `generative.py`, update all imports across both repos
-- [ ] Verify: unconditional generation produces identical output to before
-- [ ] Verify: OSSE conditioning produces identical output
-- [ ] All existing tests still pass
+  - Config with `masking=False` produces unconditional samples (no obs_mask/obs_values)
+  - Utility functions: `parse_freq`, `is_bad_sample`, `align_time`, `get_zarrpath_obspath`, `get_batches`
+  - Backward-compatible wrapper functions work correctly
+- [x] Implement `GenerationPipeline` with shared + mode-specific methods
+- [x] Integrate distributional eval as `run_distributional()`
+- [x] Replace `generative.py` with thin re-export, update imports in `train.py` and `osse_runner.py`
+- [x] Fix pre-existing test failures in `test_toy_column_osse.py` (GenerateConfig→dict conversion, FlowDPSSampler API)
+- [ ] Verify: unconditional generation produces identical output to before (requires GPU model)
+- [ ] Verify: OSSE conditioning produces identical output (requires GPU model)
+- [x] All existing tests still pass (256 quick + 25 toy OSSE = 281 tests, ruff clean)
 
 ---
 

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-from neural_transport.inference.generative import iterative_generate
+from neural_transport.inference.generation import iterative_generate
 from neural_transport.inference.metrics import (
     OSSEResult,
     compute_all_metrics,

@@ -14,7 +14,7 @@ from neural_transport.inference.analyse import (
     compute_score_df_generate,
 )
 from neural_transport.inference.forecast import iterative_forecast
-from neural_transport.inference.generative import (
+from neural_transport.inference.generation import (
     generate_for_distributional_eval,
     iterative_generate,
     iterative_generate_oco2,

@@ -15,6 +15,7 @@ import torch
 
 pytestmark = pytest.mark.slow
 
+from neural_transport.configs import compat_to_generate_kwargs
 from neural_transport.experiments.toy_column_osse import (
     CONDITIONING_METHODS,
     ToyVelocityWrapper,
@@ -166,8 +167,8 @@ def test_unconditional_no_nan(quick_model_and_data):
 def test_conditioned_no_nan(quick_model_and_data, method):
     """Conditioned samples contain no NaN/Inf and values < 1000 (no divergence)."""
     ctx = quick_model_and_data
-    config = {k: v for k, v in CONDITIONING_METHODS[method].items()}
-    config.pop("_unconditional", False)
+    gen_config = CONDITIONING_METHODS[method]
+    config = compat_to_generate_kwargs(gen_config)
 
     torch.manual_seed(42)
     samples = sample_conditioned(
@@ -267,9 +268,9 @@ def test_flowdps_projection_unit(quick_model_and_data):
     torch.manual_seed(42)
     x_hat = torch.randn(1, ctx["nlev"], ctx["nlat"], ctx["nlon"], device=ctx["device"])
 
-    xco2_before = sampler.compute_xco2(x_hat)
+    xco2_before = sampler.forward_model.forward(x_hat)
     x_hat_proj = sampler._project_column(x_hat)
-    xco2_after = sampler.compute_xco2(x_hat_proj)
+    xco2_after = sampler.forward_model.forward(x_hat_proj)
 
     obs_mask = masking_config["obs_mask"]
     obs_values = masking_config["obs_values"]
