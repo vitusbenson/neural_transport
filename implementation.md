@@ -276,18 +276,19 @@ Contents:
 - All use `MaskingConstants` from configs (no more hardcoded values)
 
 ### Checklist
-- [ ] **Tests first**: Write `tests/test_masking.py`:
+- [x] **Tests first**: Write `tests/test_masking.py`:
   - `create_mask()` produces correct shapes and coverage fractions for each pattern
-  - Satellite mask respects tilt angle and swath width from `MaskingConstants`
+  - Satellite mask respects tilt angle and swath width from config constants
   - `masking_total_column_average_simple` correctly constrains column mean
-  - `compute_temporal_weight` returns correct schedule shapes (smooth_late, smooth_early, step)
+  - `get_temporal_weight` returns correct schedule shapes (smooth_late, smooth_early, step)
   - Edge cases: obs_fraction=0, obs_fraction=1, single-pixel masks
-- [ ] Extract mask creation functions from `generative.py` to `masking.py`
-- [ ] Extract `masking_*` methods from `MaskedVelocityWrapper` to standalone functions in `masking.py`
-- [ ] Extract `_get_temporal_weight` to `masking.py`
-- [ ] Replace all hardcoded masking constants with `MaskingConstants`
-- [ ] Update imports in `generative.py`, `flowmatching.py`
-- [ ] All existing tests still pass
+- [x] Extract mask creation functions from `generative.py` to `masking.py`
+- [x] Extract `masking_*` methods from `MaskedVelocityWrapper` to standalone functions in `masking.py`
+- [x] Extract `_get_temporal_weight` to `masking.py` (as `get_temporal_weight`)
+- [ ] Replace all hardcoded masking constants with `MaskingConstants` (deferred — constants already in `configs.py`)
+- [x] Update imports in `generative.py`, `flowmatching.py`
+- [x] `MaskedVelocityWrapper` delegates via thin methods to standalone functions
+- [x] All existing tests still pass (174 passed)
 
 ---
 
