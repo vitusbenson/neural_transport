@@ -1011,7 +1011,11 @@ class FlowMatching(RegularGridModel):
     
     def lbfgs_reg_loss(self, x_0, x_init, reg_loss_type="norm_diff"):
         if reg_loss_type == "norm_diff":
-            return (torch.norm(x_0) - torch.norm(x_init))**2
+            B = x_0.shape[0]
+            x_0_flat = x_0.reshape(B, -1)
+            x_init_flat = x_init.reshape(B, -1)
+            norm_diff = (torch.norm(x_0_flat, dim=1) - torch.norm(x_init_flat, dim=1))**2
+            return norm_diff.mean()
         elif reg_loss_type == "l2":
             return torch.norm(x_0)**2
         elif reg_loss_type == "chi_prior":
