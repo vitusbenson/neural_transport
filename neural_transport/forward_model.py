@@ -198,7 +198,7 @@ class XCO2ForwardModel:
         -------
         Tensor [B, C, Nlat, Nlon] — projected estimate.
         """
-        from neural_transport.models.flowmatching import _gaussian_smooth_2d
+        from neural_transport.tools.spatial import gaussian_smooth_2d as _gaussian_smooth_2d
 
         h_ak = self._get_h_ak_for_x(x_hat)
 

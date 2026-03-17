@@ -10,7 +10,7 @@ import torch
 from torch import Tensor
 
 from neural_transport.inference.samplers.base import PosteriorSampler
-from neural_transport.models.flowmatching import _gaussian_smooth_2d
+from neural_transport.tools.spatial import gaussian_smooth_2d as _gaussian_smooth_2d
 
 
 class StochasticPosteriorSampler(PosteriorSampler):

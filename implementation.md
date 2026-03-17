@@ -307,19 +307,19 @@ Contents:
 - Periodic longitude padding, separable 2D convolution
 
 ### Checklist
-- [ ] **Tests first**: Write `tests/test_noise.py`:
+- [x] **Tests first**: Write `tests/test_noise.py`:
   - Each noise pattern produces correct shape
   - No NaN/Inf in outputs
   - Noise patterns are deterministic given seed
-- [ ] **Tests first**: Write `tests/test_spatial.py`:
+- [x] **Tests first**: Write `tests/test_spatial.py`:
   - `gaussian_smooth_2d` with sigma=0 returns input unchanged
   - Periodic boundary: smoothing at lon=0 uses lon=360 data
   - Output shape matches input shape
   - Kernel size = `6*sigma+1` (from current code)
-- [ ] Extract noise functions to `noise.py`
-- [ ] Extract `_gaussian_smooth_2d` to `tools/spatial.py`
-- [ ] Update all imports in `flowmatching.py`, `samplers/*.py`, `generative.py`
-- [ ] All existing tests still pass
+- [x] Extract noise functions to `noise.py`
+- [x] Extract `_gaussian_smooth_2d` to `tools/spatial.py`
+- [x] Update all imports in `flowmatching.py`, `samplers/*.py`, `generative.py`
+- [x] All existing tests still pass
 
 ---
 

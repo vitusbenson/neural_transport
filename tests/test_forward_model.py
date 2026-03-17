@@ -6,7 +6,8 @@ import torch
 from conftest import MockSubmodel
 
 from neural_transport.forward_model import XCO2ForwardModel
-from neural_transport.models.flowmatching import MaskedVelocityWrapper, _gaussian_smooth_2d
+from neural_transport.models.flowmatching import MaskedVelocityWrapper
+from neural_transport.tools.spatial import gaussian_smooth_2d as _gaussian_smooth_2d
 
 
 def _make_wrapper(
