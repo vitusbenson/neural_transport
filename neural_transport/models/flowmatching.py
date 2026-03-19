@@ -8,7 +8,6 @@ from flow_matching.path.scheduler import CondOTScheduler
 from flow_matching.solver import ODESolver
 
 # neural_transport
-from neural_transport.configs import DT_FALLBACK
 from neural_transport.forward_model import XCO2ForwardModel
 from neural_transport.inference.masking import (
     apply_masking as _apply_masking_fn,
@@ -17,6 +16,7 @@ from neural_transport.inference.masking import (
     apply_temporal_weighting as _apply_temporal_weighting_fn,
 )
 from neural_transport.inference.masking import (
+    compute_dt,
     get_temporal_weight,
 )
 from neural_transport.models import MODELS
@@ -89,22 +89,18 @@ class MaskedVelocityWrapper(VelocityWrapper):
         self,
         submodel: nn.Module,
         masking_config: dict,
+        forward_model=None,
         nlev: int = 1,
         static_inputs: dict | None = None,
         **generate_kwargs,
     ):
         super().__init__(submodel=submodel, nlev=nlev, static_inputs=static_inputs)
+        self.masking_config = masking_config
+        # Frequently-accessed shortcuts
         self.obs_mask = masking_config.get("obs_mask", None)
         self.obs_values = masking_config.get("obs_values", None)
-        self.obs_mean = masking_config.get("obs_mean", None)
-        self.obs_std = masking_config.get("obs_std", None)
-        self.target_mean = masking_config.get("target_mean", None)
-        self.target_std = masking_config.get("target_std", None)
         self.ak = masking_config.get("ak", None)
-        self.xco2_prior = masking_config.get("xco2_prior", None)
-        self.co2_profile_prior = masking_config.get("co2_profile_prior", None)
         self.pressure_weights = masking_config.get("pressure_weights", None)
-        self.targshift_mean = masking_config.get("targshift_mean", None)
         self.time_grid = masking_config.get("time_grid", None)
 
         self.masking_time = generate_kwargs.get("masking_time", None)
@@ -115,16 +111,9 @@ class MaskedVelocityWrapper(VelocityWrapper):
         self.sigma_obs = generate_kwargs.get("sigma_obs", 1.0)
         self.spatial_smoothing_sigma = generate_kwargs.get("spatial_smoothing_sigma", 0.0)
 
-        self.forward_model = XCO2ForwardModel.from_masking_config(masking_config)
-
-    def compute_xco2(self, x):
-        """OCO-2 forward model: XCO2 = xco2_prior + sum(h * a * (x - x_prior)).
-
-        h = pressure_weights (h_k = dp_k / p_surface), a = averaging kernel.
-        Returns XCO2 in normalized observation space.
-        Delegates to self.forward_model.forward().
-        """
-        return self.forward_model.forward(x)
+        self.forward_model = (
+            forward_model if forward_model is not None else XCO2ForwardModel.from_masking_config(masking_config)
+        )
 
     def forward(self, x, t):
         if self.conditioning_mode == "velocity_projection":
@@ -139,9 +128,9 @@ class MaskedVelocityWrapper(VelocityWrapper):
     def forward_correction(self, x, t):
         """Original approach: modify state, compute correction term."""
         x_masked = self.apply_masking(x, t)
-        x_effective = self.apply_temporal_weighting(x, x_masked, t)
+        x_effective = _apply_temporal_weighting_fn(x, x_masked, t, self.masking_time, self.t_threshold)
 
-        dt = self.compute_dt(t)
+        dt = compute_dt(t, self.time_grid)
 
         # For column constraints (ak != None), feed uncorrected x to network.
         # Column corrections shift noise uniformly which is out-of-distribution
@@ -155,19 +144,14 @@ class MaskedVelocityWrapper(VelocityWrapper):
     def forward_velocity_projection(self, x, t):
         """Velocity projection: network sees unmodified state, velocity is
         blended between learned velocity and target velocity at observed locations."""
-        v = super().forward(x, t)  # learned velocity on UNMODIFIED state
-
-        # Compute target state at observed locations
+        v = super().forward(x, t)
         x_masked = self.apply_masking(x, t)
 
-        # Target velocity: what velocity would bring x to x_masked at t=1
         remaining_time = (1.0 - t.view(-1, 1, 1, 1)).clamp(min=1e-3)
         target_v = (x_masked - x) / remaining_time
 
-        # Temporal weighting
-        mask_weight = self._get_temporal_weight(t)
+        mask_weight = get_temporal_weight(t, self.masking_time, self.t_threshold)
 
-        # Blend: at observed locations use weighted target velocity
         v_obs = mask_weight * target_v + (1.0 - mask_weight) * v
         v_projected = torch.where(self.obs_mask, v_obs, v)
 
@@ -175,17 +159,15 @@ class MaskedVelocityWrapper(VelocityWrapper):
 
     def forward_guidance(self, x, t):
         """Soft gradient guidance (DPS-style): add data-fidelity gradient to velocity."""
-        v = super().forward(x, t)  # learned velocity on UNMODIFIED state
+        v = super().forward(x, t)
 
         if self.ak is not None:
             h_ak = self.forward_model._get_h_ak_for_x(x)
-            xco2 = self.compute_xco2(x)
-            # Use torch.where to avoid NaN from obs_values at unobserved locations
+            xco2 = self.forward_model.forward(x)
             obs_safe = torch.where(self.obs_mask, self.obs_values.detach(), torch.zeros_like(xco2))
             column_error = torch.where(self.obs_mask, xco2 - obs_safe, torch.zeros_like(xco2))
             if self.spatial_smoothing_sigma > 0:
                 column_error = _gaussian_smooth_2d(column_error, self.spatial_smoothing_sigma)
-            # Jacobian transpose of H(x) = sum_k h_k a_k x_k: gradient is h_k * a_k * error
             guidance = (h_ak / (self.sigma_obs**2)) * column_error
         else:
             obs_safe = torch.where(self.obs_mask, self.obs_values.detach(), torch.zeros_like(x))
@@ -193,7 +175,7 @@ class MaskedVelocityWrapper(VelocityWrapper):
             if self.spatial_smoothing_sigma > 0:
                 guidance = _gaussian_smooth_2d(guidance, self.spatial_smoothing_sigma)
 
-        mask_weight = self._get_temporal_weight(t)
+        mask_weight = get_temporal_weight(t, self.masking_time, self.t_threshold)
         return v - self.guidance_scale * mask_weight * guidance
 
     def forward_repaint(self, x, t):
@@ -206,24 +188,19 @@ class MaskedVelocityWrapper(VelocityWrapper):
             h = self.pressure_weights if self.pressure_weights is not None else 1.0 / x.shape[1]
             h_ak = h * self.ak
             h_ak_sum = h_ak.sum(dim=1, keepdim=True).clamp(min=1e-12)
-            xco2_current = self.compute_xco2(x)
+            xco2_current = self.forward_model.forward(x)
             xco2_target_v = (self.obs_values - xco2_current) / remaining_time
-            # Apply uniform target velocity across all levels to correctly constrain column.
-            # Target velocity per level: xco2_target_v / h_ak_sum (broadcast across levels)
             target_v = xco2_target_v / h_ak_sum
         else:
             target_v = (self.obs_values - x) / remaining_time
 
-        mask_weight = self._get_temporal_weight(t)
+        mask_weight = get_temporal_weight(t, self.masking_time, self.t_threshold)
         v_final = torch.where(self.obs_mask, mask_weight * target_v + (1 - mask_weight) * v, v)
         return v_final
 
-    def _get_temporal_weight(self, t):
-        """Get scalar temporal weight for conditioning."""
-        return get_temporal_weight(t, self.masking_time, self.t_threshold)
-
     def apply_masking(self, x, t):
         """Route to appropriate masking method."""
+        cfg = {k: v for k, v in self.masking_config.items() if k not in ("obs_mask", "obs_values", "time_grid")}
         return _apply_masking_fn(
             method=self.masking_method,
             x=x,
@@ -231,32 +208,8 @@ class MaskedVelocityWrapper(VelocityWrapper):
             obs_mask=self.obs_mask,
             obs_values=self.obs_values,
             forward_model=self.forward_model,
-            ak=self.ak,
-            pressure_weights=self.pressure_weights,
-            target_mean=self.target_mean,
-            target_std=self.target_std,
-            obs_mean=self.obs_mean,
-            obs_std=self.obs_std,
-            xco2_prior=self.xco2_prior,
-            co2_profile_prior=self.co2_profile_prior,
+            **cfg,
         )
-
-    def apply_temporal_weighting(self, x, x_masked, t):
-        """Apply temporal weighting based on masking_time strategy."""
-        return _apply_temporal_weighting_fn(x, x_masked, t, self.masking_time, self.t_threshold)
-
-    def compute_dt(self, t):
-        if self.time_grid is not None:
-            idx = torch.searchsorted(self.time_grid, t.item())
-            if idx == 0:
-                dt = self.time_grid[1] - self.time_grid[0]
-            elif idx >= len(self.time_grid):
-                dt = self.time_grid[-1] - self.time_grid[-2]
-            else:
-                dt = self.time_grid[idx] - self.time_grid[idx - 1]
-        else:
-            dt = DT_FALLBACK
-        return dt
 
 
 @torch.no_grad()
@@ -517,9 +470,11 @@ class FlowMatching(RegularGridModel):
             generate_kwargs = getattr(self, 'generate_kwargs', {})
 
         if obs_mask is not None and obs_values is not None:
+            forward_model = XCO2ForwardModel.from_masking_config(masking_config)
             return MaskedVelocityWrapper(
                 submodel=submodel,
                 masking_config=masking_config,
+                forward_model=forward_model,
                 nlev=self.nlev,
                 static_inputs=static_inputs,
                 **generate_kwargs,

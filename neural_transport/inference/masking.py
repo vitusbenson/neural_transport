@@ -7,7 +7,7 @@ Section B: Masking application functions (from MaskedVelocityWrapper)
 import numpy as np
 import torch
 
-from neural_transport.configs import SATELLITE_TILT_RAD, SWATH_SPACING_FACTOR
+from neural_transport.configs import DT_FALLBACK, SATELLITE_TILT_RAD, SWATH_SPACING_FACTOR
 from neural_transport.tools.conversion import molemix_to_massmix
 
 # ── Section A: Mask creation ─────────────────────────────────────────────
@@ -459,6 +459,21 @@ def apply_masking(method, x, t, obs_mask, obs_values, forward_model=None, **kwar
         return fn(x, obs_mask, obs_values, forward_model, **filtered)
     else:
         return fn(x, obs_mask, obs_values)
+
+
+def compute_dt(t, time_grid, fallback=DT_FALLBACK):
+    """Compute dt from time_grid at position t, with fallback."""
+    if time_grid is not None:
+        idx = torch.searchsorted(time_grid, t.item())
+        if idx == 0:
+            dt = time_grid[1] - time_grid[0]
+        elif idx >= len(time_grid):
+            dt = time_grid[-1] - time_grid[-2]
+        else:
+            dt = time_grid[idx] - time_grid[idx - 1]
+    else:
+        dt = fallback
+    return dt
 
 
 def apply_temporal_weighting(x, x_masked, t, masking_time, t_threshold=0.9):

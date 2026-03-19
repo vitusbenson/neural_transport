@@ -85,14 +85,14 @@ def _make_wrapper(
         spatial_smoothing_sigma=spatial_smoothing_sigma,
     )
 
-    return wrapper, x_norm, x_phys
+    return wrapper, x_norm, x_phys, masking_config
 
 
 class TestComputeXCO2WithPrior:
     def test_roundtrip(self):
         """XCO2 computed from x should match the obs_values we derived from x."""
-        wrapper, x_norm, x_phys = _make_wrapper(use_prior=True)
-        xco2_norm = wrapper.compute_xco2(x_norm)
+        wrapper, x_norm, x_phys, masking_config = _make_wrapper(use_prior=True)
+        xco2_norm = wrapper.forward_model.forward(x_norm)
         # obs_values were computed as (sum(pw*ak*x_phys) - obs_mean) / obs_std
         assert torch.allclose(xco2_norm, wrapper.obs_values, atol=1e-5), (
             f"Max error: {(xco2_norm - wrapper.obs_values).abs().max().item()}"
@@ -101,11 +101,11 @@ class TestComputeXCO2WithPrior:
     def test_with_targshift(self):
         """Roundtrip should also work when targshift_mean is active."""
         targshift_mean = torch.tensor(0.3).view(1, 1, 1, 1)
-        wrapper, x_norm, x_phys = _make_wrapper(use_prior=True, targshift_mean=targshift_mean)
+        wrapper, x_norm, x_phys, masking_config = _make_wrapper(use_prior=True, targshift_mean=targshift_mean)
         # x_norm was computed WITHOUT targshift. If targshift is active, the wrapper
         # adds it back, so we need to shift x_norm to simulate the targshift subtraction.
         x_shifted = x_norm - targshift_mean
-        xco2_norm = wrapper.compute_xco2(x_shifted)
+        xco2_norm = wrapper.forward_model.forward(x_shifted)
         assert torch.allclose(xco2_norm, wrapper.obs_values, atol=1e-5), (
             f"Max error: {(xco2_norm - wrapper.obs_values).abs().max().item()}"
         )
@@ -114,27 +114,27 @@ class TestComputeXCO2WithPrior:
 class TestComputeXCO2Fallback:
     def test_fallback_formula(self):
         """Fallback (no prior) should match sum(h_ak*x) + (mean/std)*(h_ak_sum-1)."""
-        wrapper, x_norm, _ = _make_wrapper(use_prior=False)
-        xco2 = wrapper.compute_xco2(x_norm)
+        wrapper, x_norm, _, masking_config = _make_wrapper(use_prior=False)
+        xco2 = wrapper.forward_model.forward(x_norm)
         # Manual computation
         h_ak = wrapper.pressure_weights * wrapper.ak
         h_ak_sum = h_ak.sum(dim=1, keepdim=True).clamp(min=1e-12)
-        expected = (h_ak * x_norm).sum(dim=1, keepdim=True) + (wrapper.target_mean / wrapper.target_std) * (
-            h_ak_sum - 1.0
-        )
+        expected = (h_ak * x_norm).sum(dim=1, keepdim=True) + (
+            masking_config["target_mean"] / masking_config["target_std"]
+        ) * (h_ak_sum - 1.0)
         assert torch.allclose(xco2, expected, atol=1e-5)
 
     def test_fallback_with_targshift(self):
         """Fallback with targshift should add targshift_mean * h_ak_sum."""
         targshift_mean = torch.tensor(0.5).view(1, 1, 1, 1)
-        wrapper, x_norm, _ = _make_wrapper(use_prior=False, targshift_mean=targshift_mean)
-        xco2 = wrapper.compute_xco2(x_norm)
+        wrapper, x_norm, _, masking_config = _make_wrapper(use_prior=False, targshift_mean=targshift_mean)
+        xco2 = wrapper.forward_model.forward(x_norm)
         # Manual computation
         h_ak = wrapper.pressure_weights * wrapper.ak
         h_ak_sum = h_ak.sum(dim=1, keepdim=True).clamp(min=1e-12)
         expected = (
             (h_ak * x_norm).sum(dim=1, keepdim=True)
-            + (wrapper.target_mean / wrapper.target_std) * (h_ak_sum - 1.0)
+            + (masking_config["target_mean"] / masking_config["target_std"]) * (h_ak_sum - 1.0)
             + targshift_mean * h_ak_sum
         )
         assert torch.allclose(xco2, expected, atol=1e-5)
@@ -143,7 +143,7 @@ class TestComputeXCO2Fallback:
 class TestGuidanceLevelWeighting:
     def test_surface_stronger_than_upper(self):
         """Guidance at surface level should be ~proportional to h_k*a_k (much stronger than upper)."""
-        wrapper, x_norm, _ = _make_wrapper(
+        wrapper, x_norm, _, masking_config = _make_wrapper(
             use_prior=False,
             conditioning_mode="guidance",
             guidance_scale=1.0,
@@ -186,7 +186,7 @@ class TestMaskingMethodsKept:
     )
     def test_method_runs(self, method):
         """Kept masking methods should execute without error."""
-        wrapper, x_norm, _ = _make_wrapper(use_prior=True, masking_method=method)
+        wrapper, x_norm, _, masking_config = _make_wrapper(use_prior=True, masking_method=method)
         t = torch.tensor(0.5)
         result = wrapper.apply_masking(x_norm, t)
         assert result.shape == x_norm.shape
@@ -209,7 +209,7 @@ class TestMaskingMethodsRemoved:
     )
     def test_method_raises(self, method):
         """Removed masking methods should raise ValueError via apply_masking."""
-        wrapper, x_norm, _ = _make_wrapper(use_prior=True, masking_method=method)
+        wrapper, x_norm, _, masking_config = _make_wrapper(use_prior=True, masking_method=method)
         t = torch.tensor(0.5)
         with pytest.raises(ValueError, match="Unknown masking method"):
             wrapper.apply_masking(x_norm, t)
@@ -259,7 +259,7 @@ class TestGaussianSmooth2D:
 class TestSigmaObs:
     def test_sigma_obs_scaling(self):
         """sigma_obs=2.0 should produce 4x weaker guidance than sigma_obs=1.0."""
-        wrapper_s1, x_norm, _ = _make_wrapper(
+        wrapper_s1, x_norm, _, _ = _make_wrapper(
             use_prior=False,
             conditioning_mode="guidance",
             guidance_scale=1.0,
@@ -267,7 +267,7 @@ class TestSigmaObs:
         )
         wrapper_s1.obs_values = wrapper_s1.obs_values + 1.0
 
-        wrapper_s2, _, _ = _make_wrapper(
+        wrapper_s2, _, _, _ = _make_wrapper(
             use_prior=False,
             conditioning_mode="guidance",
             guidance_scale=1.0,
@@ -285,7 +285,7 @@ class TestSigmaObs:
 
     def test_sigma_obs_1_backward_compat(self):
         """sigma_obs=1.0 should match behavior without sigma_obs parameter."""
-        wrapper, x_norm, _ = _make_wrapper(
+        wrapper, x_norm, _, _ = _make_wrapper(
             use_prior=False,
             conditioning_mode="guidance",
             guidance_scale=1.0,
@@ -301,7 +301,7 @@ class TestSigmaObs:
 class TestSpatialSmoothingSigma:
     def test_smoothed_guidance_is_smoother(self):
         """Guidance with smoothing should have lower Laplacian norm (smoother)."""
-        wrapper_no, x_norm, _ = _make_wrapper(
+        wrapper_no, x_norm, _, _ = _make_wrapper(
             use_prior=False,
             conditioning_mode="guidance",
             guidance_scale=1.0,
@@ -309,7 +309,7 @@ class TestSpatialSmoothingSigma:
         )
         wrapper_no.obs_values = wrapper_no.obs_values + 1.0
 
-        wrapper_sm, _, _ = _make_wrapper(
+        wrapper_sm, _, _, _ = _make_wrapper(
             use_prior=False,
             conditioning_mode="guidance",
             guidance_scale=1.0,
@@ -333,7 +333,7 @@ class TestSpatialSmoothingSigma:
 
     def test_no_nan_with_both_params(self):
         """No NaN when both sigma_obs and smoothing are enabled."""
-        wrapper, x_norm, _ = _make_wrapper(
+        wrapper, x_norm, _, _ = _make_wrapper(
             use_prior=False,
             conditioning_mode="guidance",
             guidance_scale=1.0,
@@ -375,67 +375,31 @@ class TestXCO2ForwardModelConstruction:
 
 
 class TestXCO2ForwardModelParityWithWrapper:
-    """forward() matches MaskedVelocityWrapper.compute_xco2() exactly."""
+    """forward() matches wrapper.forward_model.forward() exactly."""
 
     def test_parity_with_prior(self):
         """With-prior path matches wrapper."""
-        wrapper, x_norm, _ = _make_wrapper(use_prior=True)
-        fm = XCO2ForwardModel.from_masking_config(
-            {
-                "pressure_weights": wrapper.pressure_weights,
-                "ak": wrapper.ak,
-                "xco2_prior": wrapper.xco2_prior,
-                "co2_profile_prior": wrapper.co2_profile_prior,
-                "obs_mean": wrapper.obs_mean,
-                "obs_std": wrapper.obs_std,
-                "target_mean": wrapper.target_mean,
-                "target_std": wrapper.target_std,
-                "targshift_mean": wrapper.targshift_mean,
-            }
-        )
-        expected = wrapper.compute_xco2(x_norm)
+        wrapper, x_norm, _, masking_config = _make_wrapper(use_prior=True)
+        fm = XCO2ForwardModel.from_masking_config(masking_config)
+        expected = wrapper.forward_model.forward(x_norm)
         actual = fm.forward(x_norm)
         assert torch.allclose(actual, expected, atol=1e-7), f"Max error: {(actual - expected).abs().max().item()}"
 
     def test_parity_fallback(self):
         """Fallback (no prior) path matches wrapper."""
-        wrapper, x_norm, _ = _make_wrapper(use_prior=False)
-        fm = XCO2ForwardModel.from_masking_config(
-            {
-                "pressure_weights": wrapper.pressure_weights,
-                "ak": wrapper.ak,
-                "xco2_prior": None,
-                "co2_profile_prior": None,
-                "obs_mean": wrapper.obs_mean,
-                "obs_std": wrapper.obs_std,
-                "target_mean": wrapper.target_mean,
-                "target_std": wrapper.target_std,
-                "targshift_mean": wrapper.targshift_mean,
-            }
-        )
-        expected = wrapper.compute_xco2(x_norm)
+        wrapper, x_norm, _, masking_config = _make_wrapper(use_prior=False)
+        fm = XCO2ForwardModel.from_masking_config(masking_config)
+        expected = wrapper.forward_model.forward(x_norm)
         actual = fm.forward(x_norm)
         assert torch.allclose(actual, expected, atol=1e-7), f"Max error: {(actual - expected).abs().max().item()}"
 
     def test_parity_with_targshift(self):
         """With-prior + targshift path matches wrapper."""
         targshift_mean = torch.tensor(0.3).view(1, 1, 1, 1)
-        wrapper, x_norm, _ = _make_wrapper(use_prior=True, targshift_mean=targshift_mean)
-        fm = XCO2ForwardModel.from_masking_config(
-            {
-                "pressure_weights": wrapper.pressure_weights,
-                "ak": wrapper.ak,
-                "xco2_prior": wrapper.xco2_prior,
-                "co2_profile_prior": wrapper.co2_profile_prior,
-                "obs_mean": wrapper.obs_mean,
-                "obs_std": wrapper.obs_std,
-                "target_mean": wrapper.target_mean,
-                "target_std": wrapper.target_std,
-                "targshift_mean": wrapper.targshift_mean,
-            }
-        )
+        wrapper, x_norm, _, masking_config = _make_wrapper(use_prior=True, targshift_mean=targshift_mean)
+        fm = XCO2ForwardModel.from_masking_config(masking_config)
         x_shifted = x_norm - targshift_mean
-        expected = wrapper.compute_xco2(x_shifted)
+        expected = wrapper.forward_model.forward(x_shifted)
         actual = fm.forward(x_shifted)
         assert torch.allclose(actual, expected, atol=1e-7)
 
@@ -509,20 +473,8 @@ class TestXCO2ForwardModelLinearity:
 
     def test_affine_linearity_with_prior(self):
         """With-prior path is affine: H(a*x1+(1-a)*x2) == a*H(x1)+(1-a)*H(x2)."""
-        wrapper, _, _ = _make_wrapper(use_prior=True)
-        fm = XCO2ForwardModel.from_masking_config(
-            {
-                "pressure_weights": wrapper.pressure_weights,
-                "ak": wrapper.ak,
-                "xco2_prior": wrapper.xco2_prior,
-                "co2_profile_prior": wrapper.co2_profile_prior,
-                "obs_mean": wrapper.obs_mean,
-                "obs_std": wrapper.obs_std,
-                "target_mean": wrapper.target_mean,
-                "target_std": wrapper.target_std,
-                "targshift_mean": None,
-            }
-        )
+        wrapper, _, _, masking_config = _make_wrapper(use_prior=True)
+        fm = XCO2ForwardModel.from_masking_config(masking_config)
 
         torch.manual_seed(42)
         x1 = torch.randn(2, 5, 4, 4)
@@ -537,20 +489,8 @@ class TestXCO2ForwardModelLinearity:
 class TestXCO2ForwardModelProjection:
     def test_projection_reduces_error(self):
         """|y - H(project(x))| < |y - H(x)| at observed locations."""
-        wrapper, x_norm, x_phys = _make_wrapper(use_prior=True)
-        fm = XCO2ForwardModel.from_masking_config(
-            {
-                "pressure_weights": wrapper.pressure_weights,
-                "ak": wrapper.ak,
-                "xco2_prior": wrapper.xco2_prior,
-                "co2_profile_prior": wrapper.co2_profile_prior,
-                "obs_mean": wrapper.obs_mean,
-                "obs_std": wrapper.obs_std,
-                "target_mean": wrapper.target_mean,
-                "target_std": wrapper.target_std,
-                "targshift_mean": None,
-            }
-        )
+        wrapper, x_norm, x_phys, masking_config = _make_wrapper(use_prior=True)
+        fm = XCO2ForwardModel.from_masking_config(masking_config)
 
         # Add noise to create a gap between H(x) and obs
         x_noisy = x_norm + 0.5 * torch.randn_like(x_norm)
@@ -570,20 +510,8 @@ class TestXCO2ForwardModelProjection:
 
     def test_projection_idempotence(self):
         """project(project(x)) ≈ project(x)."""
-        wrapper, x_norm, _ = _make_wrapper(use_prior=True)
-        fm = XCO2ForwardModel.from_masking_config(
-            {
-                "pressure_weights": wrapper.pressure_weights,
-                "ak": wrapper.ak,
-                "xco2_prior": wrapper.xco2_prior,
-                "co2_profile_prior": wrapper.co2_profile_prior,
-                "obs_mean": wrapper.obs_mean,
-                "obs_std": wrapper.obs_std,
-                "target_mean": wrapper.target_mean,
-                "target_std": wrapper.target_std,
-                "targshift_mean": None,
-            }
-        )
+        wrapper, x_norm, _, masking_config = _make_wrapper(use_prior=True)
+        fm = XCO2ForwardModel.from_masking_config(masking_config)
 
         y = wrapper.obs_values
         mask = wrapper.obs_mask

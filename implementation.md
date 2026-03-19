@@ -404,14 +404,19 @@ Backward-compatible wrappers: `iterative_generate()`, `iterative_generate_oco2()
 **Refactor**: `__init__` receives `XCO2ForwardModel` instance instead of constructing internally.
 
 ### Checklist
-- [ ] **Tests first**: Verify all 17 `test_forward_model.py` tests still define expected behavior
-- [ ] Remove extracted methods from `MaskedVelocityWrapper`
-- [ ] Refactor `__init__` to receive `XCO2ForwardModel`
-- [ ] Update `FlowMatching` to construct and pass `XCO2ForwardModel`
-- [ ] Remove `dt=0.1` hardcoded fallback (now in `GenerateConfig`)
-- [ ] All 17 `test_forward_model.py` tests still pass
-- [ ] Toy OSSE still passes end-to-end
-- [ ] `MaskedVelocityWrapper` is now ~100 lines
+- [x] **Tests first**: Verify all 40 `test_forward_model.py` tests still define expected behavior
+- [x] Remove extracted methods from `MaskedVelocityWrapper` (`compute_xco2`, `_get_temporal_weight`, `apply_temporal_weighting`, `compute_dt`)
+- [x] Refactor `__init__` to receive `XCO2ForwardModel` via dependency injection
+- [x] Store `masking_config` as dict, keep only frequently-accessed shortcuts
+- [x] Update `FlowMatching.return_velocity_wrapper()` to construct and pass `XCO2ForwardModel`
+- [x] Move `compute_dt()` to `inference/masking.py` as module-level function
+- [x] Inline `get_temporal_weight()` calls at 3 call sites
+- [x] Simplify `apply_masking()` to pass kwargs from `self.masking_config`
+- [x] Update `tests/test_forward_model.py`: return `masking_config` from `_make_wrapper()`, fix attribute accesses
+- [x] All 40 `test_forward_model.py` tests pass
+- [x] All 256 quick tests pass
+- [x] ruff check clean
+- [x] `MaskedVelocityWrapper` is now ~123 lines (down from ~174)
 
 ---
 
