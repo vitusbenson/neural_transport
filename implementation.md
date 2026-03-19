@@ -486,18 +486,18 @@ class EvaluationSuite:
 - `gen_eval_callback.py` → use `EvaluationSuite` instead of ad-hoc metrics
 
 ### Checklist
-- [ ] **Tests first**: Write `tests/test_evaluation_suite.py`:
+- [x] **Tests first**: Write `tests/test_evaluation_suite.py` (24 tests):
   - `evaluate_deterministic` returns `EvalResult` with populated `pointwise`, `None` ensemble
   - `evaluate_ensemble` returns `EvalResult` with both `pointwise` and `ensemble`
   - `evaluate_distributional` returns `EvalResult` with `distributional` populated
   - `to_dataframe` produces correct columns
   - `to_json` roundtrips with `from_json`
-- [ ] Implement `EvaluationSuite`
-- [ ] Implement `EvalResult` with serialization
-- [ ] Migrate `analyse.py` functions to be thin wrappers
-- [ ] Refactor `gen_eval_callback.py` to use `EvaluationSuite`
-- [ ] Verify transport model validation still produces correct metrics
-- [ ] All existing tests still pass
+- [x] Implement `EvaluationSuite` — `evaluation/suite.py`
+- [x] Implement `EvalResult` with serialization — `evaluation/suite.py`
+- [ ] ~~Migrate `analyse.py` functions to be thin wrappers~~ — **skipped**: `analyse.py` is deeply xarray-specific; `EvaluationSuite` is a parallel numpy-level API
+- [x] Refactor `gen_eval_callback.py` to use `EvaluationSuite` (deterministic + direct energy_distance)
+- [x] Verify transport model validation still produces correct metrics (317 tests pass)
+- [x] All existing tests still pass
 
 ---
 

@@ -9,9 +9,8 @@ import numpy as np
 import pytorch_lightning as pl
 import torch
 
-from neural_transport.inference.distributional_metrics import (
-    energy_distance,
-)
+from neural_transport.evaluation import energy_distance
+from neural_transport.evaluation.suite import EvaluationSuite
 
 
 class GenerationQualityCallback(pl.Callback):
@@ -38,6 +37,7 @@ class GenerationQualityCallback(pl.Callback):
         eval_every_n_epochs=5,
         target_var="co2massmix",
         generate_kwargs=None,
+        eval_config=None,
     ):
         super().__init__()
         self.val_dataset = val_dataset
@@ -46,6 +46,7 @@ class GenerationQualityCallback(pl.Callback):
         self.eval_every_n_epochs = eval_every_n_epochs
         self.target_var = target_var
         self.generate_kwargs = generate_kwargs or {}
+        self.suite = EvaluationSuite(eval_config)
 
     @torch.no_grad()
     def on_validation_epoch_end(self, trainer, pl_module):
@@ -112,10 +113,10 @@ class GenerationQualityCallback(pl.Callback):
 
             gen_fields = np.stack(gen_fields)  # [n_gen, N, C]
 
-            # Compute RMSE (ensemble mean vs GT mean)
+            # Compute RMSE via EvaluationSuite
             gt_mean = gt_fields.mean(axis=0)
             gen_mean = gen_fields.mean(axis=0)
-            rmse = float(np.sqrt(np.mean((gt_mean - gen_mean) ** 2)))
+            result = self.suite.evaluate_deterministic(gen_mean, gt_mean)
 
             # Compute energy distance on anomalies
             gt_anom = gt_fields - gt_fields.mean(axis=(1, 2), keepdims=True)
@@ -123,7 +124,7 @@ class GenerationQualityCallback(pl.Callback):
             e_dist = energy_distance(gt_anom, gen_anom)
 
             # Log metrics
-            pl_module.log("GenEval/RMSE", rmse, prog_bar=True)
+            pl_module.log("GenEval/RMSE", result.pointwise["rmse"], prog_bar=True)
             pl_module.log("GenEval/energy_distance", e_dist)
             pl_module.log("GenEval/gen_std", float(gen_fields.std()))
 

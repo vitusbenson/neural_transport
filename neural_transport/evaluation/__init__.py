@@ -45,3 +45,4 @@ from neural_transport.evaluation.pointwise import (  # noqa: F401
     rmse_np,
     rmse_xr,
 )
+from neural_transport.evaluation.suite import EvalResult, EvaluationSuite  # noqa: F401
