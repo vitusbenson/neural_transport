@@ -198,6 +198,8 @@ class PlotConfig:
     imgformats: list[str] = field(default_factory=lambda: ["pdf"])
     dpi: int = 150
     target_pressures: tuple[int, ...] = DEFAULT_TARGET_PRESSURES
+    save_dir: str = "plots"
+    figsize_scale: float = 1.0
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)

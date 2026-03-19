@@ -541,17 +541,18 @@ def run_plots(result: EvalResult, ctx: PlotContext, categories: list[str] | None
 - All accept `EvalResult` and use `PlotContext`
 
 ### Checklist
-- [ ] **Tests first**: Write `tests/test_plots.py`:
+- [x] **Tests first**: Write `tests/test_plots.py`:
   - `PlotContext.savefig` creates files in expected formats
   - `register_plot` adds to `PLOT_REGISTRY`
   - `run_plots(categories=["always"])` calls exactly the "always" plots
   - `run_plots(categories=None)` infers categories from `EvalResult` content
   - Plot functions don't crash with minimal synthetic data
-- [ ] Implement `PlotContext` with publication rcParams (font sizes, IPCC colormaps, consistent figure sizing)
-- [ ] Implement `register_plot` decorator and `run_plots` dispatcher
-- [ ] Implement `field_plots.py` with always-on plots
-- [ ] Extract hardcoded target pressures `[1013, 843, 441, 73]` into `PlotConfig.target_pressures`
-- [ ] Verify always-on plots render correctly with sample data
+- [x] Implement `PlotContext` with publication rcParams (font sizes, IPCC colormaps, consistent figure sizing)
+- [x] Implement `register_plot` decorator and `run_plots` dispatcher
+- [x] Implement `field_plots.py` with always-on plots
+- [x] Extract hardcoded target pressures `[1013, 843, 441, 73]` into `PlotConfig.target_pressures`
+- [x] Verify always-on plots render correctly with sample data
+- [x] Added `save_dir` and `figsize_scale` to `PlotConfig`
 
 ---
 

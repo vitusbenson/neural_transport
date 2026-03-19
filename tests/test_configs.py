@@ -282,6 +282,8 @@ class TestPlotConfig:
         assert pc.imgformats == ["pdf"]
         assert pc.dpi == 150
         assert pc.target_pressures == (1013, 843, 441, 73)
+        assert pc.save_dir == "plots"
+        assert pc.figsize_scale == 1.0
 
     def test_roundtrip(self):
         pc = PlotConfig(dpi=300, target_pressures=(500, 200))
