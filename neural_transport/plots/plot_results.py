@@ -9,11 +9,18 @@ import seaborn as sns
 import torch
 import xarray as xr
 import xrft
-import xskillscore
 from sklearn.decomposition import PCA
 from xmovie import Movie
 from xmovie.core import convert_gif
 
+from neural_transport.evaluation.pointwise import METRICS_XR as METRICS  # noqa: F401
+from neural_transport.evaluation.pointwise import bias_xr as bias  # noqa: F401
+from neural_transport.evaluation.pointwise import mae_xr as mae  # noqa: F401
+from neural_transport.evaluation.pointwise import nse_xr as nse  # noqa: F401
+from neural_transport.evaluation.pointwise import r2_xr as r2  # noqa: F401
+from neural_transport.evaluation.pointwise import rel_mean_xr as rel_mean  # noqa: F401
+from neural_transport.evaluation.pointwise import rel_std_xr as rel_std  # noqa: F401
+from neural_transport.evaluation.pointwise import rmse_xr as rmse  # noqa: F401
 from neural_transport.inference.analyse import freq_mean
 from neural_transport.tools.conversion import (
     density_to_massmix,
@@ -63,48 +70,6 @@ def plot_value_over_leadtime(da, ylabel="", ylim=[0, 1], thresh_value=None, figs
     return fig
 
 
-def rmse(pred, targ, weights, dims=["lat", "lon"]):
-    return ((pred - targ) ** 2 * weights).mean(dims) ** 0.5
-
-
-def mae(pred, targ, weights, dims=["lat", "lon"]):
-    return (np.abs(pred - targ) * weights).mean(dims)
-
-
-def bias(pred, targ, weights, dims=["lat", "lon"]):
-    return (pred * weights).mean(dims) - (targ * weights).mean(dims)
-
-
-def r2(pred, targ, weights, dims=["lat", "lon"]):
-    return (
-        xskillscore.pearson_r(
-            pred,
-            targ,
-            dim=dims,
-            weights=weights.isel(**{d: 0 for d in weights.dims if d not in dims}),
-        )
-        ** 2
-    )
-
-
-def nse(pred, targ, weights, dims=["lat", "lon"]):
-    return xskillscore.r2(
-        pred,
-        targ,
-        dim=dims,
-        weights=weights.isel(**{d: 0 for d in weights.dims if d not in dims}),
-    )
-
-
-def rel_mean(pred, targ, weights, dims=["lat", "lon"]):
-    return (pred * weights).mean(dims) / (targ * weights).mean(dims)
-
-
-def rel_std(pred, targ, weights, dims=["lat", "lon"]):
-    return (pred * weights).std(dims) / (targ * weights).std(dims)
-
-
-METRICS = dict(rmse=rmse, mae=mae, bias=bias, r2=r2, nse=nse, rel_mean=rel_mean, rel_std=rel_std)
 METRIC_LABELS = dict(
     rmse="RMSE",
     mae="MAE",

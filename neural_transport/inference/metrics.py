@@ -8,16 +8,13 @@ from dataclasses import asdict, dataclass
 
 import numpy as np
 
-from neural_transport.tools.metrics import crps
-
-
-def _to_numpy(x) -> np.ndarray:
-    """Convert torch.Tensor or xr.DataArray to numpy ndarray."""
-    if hasattr(x, "values"):  # xarray
-        return x.values
-    if hasattr(x, "detach"):  # torch
-        return x.detach().cpu().numpy()
-    return np.asarray(x)
+from neural_transport.evaluation.ensemble import (
+    calibration_score,
+    crps_ensemble,
+    rank_histogram,
+    spread_skill_ratio,
+)
+from neural_transport.evaluation.pointwise import _to_numpy  # noqa: F401
 
 
 def compute_xco2_column(field, pressure_weights, ak):
@@ -124,116 +121,6 @@ def rmse_away(pred, gt, mask_2d, weights=None):
     mask_3d = mask_2d[:, :, None].repeat(gt.shape[-1], axis=-1)
     diff = pred - gt
     return float(np.sqrt(np.mean(diff[~mask_3d] ** 2)))
-
-
-def crps_ensemble(samples, gt):
-    """Thin wrapper around neural_transport.tools.metrics.crps().
-
-    Parameters
-    ----------
-    samples : np.ndarray, shape [n_samples, nlat, nlon, (nlev)]
-    gt : np.ndarray, shape [nlat, nlon, (nlev)]
-
-    Returns
-    -------
-    crps_map : np.ndarray, shape [nlat, nlon, (nlev)]
-    crps_mean : float
-    """
-    # For 3D fields, compute CRPS on column-mean to avoid axis reduction bug
-    # in the upstream crps() when crps_map is 3D.
-    if gt.ndim == 3:
-        # Compute per-level CRPS by collapsing to 2D per level, then average
-        nlev = gt.shape[-1]
-        crps_maps = []
-        crps_means = []
-        for lev in range(nlev):
-            cmap, cmean = crps(samples[:, :, :, lev], gt[:, :, lev])
-            crps_maps.append(cmap)
-            crps_means.append(cmean)
-        crps_map = np.stack(crps_maps, axis=-1)  # [nlat, nlon, nlev]
-        crps_mean = float(np.mean(crps_means))
-    else:
-        crps_map, crps_mean = crps(samples, gt)
-    return crps_map, crps_mean
-
-
-def spread_skill_ratio(samples, gt):
-    """Ratio of ensemble std to ensemble-mean absolute error.
-
-    Parameters
-    ----------
-    samples : np.ndarray, shape [n_samples, nlat, nlon, nlev]
-    gt : np.ndarray, shape [nlat, nlon, nlev]
-
-    Returns
-    -------
-    float
-    """
-    ens_mean = samples.mean(axis=0)
-    ens_spread = samples.std(axis=0)
-    ens_error = np.abs(ens_mean - gt)
-    return float(np.mean(ens_spread) / max(np.mean(ens_error), 1e-12))
-
-
-def calibration_score(samples, gt, quantiles=None):
-    """PIT calibration: fraction of GT below ensemble quantiles.
-
-    For each nominal quantile q, compute the fraction of grid points where
-    the ground truth falls below the q-th percentile of the ensemble.
-    A well-calibrated ensemble has observed fractions matching nominal ones.
-
-    Parameters
-    ----------
-    samples : np.ndarray, shape [n_samples, ...]
-    gt : np.ndarray, shape [...]
-    quantiles : np.ndarray, optional. Defaults to linspace(0.05, 0.95, 19).
-
-    Returns
-    -------
-    dict with keys 'nominal', 'observed', 'calibration_error'.
-    """
-    if quantiles is None:
-        quantiles = np.linspace(0.05, 0.95, 19)
-    quantiles = np.asarray(quantiles)
-
-    # Compute ensemble percentiles at each quantile
-    percentiles = np.percentile(samples, quantiles * 100, axis=0)  # [n_quantiles, ...]
-
-    # For each quantile, fraction of grid points where gt < percentile
-    gt_expanded = gt[None, ...]  # [1, ...]
-    observed = np.array([float(np.mean(gt_expanded[0] < percentiles[i])) for i in range(len(quantiles))])
-
-    calibration_error = float(np.mean((observed - quantiles) ** 2) ** 0.5)
-
-    return {
-        "nominal": quantiles.tolist(),
-        "observed": observed.tolist(),
-        "calibration_error": calibration_error,
-    }
-
-
-def rank_histogram(samples, gt):
-    """Talagrand rank histogram.
-
-    For each grid point, compute the rank of the ground truth among ensemble
-    members. A uniform histogram indicates a well-calibrated ensemble.
-
-    Parameters
-    ----------
-    samples : np.ndarray, shape [n_samples, ...]
-    gt : np.ndarray, shape [...]
-
-    Returns
-    -------
-    np.ndarray, shape [n_samples + 1]. Histogram counts.
-    """
-    n_samples = samples.shape[0]
-    # Count how many ensemble members are below gt at each grid point
-    ranks = np.sum(samples < gt[None, ...], axis=0).ravel()  # [N_gridpoints]
-    histogram = np.bincount(ranks, minlength=n_samples + 1).astype(float)
-    # Normalize to fractions
-    histogram = histogram / histogram.sum()
-    return histogram
 
 
 def spatial_roughness(field_2d):

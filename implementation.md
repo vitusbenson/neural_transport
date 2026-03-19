@@ -435,19 +435,19 @@ Backward-compatible wrappers: `iterative_generate()`, `iterative_generate_oco2()
 - `neural_transport/evaluation/distributional.py` — energy distance, MMD, Wasserstein, KL
 
 ### Checklist
-- [ ] **Tests first**: Write `tests/test_evaluation_metrics.py`:
+- [x] **Tests first**: Write `tests/test_evaluation_metrics.py`:
   - Each metric function: known input → known output (e.g. RMSE of zeros = 0)
   - Metric symmetry/invariance properties where applicable
   - Latitude-weighted RMSE differs from unweighted
   - CRPS with perfect ensemble = 0
   - Energy distance of identical distributions = 0
-- [ ] Implement `pointwise.py` consolidating all metric definitions
-- [ ] Implement `ensemble.py` migrating from `metrics.py`
-- [ ] Implement `distributional.py` migrating from `distributional_metrics.py`
-- [ ] Delete duplicate metric definitions from `plot_results.py` (lines 66-107), import from `evaluation.pointwise`
-- [ ] Extract `max_n=200` energy distance cutoff into `EvalConfig`
-- [ ] Update `analyse.py` to import from `evaluation.*` instead of defining inline
-- [ ] All existing metric tests still pass (`test_distributional_metrics.py`)
+- [x] Implement `pointwise.py` consolidating all metric definitions
+- [x] Implement `ensemble.py` migrating from `metrics.py`
+- [x] Implement `distributional.py` migrating from `distributional_metrics.py`
+- [x] Delete duplicate metric definitions from `plot_results.py` (lines 66-107), import from `evaluation.pointwise`
+- [x] Extract `max_n=200` energy distance cutoff into `EvalConfig` *(done in Phase 2: MAX_N_DISTRIBUTIONAL in configs.py)*
+- [x] Update `analyse.py` to import from `evaluation.*` instead of defining inline
+- [x] All existing metric tests still pass (`test_distributional_metrics.py`)
 
 ---
 

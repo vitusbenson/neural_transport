@@ -7,16 +7,13 @@ import xskillscore
 from scipy.stats import linregress
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
+from neural_transport.evaluation.ensemble import crps
+from neural_transport.evaluation.pointwise import compute_error_maps, compute_error_scalars
 from neural_transport.tools.conversion import (
     M_C,
     M_CO2,
     density_to_massmix,
     massmix_to_molemix,
-)
-from neural_transport.tools.metrics import (
-    compute_error_maps,
-    compute_error_scalars,
-    crps,
 )
 
 # Ratio of CO2 molecular mass to carbon atomic mass (~3.664)
@@ -396,7 +393,7 @@ def compute_distributional_score_df(
     Returns:
         pd.DataFrame with all metric values.
     """
-    from neural_transport.inference.distributional_metrics import compute_distributional_metrics
+    from neural_transport.evaluation.distributional import compute_distributional_metrics
 
     gt_fields = gt_anomalies[target_var].values  # [N, nlat, nlon, nlev]
     gen_fields = gen_anomalies[target_var].values  # [M, nlat, nlon, nlev]
