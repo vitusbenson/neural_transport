@@ -963,7 +963,7 @@ class FlowMatching(RegularGridModel):
                 reg_loss_weight = generate_kwargs.get("lbfgs_reg_loss_weight", 1e-2)
                 reg_loss_type = generate_kwargs.get("lbfgs_reg_loss", "norm_diff")
                 x_0 = torch.nn.Parameter(x_init.clone().contiguous())  # [B C Nlat Nlon]
-                optimizer_x_0 = torch.optim.LBFGS([x_0], max_iter=max_iter_outer, line_search_fn='strong_wolfe')  # Use L-BFGS optimizer for better convergence
+                optimizer_x_0 = torch.optim.LBFGS([x_0], max_iter=max_iter_outer, lr=0.5, line_search_fn='strong_wolfe')  # Use L-BFGS optimizer for better convergence
                 log_state = {}
                 with torch.enable_grad():
                     for i in range(max_iter_inner):
@@ -986,7 +986,7 @@ class FlowMatching(RegularGridModel):
                             loss = obs_loss + reg_loss_weight * reg_loss
                             loss.backward()
                             log_state["obs_loss"] = obs_loss.detach().item()
-                            log_state["reg_loss"] = reg_loss.detach().item()
+                            log_state["reg_loss_weighted"] = (reg_loss_weight * reg_loss).detach().item()
                             return loss
                         
                         loss = optimizer_x_0.step(closure)
@@ -995,7 +995,7 @@ class FlowMatching(RegularGridModel):
                             break
                         if i % 10 == 0:
                             print(f"Refinement step {i}, loss: {loss.item():.6f}")
-                            print(f"  obs_loss: {log_state['obs_loss']:.6f}, reg_loss: {log_state['reg_loss']:.6f}")
+                            print(f"  obs_loss: {log_state['obs_loss']:.6f}, reg_loss_weighted: {log_state['reg_loss_weighted']:.6f}")
                 with torch.no_grad():
                     trajectory = solver.sample(time_grid=time_grid,
                                                             x_init=x_0,
@@ -1010,14 +1010,16 @@ class FlowMatching(RegularGridModel):
         return trajectory
     
     def lbfgs_reg_loss(self, x_0, x_init, reg_loss_type="norm_diff"):
-        if reg_loss_type == "norm_diff":
+        if reg_loss_type is None:
+            return torch.tensor(0.0, device=x_0.device) # No regularization
+        elif reg_loss_type == "norm_diff":
             B = x_0.shape[0]
             x_0_flat = x_0.reshape(B, -1)
             x_init_flat = x_init.reshape(B, -1)
             norm_diff = (torch.norm(x_0_flat, dim=1) - torch.norm(x_init_flat, dim=1))**2
-            return norm_diff.mean()
+            return norm_diff.mean()  # Encourage the norm of x_0 to be close to the norm of x_init, which can help with optimization stability. This allows x_0 to deviate from x_init in direction but not in magnitude, which can be beneficial since the flow is designed to transform noise into data and the noise typically has a certain expected norm.
         elif reg_loss_type == "l2":
-            return torch.norm(x_0)**2
+            return torch.norm(x_0)**2  # L2 regularization on x_0 to prevent it from growing too large, which can help with optimization stability. This encourages the solution to stay close to the initial noise level, which can be beneficial since the flow is designed to transform noise into data.
         elif reg_loss_type == "chi_prior":
             B = x_0.shape[0]
             d = x_0[0].numel()
@@ -1028,6 +1030,6 @@ class FlowMatching(RegularGridModel):
             r = torch.clamp(r, min=eps)
 
             reg = (d - 1) * torch.log(r) + 0.5 * r**2
-            return reg.mean()
+            return reg.mean()  # This is the negative log-likelihood of the chi distribution with d degrees of freedom, which is the distribution of the norm of a Gaussian vector in d dimensions. It encourages the norm of x_0 to be close to sqrt(d), which is the expected norm for a Gaussian vector. The eps is added to avoid log(0) when r is very small.
         else:
             raise ValueError(f"Unknown reg_loss_type: {reg_loss_type}")
