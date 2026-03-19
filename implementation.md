@@ -641,14 +641,16 @@ class GridInfo:
 Note: `cos_lat_weights` is currently recomputed in every experiment script — this centralizes it.
 
 ### Checklist
-- [ ] **Tests first**: Write `tests/test_data_loading.py`:
+- [x] **Tests first**: Write `tests/test_data_loading.py`:
   - `InferenceDataLoader` constructs from `DataConfig`
   - `get_batch` returns tensors with correct shapes
   - `grid_info` matches expected dimensions
   - `cos_lat_weights` matches manually computed values
-- [ ] Implement `InferenceDataLoader` and `GridInfo`
-- [ ] Update `GenerationPipeline` (Phase 8) to use `InferenceDataLoader`
-- [ ] Verify generation produces identical output
+- [x] Implement `InferenceDataLoader` and `GridInfo`
+- [x] Update `GenerationPipeline` (Phase 8) to use `InferenceDataLoader`
+- [x] Verify generation produces identical output
+
+**Notes**: `GridInfo` provides three cos-lat-weight properties (`cos_lat_weights_2d`, `cos_lat_weights_flat`, `cos_lat_weights` alias). `GenerationPipeline.__init__` accepts both `CarbonDataset` and `InferenceDataLoader` — fully backward compatible. 15 new tests, all passing. `data_path` is a separate arg from `DataConfig` per design.
 
 ---
 

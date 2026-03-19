@@ -175,15 +175,24 @@ class GenerationPipeline:
         device="cuda",
         verbose=True,
     ):
+        from neural_transport.data import InferenceDataLoader
+
         self.model = model
-        self.dataset = dataset
-        self.dataset_gen = dataset_gen
         self.target_vars_3d = target_vars_3d or ["co2massmix"]
         self.target_vars_2d = target_vars_2d or []
         self.device = device
         self.verbose = verbose
-        self.nlat = model.model.in_nlat
-        self.nlon = model.model.in_nlon
+
+        if isinstance(dataset, InferenceDataLoader):
+            self.dataset = dataset.dataset
+            self.nlat = dataset.grid_info.nlat
+            self.nlon = dataset.grid_info.nlon
+        else:
+            self.dataset = dataset
+            self.nlat = model.model.in_nlat
+            self.nlon = model.model.in_nlon
+
+        self.dataset_gen = dataset_gen
 
     @property
     def mode(self):
