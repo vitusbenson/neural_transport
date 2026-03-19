@@ -183,3 +183,72 @@ def test_inference_data_loader_len():
     loader._dataset = mock_ds
 
     assert len(loader) == 42
+
+
+# ---------------------------------------------------------------------------
+# InferenceDataLoader.get_window_batch tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.quick
+def test_get_window_batch_single_step():
+    """Single-step window returns same shape as get_batch."""
+    cfg = DataConfig()
+    loader = InferenceDataLoader(cfg, data_path="/fake/path")
+    mock_ds = _make_mock_dataset()
+    loader._dataset = mock_ds
+
+    batch = loader.get_window_batch(0, window_steps=1, device="cpu")
+    assert isinstance(batch, dict)
+    assert batch["co2massmix"].shape == (1, 32 * 64, 10)
+
+
+@pytest.mark.quick
+def test_get_window_batch_multi_step():
+    """Multi-step window aggregates correctly."""
+    cfg = DataConfig()
+    loader = InferenceDataLoader(cfg, data_path="/fake/path")
+    mock_ds = _make_mock_dataset()
+    loader._dataset = mock_ds
+
+    batch = loader.get_window_batch(0, window_steps=3, device="cpu")
+    assert isinstance(batch, dict)
+    assert batch["co2massmix"].shape == (1, 32 * 64, 10)
+
+
+@pytest.mark.quick
+def test_get_window_batch_clamp_to_length():
+    """Window extending past dataset length is clamped."""
+    cfg = DataConfig()
+    loader = InferenceDataLoader(cfg, data_path="/fake/path")
+    mock_ds = _make_mock_dataset(n_samples=3)
+    loader._dataset = mock_ds
+
+    # Request 10 steps but only 3 available
+    batch = loader.get_window_batch(1, window_steps=10, device="cpu")
+    assert "co2massmix" in batch
+
+
+@pytest.mark.quick
+def test_get_window_batch_nanmean_agg():
+    """nanmean aggregation works."""
+    cfg = DataConfig()
+    loader = InferenceDataLoader(cfg, data_path="/fake/path")
+    mock_ds = _make_mock_dataset()
+    loader._dataset = mock_ds
+
+    batch = loader.get_window_batch(0, window_steps=2, device="cpu", agg="nanmean")
+    assert "co2massmix" in batch
+
+
+@pytest.mark.quick
+def test_get_window_batch_preserves_normalization():
+    """Normalization stat keys are preserved."""
+    cfg = DataConfig()
+    loader = InferenceDataLoader(cfg, data_path="/fake/path")
+    mock_ds = _make_mock_dataset()
+    loader._dataset = mock_ds
+
+    batch = loader.get_window_batch(0, window_steps=1, device="cpu")
+    assert "co2massmix_offset" in batch
+    assert "co2massmix_scale" in batch

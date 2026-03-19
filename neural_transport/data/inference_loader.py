@@ -132,6 +132,52 @@ class InferenceDataLoader:
         sample = self.dataset[idx]
         return {k: v.unsqueeze(0).to(device) if isinstance(v, torch.Tensor) else v for k, v in sample.items()}
 
+    def get_window_batch(
+        self,
+        start_idx: int,
+        window_steps: int = 1,
+        device: str = "cuda",
+        agg: str = "mean",
+    ) -> dict[str, torch.Tensor]:
+        """Load and aggregate ``window_steps`` consecutive samples.
+
+        Parameters
+        ----------
+        start_idx : int
+            First index into the dataset.
+        window_steps : int
+            Number of consecutive timesteps to aggregate.
+        device : str
+            Target device for tensors.
+        agg : str
+            ``'mean'`` for GT data, ``'nanmean'`` for sparse OCO-2 data.
+
+        Returns
+        -------
+        dict[str, torch.Tensor]
+            Aggregated batch with batch dim 0 added.
+        """
+        end_idx = min(start_idx + window_steps, len(self))
+        batch_list = []
+        for idx in range(start_idx, end_idx):
+            sample = self.dataset[idx]
+            batch_list.append(
+                {k: v.unsqueeze(0).to(device) if isinstance(v, torch.Tensor) else v for k, v in sample.items()}
+            )
+
+        batch: dict[str, torch.Tensor] = {}
+        for k in batch_list[0]:
+            vals = [b[k] for b in batch_list if isinstance(b[k], torch.Tensor)]
+            if not vals:
+                batch[k] = batch_list[0][k]
+                continue
+            stacked = torch.stack(vals, dim=0)
+            if agg == "nanmean":
+                batch[k] = torch.nanmean(stacked, dim=0)
+            else:
+                batch[k] = stacked.mean(dim=0)
+        return batch
+
     def get_gt_field(self, idx: int) -> np.ndarray:
         """Return first target variable as numpy array with shape ``[cell, level]``."""
         sample = self.dataset[idx]

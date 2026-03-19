@@ -682,15 +682,19 @@ class OCO2DataLoader(InferenceDataLoader):
 **Modify**: `GenerationPipeline._collect_timeseries_batch()` now delegates to `OCO2DataLoader.get_observations()` instead of inline logic.
 
 ### Checklist
-- [ ] **Tests first**: Write `tests/test_oco2_loader.py`:
+- [x] **Tests first**: Write `tests/test_oco2_loader.py`:
   - `ObservationBatch` has correct tensor shapes
   - `align_time` computes correct offset for known time arrays
   - `aggregate_window` unions sparse observations correctly
   - Window of size 1 returns single-timestep observations
-- [ ] Implement `ObservationBatch` dataclass
-- [ ] Implement `OCO2DataLoader` with time alignment and window aggregation
-- [ ] Update `GenerationPipeline` time-series mode to use `OCO2DataLoader`
-- [ ] Verify OCO-2 generation produces identical output to before
+- [x] Implement `ObservationBatch` dataclass
+- [x] Implement `OCO2DataLoader` with time alignment and window aggregation
+- [x] Update `GenerationPipeline` time-series mode to use `OCO2DataLoader`
+- [x] Add `get_window_batch()` to `InferenceDataLoader` base class
+- [x] Add `get_window_batch` tests to `tests/test_data_loading.py`
+- [x] `align_time` in generation.py delegates to `OCO2DataLoader.align_time`
+- [x] Backward compat: `get_batches`, `align_time`, `dataset_gen` raw path all preserved
+- [ ] Verify OCO-2 generation produces identical output to before (requires real data)
 
 ---
 

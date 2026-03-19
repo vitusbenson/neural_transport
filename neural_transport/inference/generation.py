@@ -136,21 +136,14 @@ def parse_freq(freq: str) -> int:
 def align_time(time, time_gen):
     """Find index offset to align two time axes.
 
+    Delegates to :meth:`OCO2DataLoader.align_time` (canonical implementation).
+
     Returns:
       offset: int, such that time_gen[i + offset] == time[i]
     """
-    if time[-1] < time_gen[0]:
-        raise ValueError("No overlap: time from trained dataset is before masking dataset.")
-    elif time[0] > time_gen[-1]:
-        raise ValueError("No overlap: time from trained dataset is after masking dataset.")
-    elif time[0] == time_gen[0]:
-        return 0
-    elif time[0] > time_gen[0]:
-        offset = (time_gen == time[0]).argmax().item()
-        return offset
-    else:  # time[0] < time_gen[0]
-        offset = -(time == time_gen[0]).argmax().item()
-        return offset
+    from neural_transport.data.oco2_loader import OCO2DataLoader
+
+    return OCO2DataLoader.align_time(time, time_gen)
 
 
 # ── GenerationPipeline ──────────────────────────────────────────────────
@@ -170,6 +163,7 @@ class GenerationPipeline:
         dataset,
         *,
         dataset_gen=None,
+        oco2_loader=None,
         target_vars_3d=None,
         target_vars_2d=None,
         device="cuda",
@@ -193,11 +187,12 @@ class GenerationPipeline:
             self.nlon = model.model.in_nlon
 
         self.dataset_gen = dataset_gen
+        self.oco2_loader = oco2_loader
 
     @property
     def mode(self):
-        """'timeseries' if dataset_gen provided, else 'sample'."""
-        return "timeseries" if self.dataset_gen is not None else "sample"
+        """'timeseries' if dataset_gen or oco2_loader provided, else 'sample'."""
+        return "timeseries" if (self.dataset_gen is not None or self.oco2_loader is not None) else "sample"
 
     def run(
         self,
@@ -558,12 +553,22 @@ class GenerationPipeline:
         dss = []
         obss = []
 
+        # Determine dataset_gen source: oco2_loader or raw dataset_gen
+        use_oco2_loader = self.oco2_loader is not None
+        if use_oco2_loader:
+            dataset_gen_raw = self.oco2_loader.dataset
+        else:
+            dataset_gen_raw = self.dataset_gen
+
         if mask_pattern is None:
             T = DEFAULT_T
         else:
-            T = min(len(self.dataset), len(self.dataset_gen))
+            T = min(len(self.dataset), len(dataset_gen_raw))
 
-        offset = align_time(self.dataset.ds.time.values, self.dataset_gen.ds.time.values)
+        if use_oco2_loader:
+            offset = self.oco2_loader.compute_offset(self)
+        else:
+            offset = align_time(self.dataset.ds.time.values, dataset_gen_raw.ds.time.values)
         print(f"Time alignment offset: {offset} timesteps")
         window_steps = max(1, window_hours // freq_int)
         print(f"Using observation window: {window_hours} hours = {window_steps} timesteps")
@@ -573,39 +578,103 @@ class GenerationPipeline:
             iterator = tqdm(iterator, desc="Generating")
 
         for t in iterator:
-            batch, batch_gen = get_batches(t, offset, self.dataset, self.dataset_gen, window_steps, self.device)
+            if use_oco2_loader:
+                # New path: delegate to OCO2DataLoader
+                from neural_transport.data import InferenceDataLoader
 
-            # Noise
-            noise_list = noise(
-                self.dataset_gen[0],
-                target_var=generate_kwargs["generate_data_kwargs"]["forcing_vars"][0],
-                n_samples=n_samples,
-                noise_pattern=noise_pattern,
-                analyze_noise=analyze_noise,
-                outpath=out_dir,
-            )
-
-            # Masking
-            if masking:
-                target_var = self.target_vars_2d[0]
-                if mask_pattern is None:
-                    obs_mask, obs_values = create_oco2_mask(batch_gen, target_var=target_var)
-                else:
-                    obs_mask, obs_values = create_oco2_mask_test(
-                        batch_gen, target_var=target_var, mask_pattern=mask_pattern, nlat=self.nlat, nlon=self.nlon
-                    )
-                batch_gen["obs_mask_original"] = obs_mask.clone()
-                batch_gen["obs_mask"] = obs_mask
-                obs_values_normed = model.model.normalize_observations(
-                    obs_values, batch_gen, target_var=target_var, targshift=False
+                gt_loader = InferenceDataLoader.__new__(InferenceDataLoader)
+                gt_loader._dataset = self.dataset
+                gt_loader._grid_info = self.oco2_loader.grid_info
+                batch = gt_loader.get_window_batch(
+                    t if offset <= 0 else t,
+                    window_steps=window_steps,
+                    device=self.device,
+                    agg="mean",
                 )
-                for k in (
-                    self.target_vars_2d
-                    + generate_kwargs["generate_data_kwargs"]["forcing_vars"]
-                    + ["obs_mask", "obs_mask_original"]
-                ):
-                    batch[k] = batch_gen[k]
-                batch["obs_values"] = obs_values_normed
+                # Adjust GT start for negative offset
+                if offset < 0:
+                    gt_start = t - offset
+                    batch = gt_loader.get_window_batch(
+                        gt_start,
+                        window_steps=window_steps,
+                        device=self.device,
+                        agg="mean",
+                    )
+
+                obs_batch = self.oco2_loader.get_observations(
+                    t,
+                    offset=offset,
+                    window_steps=window_steps,
+                    device=self.device,
+                    mask_pattern=mask_pattern,
+                    nlat=self.nlat,
+                    nlon=self.nlon,
+                )
+                batch_gen = obs_batch.raw_batch
+
+                # Noise (use oco2_loader's dataset for noise template)
+                noise_list = noise(
+                    self.oco2_loader.dataset[0],
+                    target_var=generate_kwargs["generate_data_kwargs"]["forcing_vars"][0],
+                    n_samples=n_samples,
+                    noise_pattern=noise_pattern,
+                    analyze_noise=analyze_noise,
+                    outpath=out_dir,
+                )
+
+                # Masking via OCO2DataLoader
+                if masking:
+                    target_var = self.target_vars_2d[0]
+                    obs_values = obs_batch.obs_values
+                    obs_values_normed = model.model.normalize_observations(
+                        obs_values, batch_gen, target_var=target_var, targshift=False
+                    )
+                    obs_batch_injected = obs_batch
+                    obs_batch_injected.obs_values = obs_values_normed
+                    obs_batch_injected.inject_into_batch(
+                        batch,
+                        target_var=target_var,
+                        forcing_vars=generate_kwargs["generate_data_kwargs"]["forcing_vars"],
+                    )
+                    # Also copy target_vars_2d
+                    for k in self.target_vars_2d:
+                        if k in batch_gen and k not in batch:
+                            batch[k] = batch_gen[k]
+            else:
+                # Legacy path: raw dataset_gen
+                batch, batch_gen = get_batches(t, offset, self.dataset, dataset_gen_raw, window_steps, self.device)
+
+                # Noise
+                noise_list = noise(
+                    dataset_gen_raw[0],
+                    target_var=generate_kwargs["generate_data_kwargs"]["forcing_vars"][0],
+                    n_samples=n_samples,
+                    noise_pattern=noise_pattern,
+                    analyze_noise=analyze_noise,
+                    outpath=out_dir,
+                )
+
+                # Masking
+                if masking:
+                    target_var = self.target_vars_2d[0]
+                    if mask_pattern is None:
+                        obs_mask, obs_values = create_oco2_mask(batch_gen, target_var=target_var)
+                    else:
+                        obs_mask, obs_values = create_oco2_mask_test(
+                            batch_gen, target_var=target_var, mask_pattern=mask_pattern, nlat=self.nlat, nlon=self.nlon
+                        )
+                    batch_gen["obs_mask_original"] = obs_mask.clone()
+                    batch_gen["obs_mask"] = obs_mask
+                    obs_values_normed = model.model.normalize_observations(
+                        obs_values, batch_gen, target_var=target_var, targshift=False
+                    )
+                    for k in (
+                        self.target_vars_2d
+                        + generate_kwargs["generate_data_kwargs"]["forcing_vars"]
+                        + ["obs_mask", "obs_mask_original"]
+                    ):
+                        batch[k] = batch_gen[k]
+                    batch["obs_values"] = obs_values_normed
 
             for k in batch.keys():
                 batch[k] = batch[k].expand(n_samples, -1, -1, -1)
@@ -631,8 +700,12 @@ class GenerationPipeline:
             ds = ds.expand_dims(time=[prototype_zarr.isel(time=t).time.values])
 
             if masking:
-                obs_mask_xr = self.dataset_gen.tensor_to_xarray(batch_gen["obs_mask"][:1])
-                obs_values_xr = self.dataset_gen.tensor_to_xarray(obs_values[:1])
+                if use_oco2_loader:
+                    obs_mask_xr = self.oco2_loader.dataset.tensor_to_xarray(batch_gen["obs_mask"][:1])
+                    obs_values_xr = self.oco2_loader.dataset.tensor_to_xarray(obs_batch.obs_values[:1])
+                else:
+                    obs_mask_xr = dataset_gen_raw.tensor_to_xarray(batch_gen["obs_mask"][:1])
+                    obs_values_xr = dataset_gen_raw.tensor_to_xarray(obs_values[:1])
                 ds["obs_mask"] = obs_mask_xr
                 ds["obs_values"] = obs_values_xr
 
