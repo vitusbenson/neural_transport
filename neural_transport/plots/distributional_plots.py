@@ -4,14 +4,22 @@ All plots compare anomaly fields (spatial mean removed).
 Follow existing project plotting patterns.
 """
 
+from __future__ import annotations
+
 from pathlib import Path
 
-import cartopy.crs as ccrs
 import matplotlib.pyplot as plt
 import numpy as np
 
 from neural_transport.inference.distributional_metrics import remove_spatial_mean
 from neural_transport.plots.utilities.plot_utils import mpl_rc_params, save_figure
+
+try:
+    import cartopy.crs as ccrs
+
+    HAS_CARTOPY = True
+except ImportError:
+    HAS_CARTOPY = False
 
 # --- Pressure-weighted column helper ---
 
@@ -706,3 +714,148 @@ def _kurtosis(x):
     std = x.std(axis=(1, 2), keepdims=True)
     std = np.maximum(std, 1e-12)
     return ((x - mean) ** 4).mean(axis=(1, 2)) / (std.squeeze() ** 4) - 3.0
+
+
+# ---------------------------------------------------------------------------
+# Registered wrappers (accept EvalResult + PlotContext)
+# ---------------------------------------------------------------------------
+
+from neural_transport.plots.base import PlotContext, register_plot  # noqa: E402
+
+
+def _get_distributional_data(result):
+    """Extract distributional fields from result.metadata.
+
+    Returns dict with gt_fields, gen_fields, lat, lon, level_values
+    or None if required keys are missing.
+    """
+    meta = getattr(result, "metadata", {})
+    gt_fields = meta.get("gt_fields")
+    gen_fields = meta.get("gen_fields")
+    if gt_fields is None or gen_fields is None:
+        return None
+    return {
+        "gt_fields": np.asarray(gt_fields),
+        "gen_fields": np.asarray(gen_fields),
+        "lat": np.asarray(meta["lat"]) if meta.get("lat") is not None else None,
+        "lon": np.asarray(meta["lon"]) if meta.get("lon") is not None else None,
+        "level_values": meta.get("level_values"),
+    }
+
+
+@register_plot(name="marginals", categories=["distributional"], description="Marginal distributions")
+def plot_marginals_registered(result, ctx: PlotContext) -> None:
+    data = _get_distributional_data(result)
+    if data is None:
+        return
+    plot_marginal_distributions(
+        data["gt_fields"],
+        data["gen_fields"],
+        out_dir=ctx.save_dir,
+        level_values=data["level_values"],
+        imgformats=ctx.config.imgformats,
+    )
+
+
+@register_plot(name="power_spectrum", categories=["distributional"], description="Power spectrum comparison")
+def plot_power_spectrum_registered(result, ctx: PlotContext) -> None:
+    data = _get_distributional_data(result)
+    if data is None or data["lat"] is None or data["lon"] is None:
+        return
+    plot_power_spectrum_comparison(
+        data["gt_fields"],
+        data["gen_fields"],
+        data["lat"],
+        data["lon"],
+        out_dir=ctx.save_dir,
+        level_values=data["level_values"],
+        imgformats=ctx.config.imgformats,
+    )
+
+
+@register_plot(name="qq_plot", categories=["distributional"], description="Q-Q plot")
+def plot_qq_registered(result, ctx: PlotContext) -> None:
+    data = _get_distributional_data(result)
+    if data is None:
+        return
+    plot_qq(
+        data["gt_fields"],
+        data["gen_fields"],
+        out_dir=ctx.save_dir,
+        level_values=data["level_values"],
+        imgformats=ctx.config.imgformats,
+    )
+
+
+@register_plot(name="sample_grid", categories=["distributional"], description="Sample grid of fields")
+def plot_sample_grid_registered(result, ctx: PlotContext) -> None:
+    if not HAS_CARTOPY:
+        return
+    data = _get_distributional_data(result)
+    if data is None or data["lat"] is None or data["lon"] is None:
+        return
+    plot_sample_grid(
+        data["gt_fields"],
+        data["gen_fields"],
+        data["lat"],
+        data["lon"],
+        out_dir=ctx.save_dir,
+        level_values=data["level_values"],
+        imgformats=ctx.config.imgformats,
+    )
+
+
+@register_plot(name="spatial_patterns", categories=["distributional"], description="Spatial pattern comparison")
+def plot_spatial_patterns_registered(result, ctx: PlotContext) -> None:
+    if not HAS_CARTOPY:
+        return
+    data = _get_distributional_data(result)
+    if data is None or data["lat"] is None or data["lon"] is None:
+        return
+    plot_spatial_pattern_comparison(
+        data["gt_fields"],
+        data["gen_fields"],
+        data["lat"],
+        data["lon"],
+        out_dir=ctx.save_dir,
+        level_values=data["level_values"],
+        imgformats=ctx.config.imgformats,
+    )
+
+
+@register_plot(
+    name="lat_height_comparison",
+    categories=["distributional"],
+    description="Lat-height cross-section comparison",
+)
+def plot_lat_height_comparison_registered(result, ctx: PlotContext) -> None:
+    data = _get_distributional_data(result)
+    if data is None or data["lat"] is None:
+        return
+    plot_lat_height_comparison(
+        data["gt_fields"],
+        data["gen_fields"],
+        data["lat"],
+        out_dir=ctx.save_dir,
+        level_values=data["level_values"],
+        imgformats=ctx.config.imgformats,
+    )
+
+
+@register_plot(
+    name="distributional_summary",
+    categories=["distributional"],
+    description="Distributional metrics summary bar chart",
+)
+def plot_distributional_summary_registered(result, ctx: PlotContext) -> None:
+    metrics = getattr(result, "distributional", None)
+    if metrics is None:
+        return
+    data = _get_distributional_data(result)
+    level_values = data["level_values"] if data is not None else None
+    plot_distributional_metrics_summary(
+        metrics,
+        out_dir=ctx.save_dir,
+        level_values=level_values,
+        imgformats=ctx.config.imgformats,
+    )

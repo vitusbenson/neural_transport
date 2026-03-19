@@ -1,4 +1,4 @@
-"""Tests for the plotting framework (Phase 12)."""
+"""Tests for the plotting framework (Phases 12-13)."""
 
 from __future__ import annotations
 
@@ -9,8 +9,14 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
-# Import field_plots to ensure registration
+import neural_transport.plots.animation  # noqa: E402, F401
+import neural_transport.plots.conditioning_diagnostics  # noqa: E402, F401
+import neural_transport.plots.distributional_plots  # noqa: E402, F401
+import neural_transport.plots.ensemble_plots  # noqa: E402, F401
+
+# Import all plot modules to ensure registration
 import neural_transport.plots.field_plots  # noqa: E402, F401
+import neural_transport.plots.transport_plots  # noqa: E402, F401
 from neural_transport.configs import PlotConfig  # noqa: E402
 from neural_transport.evaluation.suite import EvalResult  # noqa: E402
 from neural_transport.plots.base import (  # noqa: E402
@@ -215,3 +221,267 @@ class TestFieldPlots:
         result = _make_2d_result()
         neural_transport.plots.field_plots.plot_lat_height(result, ctx)
         assert not (tmp_path / "lat_height.png").exists()
+
+
+# ---------------------------------------------------------------------------
+# Phase 13 helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_ensemble_result(nlat=8, nlon=16):
+    """EvalResult with rank_histogram, calibration, spread_map."""
+    rng = np.random.default_rng(42)
+    n_bins = 11
+    rh = rng.dirichlet(np.ones(n_bins))
+    nominal = np.linspace(0.05, 0.95, 10)
+    observed = nominal + rng.normal(0, 0.05, 10)
+    observed = np.clip(observed, 0, 1)
+    cal = {
+        "nominal": nominal,
+        "observed": observed,
+        "calibration_error": float(np.mean(np.abs(nominal - observed))),
+    }
+    spread_map = rng.uniform(0.1, 2.0, (nlat, nlon))
+    return EvalResult(
+        pointwise={"rmse": 1.0},
+        ensemble={"crps_mean": 0.5, "spread_skill_ratio": 1.1},
+        maps={"spread_map": spread_map},
+        diagnostics={"rank_histogram": rh, "calibration": cal},
+    )
+
+
+def _make_distributional_result(nlat=8, nlon=16, nlev=4):
+    """EvalResult with gt_fields, gen_fields in metadata."""
+    rng = np.random.default_rng(42)
+    gt_fields = rng.normal(400, 5, (10, nlat, nlon, nlev))
+    gen_fields = rng.normal(400, 5, (10, nlat, nlon, nlev))
+    lat = np.linspace(-90, 90, nlat)
+    lon = np.linspace(0, 360, nlon, endpoint=False)
+    return EvalResult(
+        pointwise={},
+        distributional={"energy_distance": 0.1, "mmd_rbf": 0.05},
+        metadata={
+            "gt_fields": gt_fields,
+            "gen_fields": gen_fields,
+            "lat": lat,
+            "lon": lon,
+            "level_values": [1013, 843, 441, 73][:nlev],
+        },
+    )
+
+
+def _make_conditioning_result(nlat=8, nlon=16, nlev=4):
+    """EvalResult with pred, gt, mask_2d, and error maps."""
+    rng = np.random.default_rng(42)
+    pred = rng.normal(400, 5, (nlat, nlon, nlev))
+    gt = rng.normal(400, 5, (nlat, nlon, nlev))
+    mask_2d = rng.random((nlat, nlon)) > 0.5
+    bias_map = pred.mean(axis=-1) - gt.mean(axis=-1)
+    rmse_map = np.sqrt(((pred - gt) ** 2).mean(axis=-1))
+    spread_map = rng.uniform(0.1, 2.0, (nlat, nlon))
+    return EvalResult(
+        pointwise={"rmse": 1.0},
+        maps={"bias_map": bias_map, "rmse_map": rmse_map, "spread_map": spread_map},
+        metadata={"pred": pred, "gt": gt, "mask_2d": mask_2d},
+    )
+
+
+# ── TestEnsemblePlots ──────────────────────────────────────────────────────
+
+
+class TestEnsemblePlots:
+    def test_ensemble_plots_registered(self):
+        for name in ["rank_histogram", "calibration", "spread_maps"]:
+            assert name in PLOT_REGISTRY, f"{name} not registered"
+            assert "ensemble" in PLOT_REGISTRY[name]["categories"]
+
+    def test_rank_histogram_produces_output(self, tmp_path):
+        cfg = PlotConfig(imgformats=["png"], save_dir=str(tmp_path))
+        ctx = PlotContext(cfg)
+        result = _make_ensemble_result()
+        neural_transport.plots.ensemble_plots.plot_rank_histogram(result, ctx)
+        assert (tmp_path / "rank_histogram.png").exists()
+
+    def test_calibration_produces_output(self, tmp_path):
+        cfg = PlotConfig(imgformats=["png"], save_dir=str(tmp_path))
+        ctx = PlotContext(cfg)
+        result = _make_ensemble_result()
+        neural_transport.plots.ensemble_plots.plot_calibration(result, ctx)
+        assert (tmp_path / "calibration.png").exists()
+
+    def test_spread_maps_produces_output(self, tmp_path):
+        cfg = PlotConfig(imgformats=["png"], save_dir=str(tmp_path))
+        ctx = PlotContext(cfg)
+        result = _make_ensemble_result()
+        neural_transport.plots.ensemble_plots.plot_spread_maps(result, ctx)
+        assert (tmp_path / "spread_maps.png").exists()
+
+    def test_graceful_skip_missing_data(self, tmp_path):
+        cfg = PlotConfig(imgformats=["png"], save_dir=str(tmp_path))
+        ctx = PlotContext(cfg)
+        result = EvalResult(pointwise={"rmse": 1.0})
+        # Should not raise
+        neural_transport.plots.ensemble_plots.plot_rank_histogram(result, ctx)
+        neural_transport.plots.ensemble_plots.plot_calibration(result, ctx)
+        neural_transport.plots.ensemble_plots.plot_spread_maps(result, ctx)
+        assert not (tmp_path / "rank_histogram.png").exists()
+        assert not (tmp_path / "calibration.png").exists()
+        assert not (tmp_path / "spread_maps.png").exists()
+
+
+# ── TestDistributionalPlotsRegistered ──────────────────────────────────────
+
+
+class TestDistributionalPlotsRegistered:
+    def test_distributional_plots_registered(self):
+        for name in [
+            "marginals",
+            "power_spectrum",
+            "qq_plot",
+            "sample_grid",
+            "spatial_patterns",
+            "lat_height_comparison",
+            "distributional_summary",
+        ]:
+            assert name in PLOT_REGISTRY, f"{name} not registered"
+            assert "distributional" in PLOT_REGISTRY[name]["categories"]
+
+    def test_marginals_produces_output(self, tmp_path):
+        cfg = PlotConfig(imgformats=["png"], save_dir=str(tmp_path))
+        ctx = PlotContext(cfg)
+        result = _make_distributional_result()
+        neural_transport.plots.distributional_plots.plot_marginals_registered(result, ctx)
+        assert any(f.name.startswith("marginal_distributions") for f in tmp_path.iterdir())
+
+    def test_qq_plot_produces_output(self, tmp_path):
+        cfg = PlotConfig(imgformats=["png"], save_dir=str(tmp_path))
+        ctx = PlotContext(cfg)
+        result = _make_distributional_result()
+        neural_transport.plots.distributional_plots.plot_qq_registered(result, ctx)
+        assert any(f.name.startswith("qq_plot") for f in tmp_path.iterdir())
+
+    def test_distributional_summary_produces_output(self, tmp_path):
+        cfg = PlotConfig(imgformats=["png"], save_dir=str(tmp_path))
+        ctx = PlotContext(cfg)
+        result = _make_distributional_result()
+        neural_transport.plots.distributional_plots.plot_distributional_summary_registered(result, ctx)
+        assert any(f.name.startswith("distributional_metrics_summary") for f in tmp_path.iterdir())
+
+    def test_graceful_skip_missing_metadata(self, tmp_path):
+        cfg = PlotConfig(imgformats=["png"], save_dir=str(tmp_path))
+        ctx = PlotContext(cfg)
+        result = EvalResult(pointwise={"rmse": 1.0})
+        # Should not raise
+        neural_transport.plots.distributional_plots.plot_marginals_registered(result, ctx)
+        neural_transport.plots.distributional_plots.plot_qq_registered(result, ctx)
+        neural_transport.plots.distributional_plots.plot_distributional_summary_registered(result, ctx)
+        assert len(list(tmp_path.iterdir())) == 0
+
+
+# ── TestConditioningPlotsRegistered ────────────────────────────────────────
+
+
+class TestConditioningPlotsRegistered:
+    def test_conditioning_plots_registered(self):
+        for name in ["conditioning_comparison", "error_maps", "zonal_mean"]:
+            assert name in PLOT_REGISTRY, f"{name} not registered"
+            assert "conditioning" in PLOT_REGISTRY[name]["categories"]
+
+    def test_conditioning_comparison_produces_output(self, tmp_path):
+        cfg = PlotConfig(imgformats=["png"], save_dir=str(tmp_path))
+        ctx = PlotContext(cfg)
+        result = _make_conditioning_result()
+        neural_transport.plots.conditioning_diagnostics.plot_conditioning_comparison_single(result, ctx)
+        assert (tmp_path / "conditioning_comparison.png").exists()
+
+    def test_error_maps_produces_output(self, tmp_path):
+        cfg = PlotConfig(imgformats=["png"], save_dir=str(tmp_path))
+        ctx = PlotContext(cfg)
+        result = _make_conditioning_result()
+        neural_transport.plots.conditioning_diagnostics.plot_error_maps_registered(result, ctx)
+        assert (tmp_path / "error_maps.png").exists()
+
+    def test_zonal_mean_produces_output(self, tmp_path):
+        cfg = PlotConfig(imgformats=["png"], save_dir=str(tmp_path))
+        ctx = PlotContext(cfg)
+        result = _make_conditioning_result()
+        neural_transport.plots.conditioning_diagnostics.plot_zonal_mean_single(result, ctx)
+        assert (tmp_path / "zonal_mean.png").exists()
+
+    def test_graceful_skip_missing_data(self, tmp_path):
+        cfg = PlotConfig(imgformats=["png"], save_dir=str(tmp_path))
+        ctx = PlotContext(cfg)
+        result = EvalResult(pointwise={"rmse": 1.0})
+        neural_transport.plots.conditioning_diagnostics.plot_conditioning_comparison_single(result, ctx)
+        neural_transport.plots.conditioning_diagnostics.plot_error_maps_registered(result, ctx)
+        neural_transport.plots.conditioning_diagnostics.plot_zonal_mean_single(result, ctx)
+        assert not (tmp_path / "conditioning_comparison.png").exists()
+        assert not (tmp_path / "error_maps.png").exists()
+        assert not (tmp_path / "zonal_mean.png").exists()
+
+
+# ── TestSmartCategoryInference ─────────────────────────────────────────────
+
+
+class TestSmartCategoryInference:
+    def test_ensemble_result_infers_ensemble(self, tmp_path):
+        cfg = PlotConfig(imgformats=["png"], save_dir=str(tmp_path))
+        ctx = PlotContext(cfg)
+        result = _make_ensemble_result()
+        called = run_plots(result, ctx, categories=None)
+        # Ensemble plots should be dispatched
+        assert "rank_histogram" in called
+        assert "calibration" in called
+        assert "spread_maps" in called
+
+    def test_conditioning_result_infers_conditioning(self, tmp_path):
+        cfg = PlotConfig(imgformats=["png"], save_dir=str(tmp_path))
+        ctx = PlotContext(cfg)
+        result = _make_conditioning_result()
+        called = run_plots(result, ctx, categories=None)
+        assert "conditioning_comparison" in called
+        assert "error_maps" in called
+        assert "zonal_mean" in called
+
+    def test_transport_result_infers_transport(self, tmp_path):
+        cfg = PlotConfig(imgformats=["png"], save_dir=str(tmp_path))
+        ctx = PlotContext(cfg)
+        result = EvalResult(
+            pointwise={"rmse": 1.0},
+            metadata={"experiment_type": "transport"},
+        )
+        called = run_plots(result, ctx, categories=None)
+        # Transport plot names should be in called (even if they no-op)
+        assert "metric_curves" in called
+        assert "obspack_stations" in called
+
+    def test_distributional_metadata_infers_distributional(self, tmp_path):
+        cfg = PlotConfig(imgformats=["png"], save_dir=str(tmp_path))
+        ctx = PlotContext(cfg)
+        result = _make_distributional_result()
+        called = run_plots(result, ctx, categories=None)
+        assert "marginals" in called
+        assert "qq_plot" in called
+        assert "distributional_summary" in called
+
+
+# ── TestRunPlotsIntegration ────────────────────────────────────────────────
+
+
+class TestRunPlotsIntegration:
+    def test_run_plots_ensemble_dispatches(self, tmp_path):
+        cfg = PlotConfig(imgformats=["png"], save_dir=str(tmp_path))
+        ctx = PlotContext(cfg)
+        result = _make_ensemble_result()
+        called = run_plots(result, ctx, categories=None)
+        # All 3 ensemble + 3 always should be called
+        for name in ["rank_histogram", "calibration", "spread_maps"]:
+            assert name in called
+
+    def test_run_plots_distributional_dispatches(self, tmp_path):
+        cfg = PlotConfig(imgformats=["png"], save_dir=str(tmp_path))
+        ctx = PlotContext(cfg)
+        result = _make_distributional_result()
+        called = run_plots(result, ctx, categories=None)
+        for name in ["marginals", "qq_plot", "distributional_summary"]:
+            assert name in called

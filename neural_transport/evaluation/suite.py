@@ -79,7 +79,7 @@ class EvalResult:
         return flat
 
     def to_json(self, path: Path) -> None:
-        """Write scalar results to JSON (maps excluded)."""
+        """Write scalar results to JSON (maps and large arrays excluded)."""
         data: dict[str, Any] = {"pointwise": _make_json_safe(self.pointwise)}
         if self.ensemble is not None:
             data["ensemble"] = _make_json_safe(self.ensemble)
@@ -88,7 +88,14 @@ class EvalResult:
         if self.diagnostics:
             data["diagnostics"] = _make_json_safe(self.diagnostics)
         if self.metadata:
-            data["metadata"] = _make_json_safe(self.metadata)
+            # Skip large arrays (>1000 elements) to prevent enormous JSON files
+            filtered = {}
+            for k, v in self.metadata.items():
+                if isinstance(v, np.ndarray) and v.size > 1000:
+                    continue
+                filtered[k] = v
+            if filtered:
+                data["metadata"] = _make_json_safe(filtered)
         Path(path).write_text(json.dumps(data, indent=2))
 
     @classmethod
@@ -219,10 +226,15 @@ class EvaluationSuite:
         metadata : dict, optional
         """
         metrics = compute_distributional_metrics(gt_pool, gen_pool, lat, lon)
+        meta = dict(metadata) if metadata else {}
+        meta.setdefault("gt_fields", gt_pool)
+        meta.setdefault("gen_fields", gen_pool)
+        meta.setdefault("lat", lat)
+        meta.setdefault("lon", lon)
         return EvalResult(
             pointwise={},
             distributional=metrics,
-            metadata=metadata or {},
+            metadata=meta,
         )
 
     def to_dataframe(self, result: EvalResult) -> pd.DataFrame:

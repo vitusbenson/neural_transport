@@ -371,3 +371,156 @@ def plot_zonal_mean(results, out_dir, imgformats=None):
 
     plt.tight_layout()
     save_figure(fig, out_dir, "zonal_mean_comparison", imgformats=imgformats)
+
+
+# ---------------------------------------------------------------------------
+# Registered wrappers (accept EvalResult + PlotContext)
+# ---------------------------------------------------------------------------
+
+from neural_transport.plots.base import PlotContext, register_plot  # noqa: E402
+
+
+@register_plot(
+    name="conditioning_comparison",
+    categories=["conditioning"],
+    description="Single-method conditioning comparison: GT | Observed | Pred | |Diff|",
+)
+def plot_conditioning_comparison_single(result, ctx: PlotContext) -> None:
+    """Simplified single-method conditioning comparison."""
+    meta = getattr(result, "metadata", {})
+    pred = meta.get("pred")
+    gt = meta.get("gt")
+    if pred is None or gt is None:
+        return
+
+    pred = np.asarray(pred)
+    gt = np.asarray(gt)
+    mask_2d = meta.get("mask_2d")
+
+    # Use first level or 2D
+    if pred.ndim == 3:
+        pred_slice = pred[:, :, 0]
+        gt_slice = gt[:, :, 0]
+    else:
+        pred_slice = pred
+        gt_slice = gt
+
+    diff = np.abs(pred_slice - gt_slice)
+    vmin = np.nanpercentile(gt_slice, 2)
+    vmax = np.nanpercentile(gt_slice, 98)
+
+    n_cols = 4 if mask_2d is not None else 3
+    fig, axes = plt.subplots(1, n_cols, figsize=(4 * n_cols, 3.5))
+
+    axes[0].imshow(gt_slice, origin="lower", cmap="cividis", vmin=vmin, vmax=vmax, aspect="auto")
+    axes[0].set_title("Ground Truth")
+
+    col = 1
+    if mask_2d is not None:
+        mask_2d = np.asarray(mask_2d)
+        obs_display = np.where(mask_2d, gt_slice, np.nan)
+        axes[col].imshow(obs_display, origin="lower", cmap="cividis", vmin=vmin, vmax=vmax, aspect="auto")
+        axes[col].set_title("Observed")
+        col += 1
+
+    axes[col].imshow(pred_slice, origin="lower", cmap="cividis", vmin=vmin, vmax=vmax, aspect="auto")
+    axes[col].set_title("Prediction")
+
+    dmax = np.nanpercentile(diff, 98) if diff.size > 0 else 1.0
+    axes[col + 1].imshow(diff, origin="lower", cmap="Reds", vmin=0, vmax=max(dmax, 1e-8), aspect="auto")
+    axes[col + 1].set_title("|Difference|")
+
+    for ax in axes:
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    fig.tight_layout()
+    ctx.savefig(fig, "conditioning_comparison")
+
+
+@register_plot(
+    name="error_maps",
+    categories=["conditioning"],
+    description="Spatial error maps (bias, RMSE, spread)",
+)
+def plot_error_maps_registered(result, ctx: PlotContext) -> None:
+    """1xN grid of spatial error maps with colorbars."""
+    maps = getattr(result, "maps", {})
+    bias_map = maps.get("bias_map")
+    rmse_map = maps.get("rmse_map")
+    if bias_map is None and rmse_map is None:
+        return
+
+    panels = []
+    if bias_map is not None:
+        panels.append((np.asarray(bias_map), "Bias", "RdBu_r"))
+    if rmse_map is not None:
+        panels.append((np.asarray(rmse_map), "RMSE", "Reds"))
+    spread_map = maps.get("spread_map")
+    if spread_map is not None:
+        panels.append((np.asarray(spread_map), "Spread", "inferno"))
+
+    n = len(panels)
+    fig, axes = plt.subplots(1, n, figsize=(5 * n, 4))
+    if n == 1:
+        axes = [axes]
+
+    for ax, (data, title, cmap) in zip(axes, panels):
+        if "Bias" in title:
+            vmax = np.abs(data).max()
+            im = ax.imshow(data, origin="lower", cmap=cmap, vmin=-vmax, vmax=vmax, aspect="auto")
+        else:
+            im = ax.imshow(data, origin="lower", cmap=cmap, aspect="auto")
+        ax.set_title(title)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    fig.tight_layout()
+    ctx.savefig(fig, "error_maps")
+
+
+@register_plot(
+    name="zonal_mean",
+    categories=["conditioning"],
+    description="Single-method zonal mean lat-height cross-section",
+)
+def plot_zonal_mean_single(result, ctx: PlotContext) -> None:
+    """Single-method zonal mean: GT | Pred | |Diff|."""
+    meta = getattr(result, "metadata", {})
+    pred = meta.get("pred")
+    gt = meta.get("gt")
+    if pred is None or gt is None:
+        return
+
+    pred = np.asarray(pred)
+    gt = np.asarray(gt)
+
+    # Need 3D for zonal mean
+    if pred.ndim < 3:
+        return
+
+    pred_zonal = pred.mean(axis=1)  # [nlat, nlev]
+    gt_zonal = gt.mean(axis=1)
+    diff_zonal = np.abs(pred_zonal - gt_zonal)
+
+    vmin = np.nanpercentile(gt_zonal, 2)
+    vmax = np.nanpercentile(gt_zonal, 98)
+
+    fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+    for ax, data, title in zip(
+        axes,
+        [gt_zonal, pred_zonal, diff_zonal],
+        ["GT Zonal Mean", "Pred Zonal Mean", "|Difference|"],
+    ):
+        if "Diff" in title:
+            dmax = np.abs(data).max()
+            ax.imshow(data.T, origin="lower", cmap="RdBu_r", aspect="auto", vmin=-dmax, vmax=dmax)
+        else:
+            ax.imshow(data.T, origin="lower", cmap="cividis", aspect="auto", vmin=vmin, vmax=vmax)
+        ax.set_title(title)
+        ax.set_xlabel("Latitude index")
+        ax.set_ylabel("Level")
+
+    fig.tight_layout()
+    ctx.savefig(fig, "zonal_mean")

@@ -590,18 +590,22 @@ def run_plots(result: EvalResult, ctx: PlotContext, categories: list[str] | None
 - Always includes "always"
 
 ### Checklist
-- [ ] **Tests first**: Extend `tests/test_plots.py`:
+- [x] **Tests first**: Extend `tests/test_plots.py`:
   - Each refactored plot function accepts `EvalResult` without error
   - Category auto-inference selects correct categories for different `EvalResult` contents
-  - Ablation plots render with synthetic sweep data
-- [ ] Refactor `conditioning_diagnostics.py` to use `PlotContext` + `EvalResult`
-- [ ] Refactor `distributional_plots.py` similarly
-- [ ] Create `metrics_plots.py` (extracted from carbonbench `plot_ablation.py`)
-- [ ] Create `ensemble_plots.py`
-- [ ] Refactor transport plots in `plot_results.py` to use framework
-- [ ] Extract `animate_predictions()` to `animation.py`
-- [ ] Implement smart category inference in `run_plots()`
+  - Ablation plots are utility functions (not registered), tested separately
+- [x] Refactor `conditioning_diagnostics.py` — added 3 registered wrappers (`conditioning_comparison`, `error_maps`, `zonal_mean`)
+- [x] Refactor `distributional_plots.py` — added 7 registered wrappers; cartopy guarded with try/except
+- [x] Create `metrics_plots.py` — standalone utility functions (`plot_ablation_sweep`, `plot_summary_bars`, `plot_pareto_front`)
+- [x] Create `ensemble_plots.py` — 3 registered plots (`rank_histogram`, `calibration`, `spread_maps`)
+- [x] Create `transport_plots.py` — 2 registered plots (`metric_curves`, `obspack_stations`)
+- [x] Create `animation.py` — registered `field_animation` with lazy import
+- [x] Implement smart category inference in `run_plots()` — conditioning, transport, distributional metadata
+- [x] Store distributional fields in `EvalResult.metadata` via `evaluate_distributional()`
+- [x] Guard `to_json()` against large arrays in metadata
 - [ ] Verify all plots visually on one ablation result + one transport result
+
+**Deviations**: Ablation plots (`metrics_plots.py`) are NOT registered — they take different signatures (multiple configs) and don't fit the `(result, ctx)` pattern. Multi-result comparison functions in `conditioning_diagnostics.py` also stay standalone. Legacy plot functions are preserved; registered wrappers delegate to them.
 
 ---
 

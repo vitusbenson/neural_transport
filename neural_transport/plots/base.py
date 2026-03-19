@@ -21,7 +21,15 @@ PLOT_REGISTRY: dict[str, dict[str, Any]] = {}
 PLOT_CATEGORIES: dict[str, list[str]] = {
     "always": ["field_maps", "xco2_maps", "lat_height"],
     "ensemble": ["spread_maps", "rank_histogram", "calibration"],
-    "distributional": ["marginals", "power_spectrum", "qq_plot", "sample_grid"],
+    "distributional": [
+        "marginals",
+        "power_spectrum",
+        "qq_plot",
+        "sample_grid",
+        "spatial_patterns",
+        "lat_height_comparison",
+        "distributional_summary",
+    ],
     "conditioning": ["conditioning_comparison", "error_maps", "zonal_mean"],
     "transport": ["metric_curves", "obspack_stations"],
     "ablation": ["sweep_plots", "summary_bars", "pareto_front"],
@@ -104,6 +112,15 @@ def run_plots(result, ctx: PlotContext, categories: list[str] | None = None) -> 
             categories.append("ensemble")
         if getattr(result, "distributional", None) is not None:
             categories.append("distributional")
+        meta = getattr(result, "metadata", {})
+        maps = getattr(result, "maps", {})
+        if maps.get("bias_map") is not None or meta.get("mask_2d") is not None:
+            categories.append("conditioning")
+        if meta.get("experiment_type") == "transport":
+            categories.append("transport")
+        if meta.get("gt_fields") is not None and meta.get("gen_fields") is not None:
+            if "distributional" not in categories:
+                categories.append("distributional")
 
     # Collect plot names for the requested categories
     requested: set[str] = set()
