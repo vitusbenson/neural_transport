@@ -525,6 +525,9 @@ def iterative_generate_oco2(
             obs_values_normed = model.model.normalize_observations(obs_values, batch_gen, target_var=target_var, targshift=False)
             for k in target_vars_2d + generate_kwargs["generate_data_kwargs"]["forcing_vars"] + ["obs_mask", "obs_mask_original"]:
                 batch[k] = batch_gen[k]
+            for k in target_vars_2d:
+                batch[f"{k}_offset"] = batch_gen[f"{k}_offset"]
+                batch[f"{k}_scale"] = batch_gen[f"{k}_scale"]
             batch["obs_values"] = obs_values_normed  # [B=1 T=1 N=2048 C=1]
             print(f"\nDEBUG iterative_generate_oco2 t={t}")
             print("  obs_values stats:")
@@ -608,7 +611,7 @@ def iterative_generate_oco2(
             sample_mask = xr.DataArray(~bad_mask, dims=["sample"])
             ds_good = ds.where(sample_mask)
         good_dss.append(ds_good)
-    if len(good_dss) == 0:
+    if all(ds["co2massmix"].isnull().all() for ds in good_dss):
         raise RuntimeError("All generated samples were bad")
 
     ds_all = xr.concat(good_dss, dim="time")

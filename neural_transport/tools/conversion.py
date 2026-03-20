@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 
 
 R_EARTH = 6.371e3  # km
@@ -95,3 +96,41 @@ def km_per_gridcell(batch):
     circ_at_lat = 2 * np.pi * R_EARTH * np.cos(np.deg2rad(lat_mean))
     dx = circ_at_lat / len(lon)
     return dx, circ_at_lat
+
+def compute_xco2_via_ak(
+    co2_profile,
+    ak,
+    xco2_prior,
+    co2_profile_prior,
+):
+    """
+    Compute XCO₂ via the averaging kernel equation from the CO₂ profile.
+    
+    Parameters:
+    - co2_profile: CO₂ profile to be converted, shape [N, C]
+    - ak: Averaging kernel, shape [N, C]
+    - xco2_prior: Prior XCO₂, shape [N]
+    - co2_profile_prior: Prior CO₂ profile, shape [N, C]
+
+    Returns:
+    - xco2: Computed XCO₂, shape [N]
+    """
+    is_torch = isinstance(co2_profile, torch.Tensor)
+
+    if is_torch:
+        xco2 = xco2_prior + (ak * (co2_profile - co2_profile_prior)).sum(dim=-1)
+    else:
+        xco2 = xco2_prior + np.sum(ak * (co2_profile - co2_profile_prior), axis=-1)
+    
+    print("\nDEBUG compute_xco2_via_ak")
+    print(f"  co2_profile range: {np.nanmin(co2_profile)}, {np.nanmax(co2_profile)}")
+    print(f"  ak range: {np.nanmin(ak)}, {np.nanmax(ak)}")
+    print(f"  co2_profile_prior range: {np.nanmin(co2_profile_prior)}, {np.nanmax(co2_profile_prior)}")
+    print(f"  xco2_prior range: {np.nanmin(xco2_prior)}, {np.nanmax(xco2_prior)}")
+    print(f"  xco2 range: {np.nanmin(xco2)}, {np.nanmax(xco2)}")
+    print(f"  co2_profile has NaN: {np.isnan(co2_profile).any()}")
+    print(f"  ak has NaN: {np.isnan(ak).any()}")
+    print(f"  co2_profile_prior has NaN: {np.isnan(co2_profile_prior).any()}")
+    print(f"  xco2_prior has NaN: {np.isnan(xco2_prior).any()}")
+    print(f"  xco2 has NaN: {np.isnan(xco2).any()}")
+    return xco2

@@ -16,6 +16,7 @@ from xmovie.core import convert_gif
 
 from neural_transport.inference.analyse import freq_mean
 from neural_transport.tools.conversion import (
+    compute_xco2_via_ak,
     density_to_massmix,
     massmix_to_molemix,
     zonal_wavenumber_to_wavelength,
@@ -1108,14 +1109,15 @@ def plot_obs_mask_and_samples(
 
     return fig
 
-
 def plot_obs_mask_and_samples_x(
-    batch,
-    preds_var,
-    varname="co2massmix",
-    nlat=32,
-    nlon=64,
-    max_samples=6,
+    batch: dict,
+    preds_var: xr.DataArray,
+    varname: str = "co2massmix",
+    nlat: int = 32,
+    nlon: int = 64,
+    max_samples: int = 6,
+    b: int = 0,
+    t: int = 0
 ):
     """
     Plot observed values, masked observations, and several generated samples.
@@ -1136,17 +1138,19 @@ def plot_obs_mask_and_samples_x(
         samples = samples.isel(time=t)
 
     if "xco2_averaging_kernel" in batch:
-        ak = batch["xco2_averaging_kernel"][b, t, :, :].detach().cpu()  # [N, C]
-        ak_sum = ak.sum(dim=-1, keepdim=True)  # [N, 1]
-        ak = ak / ak_sum
-        vals = batch[varname][b, t, :, :].detach().cpu()  # [N, C]
-        target_vals = (ak * vals).sum(dim=-1).numpy().reshape(nlat, nlon)
+        ak = batch["xco2_averaging_kernel"][b, t, :, :].detach().cpu().numpy()  # [N, C]
+        xco2_prior = batch["xco2_apriori"][b, t, :].detach().cpu().numpy().squeeze(-1)  # [N]
+        co2_profile_prior = batch["co2_profile_apriori"][b, t, :, :].detach().cpu().numpy()  # [N, C]
+        vals = batch[varname][b, t, :, :].detach().cpu().numpy()  # [N, C]
+        target_vals = compute_xco2_via_ak(vals, ak, xco2_prior, co2_profile_prior).reshape(nlat, nlon)
         if "level" in samples.dims:
-            ak_reshaped = ak.numpy().reshape(nlat, nlon, -1)  # [lat, lon, level]
+            ak_reshaped = ak.reshape(nlat, nlon, -1)  # [lat, lon, level]
+            xco2_prior_reshaped = xco2_prior.reshape(nlat, nlon)  # [lat, lon]
+            co2_profile_prior_reshaped = co2_profile_prior.reshape(nlat, nlon, -1)  # [lat, lon, level]
             samples_np = samples.values  # [sample, lat, lon, level]
             samples_list = []
             for i in range(min(samples_np.shape[0], max_samples)):
-                samples_list.append((ak_reshaped * samples_np[i]).sum(axis=-1))
+                samples_list.append(compute_xco2_via_ak(samples_np[i], ak_reshaped, xco2_prior_reshaped, co2_profile_prior_reshaped))
             samples = xr.DataArray(
                 np.array(samples_list),
                 dims=["sample", "lat", "lon"]
@@ -1229,15 +1233,15 @@ def plot_mask_pattern_on_samples(
         samples = samples.isel(time=t)
 
     if "xco2_averaging_kernel" in batch:
-        ak = batch["xco2_averaging_kernel"][b, t, :, :].detach().cpu()  # [N, C]
-        ak_sum = ak.sum(dim=-1, keepdim=True)  # [N, 1]
-        ak = ak / ak_sum
+        ak = batch["xco2_averaging_kernel"][b, t, :, :].detach().cpu().numpy()  # [N, C]
         if "level" in samples.dims:
-            ak_reshaped = ak.numpy().reshape(nlat, nlon, -1)  # [lat, lon, level]
+            ak_reshaped = ak.reshape(nlat, nlon, -1)  # [lat, lon, level]
+            xco2_prior_reshaped = batch["xco2_apriori"][b, t, :].detach().cpu().numpy().reshape(nlat, nlon)  # [lat, lon]
+            co2_profile_prior_reshaped = batch["co2_profile_apriori"][b, t, :, :].detach().cpu().numpy().reshape(nlat, nlon, -1)  # [lat, lon, level]
             samples_np = samples.values  # [sample, lat, lon, level]
             samples_list = []
             for i in range(min(samples_np.shape[0], max_samples)):
-                samples_list.append((ak_reshaped * samples_np[i]).sum(axis=-1))
+                samples_list.append(compute_xco2_via_ak(samples_np[i], ak_reshaped, xco2_prior_reshaped, co2_profile_prior_reshaped))
             samples = xr.DataArray(
                 np.array(samples_list),
                 dims=["sample", "lat", "lon"]
@@ -1324,17 +1328,19 @@ def plot_masked_bias_samples(
         samples = samples.isel(time=t)
 
     if "xco2_averaging_kernel" in batch:
-        ak = batch["xco2_averaging_kernel"][b, t, :, :].detach().cpu()
-        ak_sum = ak.sum(dim=-1, keepdim=True)
-        ak = ak / ak_sum
-        vals = batch[varname][b, t, :, :].detach().cpu()
-        target_vals = (ak * vals).sum(dim=-1).numpy().reshape(nlat, nlon)
+        ak = batch["xco2_averaging_kernel"][b, t, :, :].detach().cpu().numpy()
+        xco2_prior = batch["xco2_apriori"][b, t, :].detach().cpu().numpy().squeeze(-1)
+        co2_profile_prior = batch["co2_profile_apriori"][b, t, :, :].detach().cpu().numpy()
+        vals = batch[varname][b, t, :, :].detach().cpu().numpy()
+        target_vals = compute_xco2_via_ak(vals, ak, xco2_prior, co2_profile_prior).reshape(nlat, nlon)
         if "level" in samples.dims:
-            ak_reshaped = ak.numpy().reshape(nlat, nlon, -1)
+            ak_reshaped = ak.reshape(nlat, nlon, -1)
+            xco2_prior_reshaped = xco2_prior.reshape(nlat, nlon)
+            co2_profile_prior_reshaped = co2_profile_prior.reshape(nlat, nlon, -1)
             samples_np = samples.values
             samples_list = []
             for i in range(min(samples_np.shape[0], max_samples)):
-                samples_list.append((ak_reshaped * samples_np[i]).sum(axis=-1))
+                samples_list.append(compute_xco2_via_ak(samples_np[i], ak_reshaped, xco2_prior_reshaped, co2_profile_prior_reshaped))
             samples = xr.DataArray(
                 np.array(samples_list),
                 dims=["sample", "lat", "lon"]
@@ -1435,13 +1441,13 @@ def plot_masked_bias_samples(
 
 
 def plot_masking_diagnostics(
-        batch,
-        preds,
-        out_dir,
-        varnames=["co2massmix"],
-        nlat=32,
-        nlon=64,
-        imgformats=["svg", "png", "pdf"]):
+        batch: dict,
+        preds: xr.Dataset,
+        out_dir: str,
+        varnames: list = ["co2massmix"],
+        nlat: int = 32,
+        nlon: int = 64,
+        imgformats: list = ["svg", "png", "pdf"]) -> None:
     """
     Save diagnostics for masking or flow matching analysis.
     """
@@ -1452,6 +1458,10 @@ def plot_masking_diagnostics(
         if varname not in preds:
             raise KeyError(f"{varname} not found in preds")
 
+        if varname == "co2massmix":
+            varname = "co2molemix"
+            batch[varname] = massmix_to_molemix(batch["co2massmix"])
+            preds[varname] = massmix_to_molemix(preds["co2massmix"])
         preds_var = preds[varname]
 
         fig = plot_obs_mask_and_samples_x(

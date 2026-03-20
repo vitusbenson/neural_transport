@@ -180,6 +180,28 @@ class RegularGridModel(nn.Module):
 
         return obs_norm
 
+
+    def denormalize_observations(self, obs_norm, batch, target_var, targshift=None):
+        mean = batch[f"{target_var}_offset"]
+        std = batch[f"{target_var}_scale"]
+
+        obs_mask = batch["obs_mask"]
+        mask = obs_mask.bool()
+
+        if targshift is None:
+            targshift = self.targshift
+        if targshift:
+            mean = torch.nanmean((batch[target_var] - mean) / std, dim=(1, 2), keepdim=True)
+            obs_norm = torch.where(mask, obs_norm + mean, obs_norm)
+
+        obs_values = torch.where(
+            mask,
+            obs_norm * std + mean,
+            obs_norm,
+        )
+
+        return obs_values
+
     
     def denormalize_tensor(self, x_out, batch):
         x_grid_offset = torch.cat(
@@ -219,6 +241,9 @@ class RegularGridModel(nn.Module):
                 )
                 x_out_next_normalized = (x_out_next - x_grid_offset) / x_grid_scale
                 x_out_next_normalized_mean = x_out_next_normalized.mean((1, 2), keepdim=True)
+                print("\nDEBUG denormalize_tensor with targshift and _next keys")
+                print(f"  x_out shape: {x_out.shape}")
+                print(f"  x_out_next_normalized_mean shape: {x_out_next_normalized_mean.shape}")
                 x_out_next = (x_out + x_out_next_normalized_mean) * x_grid_scale + x_grid_offset
             else:
                 x_out_next = x_out * x_grid_scale + x_grid_offset
