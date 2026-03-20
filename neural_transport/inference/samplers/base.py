@@ -5,7 +5,10 @@ PosteriorSampler: adds shared Tweedie/project/renoise logic used by
 FlowDPS, SDE, FIG, and ICTM posterior samplers.
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
+from typing import Any
 
 import torch
 from torch import Tensor
@@ -42,11 +45,11 @@ class PosteriorSampler(BaseSampler):
 
     def __init__(
         self,
-        velocity_model,
-        masking_config: dict,
+        velocity_model: Any,
+        masking_config: dict[str, Any],
         sigma_obs: float = 0.1,
         spatial_smoothing_sigma: float = 0.0,
-    ):
+    ) -> None:
         self.velocity_model = velocity_model
         self.sigma_obs = sigma_obs
         self.spatial_smoothing_sigma = spatial_smoothing_sigma

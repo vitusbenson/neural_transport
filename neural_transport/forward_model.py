@@ -6,6 +6,8 @@ Consolidates the duplicated forward model from:
 - compute_xco2_column() (metrics.py) — kept as-is (NumPy, physical space)
 """
 
+from __future__ import annotations
+
 import numpy as np
 import torch
 from torch import Tensor
@@ -40,17 +42,17 @@ class XCO2ForwardModel:
 
     def __init__(
         self,
-        pressure_weights,
-        ak,
-        xco2_prior=None,
-        co2_profile_prior=None,
-        obs_mean=None,
-        obs_std=None,
-        target_mean=None,
-        target_std=None,
-        targshift_mean=None,
-        nlev=None,
-    ):
+        pressure_weights: Tensor | None,
+        ak: Tensor | None,
+        xco2_prior: Tensor | None = None,
+        co2_profile_prior: Tensor | None = None,
+        obs_mean: Tensor | None = None,
+        obs_std: Tensor | None = None,
+        target_mean: Tensor | None = None,
+        target_std: Tensor | None = None,
+        targshift_mean: Tensor | None = None,
+        nlev: int | None = None,
+    ) -> None:
         self.pressure_weights = pressure_weights
         self.ak = ak
         self.xco2_prior = xco2_prior
@@ -65,7 +67,7 @@ class XCO2ForwardModel:
         # Eagerly compute h_ak if possible
         self._h_ak = self._compute_h_ak()
 
-    def _compute_h_ak(self):
+    def _compute_h_ak(self) -> Tensor | float | None:  # type: ignore[return-value]
         """Compute h * ak tensor. Returns None if pressure_weights is None and nlev is None."""
         h = self.pressure_weights
         if h is None and self.nlev is not None:
@@ -96,7 +98,7 @@ class XCO2ForwardModel:
         """Whether prior information is available for the full forward model."""
         return self.xco2_prior is not None and self.co2_profile_prior is not None
 
-    def _get_h_ak_for_x(self, x):
+    def _get_h_ak_for_x(self, x: Tensor) -> Tensor:
         """Get h_ak, handling the case where pressure_weights is None (uniform)."""
         if self._h_ak is not None:
             return self._h_ak
@@ -174,7 +176,9 @@ class XCO2ForwardModel:
         """
         return self.h_ak * col_error
 
-    def project(self, x_hat, obs_values, obs_mask, sigma, spatial_smoothing_sigma=0.0):
+    def project(
+        self, x_hat: Tensor, obs_values: Tensor, obs_mask: Tensor, sigma: float, spatial_smoothing_sigma: float = 0.0
+    ) -> Tensor:
         """Pseudoinverse projection onto column measurement manifold.
 
         x_hat_k += (h_k * a_k) * (y - H(x_hat)) / (||h*a||^2 + sigma^2)
@@ -221,7 +225,7 @@ class XCO2ForwardModel:
         return x_hat + correction
 
     @classmethod
-    def from_masking_config(cls, masking_config: dict) -> "XCO2ForwardModel":
+    def from_masking_config(cls, masking_config: dict) -> XCO2ForwardModel:
         """Bridge constructor extracting params from legacy masking_config dict.
 
         Parameters

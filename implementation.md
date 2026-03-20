@@ -770,12 +770,12 @@ if __name__ == "__main__":
 - Run `mypy` on refactored modules (non-strict, just catch obvious errors)
 
 ### Checklist
-- [ ] Replace `print()` with `logging` in: `generation.py`, `ablation_runner.py`, `suite.py`, all samplers
-- [ ] Configure logging format in `ExperimentConfig`
-- [ ] Add type annotations to all public APIs in: `configs.py`, `forward_model.py`, `samplers/base.py`, `evaluation/suite.py`, `plots/base.py`, `data/inference_loader.py`, `experiments/ablation_runner.py`
-- [ ] Add `py.typed` marker
-- [ ] Run `mypy` on refactored modules, fix obvious errors
-- [ ] Run `ruff` on all modified files
+- [x] Replace `print()` with `logging` in: `generation.py`, `ablation_runner.py`, `train.py`, `gen_eval_callback.py` (24 statements across 4 files; `suite.py` and samplers had no prints)
+- [x] Configure logging format via `logging.basicConfig()` in entry points: `ablation_runner.main_cli()`, `train_and_eval_singlestep()`, `train_and_eval_rollout()`
+- [x] Add type annotations to all public APIs in: `forward_model.py`, `samplers/base.py`, `plots/base.py`, `data/inference_loader.py`, `experiments/ablation_runner.py` (`configs.py` and `evaluation/suite.py` already had excellent coverage)
+- [x] Add `py.typed` marker
+- [x] Run `mypy` on refactored modules, fix obvious errors (remaining errors are pre-existing `Tensor | None` patterns in `forward_model.py` guarded by runtime checks)
+- [x] Run `ruff` on all modified files
 
 ---
 

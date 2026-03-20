@@ -4,11 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 
 from neural_transport.configs import DataConfig
+
+if TYPE_CHECKING:
+    from neural_transport.datamodule import CarbonDataset
 from neural_transport.datasets.grids import LATLON_PROTOTYPE_COORDS, VERTICAL_LAYERS_PROTOTYPE_COORDS
 
 
@@ -96,13 +100,13 @@ class InferenceDataLoader:
         self._data_path = str(data_path)
         self._load_obspack = load_obspack
         self._grid_info = GridInfo.from_config(data_config)
-        self._dataset = None  # lazy
+        self._dataset: CarbonDataset | None = None  # lazy
 
     @property
     def grid_info(self) -> GridInfo:
         return self._grid_info
 
-    def load_dataset(self):
+    def load_dataset(self) -> CarbonDataset:
         """Load (or reload) the underlying CarbonDataset. Returns it."""
         from neural_transport.datamodule import CarbonDataset
 
@@ -121,10 +125,11 @@ class InferenceDataLoader:
         return self._dataset
 
     @property
-    def dataset(self):
+    def dataset(self) -> CarbonDataset:
         """Lazily loaded CarbonDataset."""
         if self._dataset is None:
             self.load_dataset()
+        assert self._dataset is not None
         return self._dataset
 
     def get_batch(self, idx: int, device: str = "cuda") -> dict[str, torch.Tensor]:

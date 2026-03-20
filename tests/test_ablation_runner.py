@@ -526,7 +526,9 @@ class TestSaveResults:
 
 
 class TestPrintSummaryTable:
-    def test_default_columns_appear(self, capsys):
+    def test_default_columns_appear(self, caplog):
+        import logging
+
         from neural_transport.evaluation.suite import EvalResult
         from neural_transport.experiments.ablation_runner import AblationRunner
 
@@ -542,12 +544,14 @@ class TestPrintSummaryTable:
                 }
             ),
         }
-        AblationRunner.print_summary_table(results)
-        captured = capsys.readouterr()
-        assert "RMSE_3D" in captured.out
-        assert "R2" in captured.out
+        with caplog.at_level(logging.INFO, logger="neural_transport.experiments.ablation_runner"):
+            AblationRunner.print_summary_table(results)
+        assert "RMSE_3D" in caplog.text
+        assert "R2" in caplog.text
 
-    def test_custom_columns(self, capsys):
+    def test_custom_columns(self, caplog):
+        import logging
+
         from neural_transport.evaluation.suite import EvalResult
         from neural_transport.experiments.ablation_runner import AblationRunner
 
@@ -555,20 +559,22 @@ class TestPrintSummaryTable:
             "cfg_a": EvalResult(metadata={"compat_metrics": {"custom_metric": 42.0}}),
         }
         columns = [("Custom", "custom_metric")]
-        AblationRunner.print_summary_table(results, columns=columns)
-        captured = capsys.readouterr()
-        assert "Custom" in captured.out
+        with caplog.at_level(logging.INFO, logger="neural_transport.experiments.ablation_runner"):
+            AblationRunner.print_summary_table(results, columns=columns)
+        assert "Custom" in caplog.text
 
-    def test_missing_metrics_show_na(self, capsys):
+    def test_missing_metrics_show_na(self, caplog):
+        import logging
+
         from neural_transport.evaluation.suite import EvalResult
         from neural_transport.experiments.ablation_runner import AblationRunner
 
         results = {
             "cfg_a": EvalResult(metadata={"compat_metrics": {}}),
         }
-        AblationRunner.print_summary_table(results)
-        captured = capsys.readouterr()
-        assert "N/A" in captured.out
+        with caplog.at_level(logging.INFO, logger="neural_transport.experiments.ablation_runner"):
+            AblationRunner.print_summary_table(results)
+        assert "N/A" in caplog.text
 
 
 # ── TestMainCli ───────────────────────────────────────────────────────────

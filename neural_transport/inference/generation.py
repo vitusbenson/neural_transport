@@ -6,6 +6,7 @@ Replaces three separate functions from generative.py:
 - generate_for_distributional_eval → GenerationPipeline.run_distributional()
 """
 
+import logging
 import tempfile
 from pathlib import Path
 
@@ -13,6 +14,8 @@ import numpy as np
 import torch
 import xarray as xr
 from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
 
 from neural_transport.configs import DEFAULT_T
 from neural_transport.inference.masking import (
@@ -569,9 +572,9 @@ class GenerationPipeline:
             offset = self.oco2_loader.compute_offset(self)
         else:
             offset = align_time(self.dataset.ds.time.values, dataset_gen_raw.ds.time.values)
-        print(f"Time alignment offset: {offset} timesteps")
+        logger.info("Time alignment offset: %d timesteps", offset)
         window_steps = max(1, window_hours // freq_int)
-        print(f"Using observation window: {window_hours} hours = {window_steps} timesteps")
+        logger.info("Using observation window: %d hours = %d timesteps", window_hours, window_steps)
 
         iterator = range(T)
         if self.verbose:

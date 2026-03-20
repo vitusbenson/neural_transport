@@ -8,9 +8,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import warnings
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from neural_transport.data.inference_loader import GridInfo
+
+logger = logging.getLogger(__name__)
 
 from neural_transport.configs import (
     DataConfig,
@@ -74,7 +80,7 @@ class AblationRunner:
 
     # ── Model loading ─────────────────────────────────────────────────────
 
-    def load_model(self):
+    def load_model(self) -> Any:
         """Load best model, iterating through model_dirs as fallbacks."""
         if self._cached_model is not None:
             return self._cached_model
@@ -82,17 +88,17 @@ class AblationRunner:
         for exp_dir in self.model_dirs:
             try:
                 model = train_load_model(exp_dir, ckpt="best", device=self.device)
-                print(f"Loaded model from {exp_dir}")
+                logger.info("Loaded model from %s", exp_dir)
                 self._cached_model = model
                 return model
             except Exception as e:
-                print(f"Could not load from {exp_dir}: {e}")
+                logger.warning("Could not load from %s: %s", exp_dir, e)
 
         raise RuntimeError(f"No model checkpoint found in any of: {[str(d) for d in self.model_dirs]}")
 
     # ── Dataset loading ───────────────────────────────────────────────────
 
-    def _load_dataset(self):
+    def _load_dataset(self) -> Any:
         """Load CarbonDataset for inference."""
         if self._cached_dataset is not None:
             return self._cached_dataset
@@ -104,7 +110,7 @@ class AblationRunner:
         self._cached_dataset = dataset
         return dataset
 
-    def _get_grid_info(self):
+    def _get_grid_info(self) -> GridInfo:
         """Get GridInfo from data config."""
         from neural_transport.data.inference_loader import GridInfo
 
@@ -150,9 +156,8 @@ class AblationRunner:
         eval_dir = Path(out_dir) / name
         eval_dir.mkdir(parents=True, exist_ok=True)
 
-        print(f"\n--- Evaluating: {name} ---")
+        logger.info("--- Evaluating: %s ---", name)
         generate_kwargs = compat_to_generate_kwargs(config)
-        print(f"  Config: {name}")
 
         try:
             # 1. Generate samples via GenerationPipeline
@@ -229,20 +234,17 @@ class AblationRunner:
                     },
                 )
             except Exception as e:
-                print(f"  Note: EvaluationSuite failed ({e}), using compat metrics only")
+                logger.warning("EvaluationSuite failed (%s), using compat metrics only", e)
 
-            print(f"  Metrics saved to {metrics_path}")
+            logger.info("Metrics saved to %s", metrics_path)
             for k, v in compat_metrics.items():
                 if isinstance(v, int | float):
-                    print(f"    {k}: {v:.4f}")
+                    logger.info("  %s: %.4f", k, v)
 
             return eval_result
 
         except Exception as e:
-            print(f"  ERROR in {name}: {e}")
-            import traceback
-
-            traceback.print_exc()
+            logger.error("Error in %s: %s", name, e, exc_info=True)
             return EvalResult(
                 metadata={
                     "config_name": name,
@@ -322,7 +324,7 @@ class AblationRunner:
 
         generate_kwargs = compat_to_generate_kwargs(config)
 
-        print("\n--- Running Distributional Evaluation ---")
+        logger.info("--- Running Distributional Evaluation ---")
         pipeline = GenerationPipeline(model, dataset, target_vars_3d=self.target_vars, device=self.device)
         gt_ds, gen_ds = pipeline.run_distributional(
             out_dir,
@@ -357,9 +359,9 @@ class AblationRunner:
             df = compute_distributional_score_df(gt_ds, gen_ds, target_var=target_var)
             df.to_csv(out_dir / "distributional_metrics.csv", index=False)
         except Exception as e:
-            print(f"  Note: CSV export failed: {e}")
+            logger.warning("CSV export failed: %s", e)
 
-        print(f"Distributional eval saved to {out_dir}")
+        logger.info("Distributional eval saved to %s", out_dir)
         return result
 
     # ── Save results ──────────────────────────────────────────────────────
@@ -418,7 +420,7 @@ class AblationRunner:
                 try:
                     run_plots(result, ctx)
                 except Exception as e:
-                    print(f"  Warning: plots for {name} failed: {e}")
+                    logger.warning("Plots for %s failed: %s", name, e)
 
         # Summary bar charts across configs
         metrics_dict = {}
@@ -440,7 +442,7 @@ class AblationRunner:
                         title=f"Ablation: {col_label}",
                     )
                 except Exception as e:
-                    print(f"  Warning: summary bar plot for {col_key} failed: {e}")
+                    logger.warning("Summary bar plot for %s failed: %s", col_key, e)
 
         # Custom plots
         if custom_plots:
@@ -448,9 +450,9 @@ class AblationRunner:
                 try:
                     plot_fn(results, plot_dir)
                 except Exception as e:
-                    print(f"  Warning: custom plot failed: {e}")
+                    logger.warning("Custom plot failed: %s", e)
 
-        print(f"Plots saved to {plot_dir}")
+        logger.info("Plots saved to %s", plot_dir)
 
     # ── Print summary table ───────────────────────────────────────────────
 
@@ -469,16 +471,14 @@ class AblationRunner:
         if columns is None:
             columns = DEFAULT_SUMMARY_COLUMNS
 
-        # Build header
+        # Build full table as single string to avoid timestamp-per-line disruption
         col_width = 12
         header = f"{'Config':<30}"
         for label, _ in columns:
             header += f" {label:>{col_width}}"
         sep = "=" * len(header)
 
-        print(f"\n{sep}")
-        print(header)
-        print(f"{'-' * len(header)}")
+        lines = [sep, header, "-" * len(header)]
 
         for name, result in results.items():
             compat = result.metadata.get("compat_metrics", {})
@@ -490,12 +490,13 @@ class AblationRunner:
                         row += f" {val:>{col_width}.4f}"
                     else:
                         row += f" {'N/A':>{col_width}}"
-                print(row)
+                lines.append(row)
             else:
                 error_msg = compat.get("error", "unknown error") if isinstance(compat, dict) else str(compat)
-                print(f"  {name:<28} ERROR: {error_msg}")
+                lines.append(f"  {name:<28} ERROR: {error_msg}")
 
-        print(sep)
+        lines.append(sep)
+        logger.info("\n%s", "\n".join(lines))
 
     # ── CLI entry point ───────────────────────────────────────────────────
 
@@ -517,6 +518,7 @@ class AblationRunner:
         args : list[str], optional
             CLI args (for testing). If None, uses sys.argv.
         """
+        logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s: %(message)s")
         parser = argparse.ArgumentParser(description="Ablation experiment runner")
         parser.add_argument("--device", type=str, default="cuda")
         parser.add_argument(

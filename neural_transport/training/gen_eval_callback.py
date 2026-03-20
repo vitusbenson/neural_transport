@@ -5,9 +5,13 @@ ensemble-mean RMSE and energy distance, and logs metrics for checkpoint
 selection based on actual generation quality rather than velocity MSE.
 """
 
+import logging
+
 import numpy as np
 import pytorch_lightning as pl
 import torch
+
+logger = logging.getLogger(__name__)
 
 from neural_transport.evaluation import energy_distance
 from neural_transport.evaluation.suite import EvaluationSuite
@@ -130,4 +134,4 @@ class GenerationQualityCallback(pl.Callback):
 
         except Exception as e:
             # Don't crash training if eval fails
-            print(f"GenerationQualityCallback error: {e}")
+            logger.warning("GenerationQualityCallback error: %s", e, exc_info=True)

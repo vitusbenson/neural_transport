@@ -1,3 +1,4 @@
+import logging
 import multiprocessing
 import os
 from pathlib import Path
@@ -5,6 +6,8 @@ from pathlib import Path
 import pandas as pd
 import pytorch_lightning as pl
 import xarray as xr
+
+logger = logging.getLogger(__name__)
 
 from neural_transport.datamodule import CarbonDataModule, CarbonDataset, PreBatchedShuffleCallback
 from neural_transport.inference.analyse import (
@@ -61,7 +64,7 @@ def load_model(exp_dir, ckpt="best", device="cuda"):
     if not ckptpath.exists():
         raise FileNotFoundError(f"Checkpoint not found: {ckptpath}")
 
-    print(f"Loading model from {ckptpath}")
+    logger.info("Loading model from %s", ckptpath)
     model = NeuralTransport.load_from_checkpoint(str(ckptpath), map_location=device)
     model = model.to(device)
     model.eval()
@@ -116,7 +119,7 @@ def train_singlestep(
         **trainer_kwargs,
     )
 
-    print("Starting singlestep training")
+    logger.info("Starting singlestep training")
     trainer.fit(model, dset)
 
     return model.global_rank
@@ -181,7 +184,7 @@ def train_rollout(
 
         dset = CarbonDataModule(**data_kwargs)
 
-        print(f"Starting training {n_timesteps} timesteps")
+        logger.info("Starting training %d timesteps", n_timesteps)
         trainer.fit(model, dset)
         trainer.fit_loop.max_epochs += rollout_trainer_kwargs["max_epochs"]
         trainer.fit_loop.epoch_loop.val_loop._results.clear()
@@ -241,14 +244,14 @@ def predict(
     dataset = load_dataset(data_path_forecast, data_kwargs, load_obspack=not is_fm)
 
     if is_fm:
-        print(f"Generating {ckptpath} {ckpt} CKPT")
+        logger.info("Generating %s %s CKPT", ckptpath, ckpt)
         model = NeuralTransport.load_from_checkpoint(ckptpath, **lit_module_kwargs)
         outpath.mkdir(parents=True, exist_ok=True)
 
         if distributional_eval:
             dist_kwargs = distributional_eval_kwargs or {}
             dist_outpath = outpath / "distributional_eval"
-            print("Running distributional evaluation...")
+            logger.info("Running distributional evaluation...")
             generate_for_distributional_eval(
                 model,
                 dataset,
@@ -295,7 +298,7 @@ def predict(
                 **generate_kwargs,
             )
     else:
-        print(f"Forecasting {ckptpath} {ckpt} CKPT")
+        logger.info("Forecasting %s %s CKPT", ckptpath, ckpt)
         model = NeuralTransport.load_from_checkpoint(ckptpath, **lit_module_kwargs)
         outpath.mkdir(parents=True, exist_ok=True)
         iterative_forecast(
@@ -350,9 +353,9 @@ def score(
             score_path = dist_dir / "scores"
             score_path.mkdir(parents=True, exist_ok=True)
             df.to_csv(score_path / "distributional_metrics.csv", index=False)
-            print(f"Distributional metrics saved to {score_path / 'distributional_metrics.csv'}")
+            logger.info("Distributional metrics saved to %s", score_path / "distributional_metrics.csv")
         else:
-            print(f"Distributional eval dir not found: {dist_dir}")
+            logger.warning("Distributional eval dir not found: %s", dist_dir)
         return
 
     co2targ, co2pred = load_pred_targ(target_path, pred_path)
@@ -396,7 +399,7 @@ def score(
     if obs_pred_path:
         obspreds = xr.open_zarr(obs_pred_path)  # .isel(time = slice(1,None))
 
-        print(f"Computing score for {obs_pred_path}")
+        logger.info("Computing score for %s", obs_pred_path)
 
         df = compute_local_scores(obs_preds=obspreds, freq=freq)
 
@@ -664,6 +667,8 @@ def train_and_eval_singlestep(
     distributional_eval_kwargs=None,
     extra_callbacks=None,
 ):
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s: %(message)s")
+
     if generate_kwargs is None:
         generate_kwargs = {}
 
@@ -784,6 +789,8 @@ def train_and_eval_rollout(
     zero_surfflux=False,
     generate_kwargs=None,
 ):
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s: %(message)s")
+
     if generate_kwargs is None:
         generate_kwargs = {}
 
@@ -840,10 +847,10 @@ def train_and_eval_rollout(
         )
 
         if run_scoring:
-            print("Starting Scoring")
+            logger.info("Starting Scoring")
             score(target_path, pred_path, obs_pred_path=obs_pred_path, freq=freq, generate_kwargs=generate_kwargs)
         if run_plotting:
-            print("Starting Plotting")
+            logger.info("Starting Plotting")
             plot(
                 target_path,
                 pred_path,

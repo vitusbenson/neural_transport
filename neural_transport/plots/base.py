@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from neural_transport.evaluation.suite import EvalResult
 
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
 
 from neural_transport.configs import PlotConfig
 from neural_transport.plots.utilities.plot_utils import mpl_rc_params, save_figure
@@ -65,7 +69,7 @@ class PlotContext:
         self.save_dir.mkdir(parents=True, exist_ok=True)
         plt.rcParams.update(mpl_rc_params)
 
-    def savefig(self, fig, name: str) -> None:
+    def savefig(self, fig: Figure, name: str) -> None:
         """Save figure using the shared save_figure utility."""
         save_figure(
             fig,
@@ -75,7 +79,7 @@ class PlotContext:
             dpi=self.config.dpi,
         )
 
-    def subplot_grid(self, nrows: int, ncols: int, **kwargs):
+    def subplot_grid(self, nrows: int, ncols: int, **kwargs: Any) -> tuple[Figure, Any]:
         """Create a subplot grid with figsize scaled by config.figsize_scale."""
         base_w, base_h = 4.0, 3.5
         scale = self.config.figsize_scale
@@ -84,7 +88,7 @@ class PlotContext:
         return fig, axes
 
     @contextlib.contextmanager
-    def figure(self, name: str, **kwargs):
+    def figure(self, name: str, **kwargs: Any) -> Generator[Figure, None, None]:
         """Context manager that creates a figure and auto-saves on exit."""
         fig = plt.figure(**kwargs)
         try:
@@ -98,7 +102,7 @@ class PlotContext:
 # ---------------------------------------------------------------------------
 
 
-def run_plots(result, ctx: PlotContext, categories: list[str] | None = None) -> list[str]:
+def run_plots(result: EvalResult, ctx: PlotContext, categories: list[str] | None = None) -> list[str]:
     """Dispatch registered plots for the requested categories.
 
     If *categories* is None, auto-infer from EvalResult content:
