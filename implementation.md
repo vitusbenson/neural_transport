@@ -738,18 +738,19 @@ if __name__ == "__main__":
 ```
 
 ### Checklist
-- [ ] **Tests first**: Write `tests/test_ablation_runner.py`:
+- [x] **Tests first**: Write `tests/test_ablation_runner.py` (25 tests):
   - `AblationRunner` constructs without error
   - `run_single_eval` with mock model returns `EvalResult`
   - `run_ablation` iterates over configs correctly
   - `save_results` produces valid JSON
-  - `main_cli` parses `--ablation` filter correctly
-- [ ] Implement `AblationRunner`
-- [ ] Rewrite `12_dps_guidance_ablation/run_ablation.py` as template
-- [ ] Rewrite remaining 4 experiment runners
-- [ ] Rewrite all 5 `plot_ablation.py` files (use `run_plots()` with "ablation" category)
-- [ ] Verify one experiment produces identical metrics JSON to pre-refactor output
-- [ ] Delete old duplicated code from all 5 experiments
+  - `main_cli` parses `--filter` correctly, `--dist-eval-only`, `--plot-only`
+- [x] Implement `AblationRunner` (`neural_transport/experiments/ablation_runner.py`)
+- [x] Export from `neural_transport/experiments/__init__.py`
+- [x] Rewrite `12_dps_guidance_ablation/run_ablation.py` as template (~65 lines)
+- [x] Rewrite remaining 4 experiment runners (13-16, each ~50-70 lines)
+- [x] Rewrite all 5 `plot_ablation.py` files (use `plot_ablation_sweep()` + `plot_summary_bars()`)
+- [ ] Verify one experiment produces identical metrics JSON to pre-refactor output (requires GPU)
+- Note: Old code replaced in-place (carbonbench is separate repo, originals in git history)
 
 ---
 
