@@ -57,8 +57,11 @@ class NeuralTransport(pl.LightningModule):
         self.loss = LOSSES[loss](**loss_kwargs)
         self.metrics = ManyMetrics(metrics)
 
-    def forward(self, batch):
+    def forward(self, batch, *, mode=None):
         T = max(batch[v].shape[1] for v in batch if isinstance(batch[v], torch.Tensor))
+
+        # Only FlowMatching accepts the mode kwarg; other models ignore it.
+        extra_kwargs = {"mode": mode} if mode is not None else {}
 
         for t in range(T):
             if t == 0:
@@ -74,9 +77,9 @@ class NeuralTransport(pl.LightningModule):
 
             if self.no_grad_shedule(self.global_step, t):
                 with torch.no_grad():
-                    curr_preds = self.model(curr_data)
+                    curr_preds = self.model(curr_data, **extra_kwargs)
             else:
-                curr_preds = self.model(curr_data)
+                curr_preds = self.model(curr_data, **extra_kwargs)
             if t == 0:
                 preds = {
                     k: torch.empty((curr_preds[k].shape[0], T, *curr_preds[k].shape[1:]), device=curr_preds[k].device)
@@ -98,8 +101,8 @@ class NeuralTransport(pl.LightningModule):
             and (t in self.hparams.no_grad_step_shedule["t_no_grad"])
         )
 
-    def common_step(self, batch):
-        preds = self(batch)
+    def common_step(self, batch, *, mode=None):
+        preds = self(batch, mode=mode)
 
         loss, losses = self.loss(preds, batch)
 
@@ -115,12 +118,13 @@ class NeuralTransport(pl.LightningModule):
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         dataloader_name = self.hparams.val_dataloader_names[dataloader_idx]
 
-        if isinstance(self.model, MODELWRAPPERS["flowmatching"]):
-            self.model.train()
+        is_fm = isinstance(self.model, MODELWRAPPERS["flowmatching"])
 
-        loss, losses, preds = self.common_step(batch)
+        # Use mode="train" to dispatch FlowMatching to training_forward()
+        # without calling model.train(), which would corrupt BatchNorm stats.
+        loss, losses, preds = self.common_step(batch, mode="train" if is_fm else None)
 
-        if isinstance(self.model, MODELWRAPPERS["flowmatching"]):
+        if is_fm:
             for v in preds:
                 if v not in ("dx_t", "time_loss_weight"):
                     preds[v] = preds[v] * batch[f"{v}_scale"] + batch[f"{v}_offset"]

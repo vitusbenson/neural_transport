@@ -95,6 +95,7 @@ def suggest_hyperparams(trial: optuna.Trial) -> dict[str, Any]:
         "max_lr": trial.suggest_float("max_lr", 0.3, 1.0),
         # Architecture
         "model_size": trial.suggest_categorical("model_size", list(MODEL_SIZES.keys())),
+        "norm": trial.suggest_categorical("norm", ["batch", "group"]),
         # FM training
         "use_ot_coupling": trial.suggest_categorical("use_ot_coupling", [True, False]),
         "time_sampling": trial.suggest_categorical("time_sampling", ["uniform", "logit_normal", "beta"]),
@@ -225,6 +226,7 @@ class FMOptunaObjective:
         unet_kwargs["embed_dim"] = model_size_config["embed_dim"]
         unet_kwargs["enc_filters"] = model_size_config["enc_filters"]
         unet_kwargs["dec_filters"] = model_size_config["dec_filters"]
+        unet_kwargs["norm"] = params.get("norm", "batch")
 
         # FM training params
         fm_kwargs["use_ot_coupling"] = params["use_ot_coupling"]

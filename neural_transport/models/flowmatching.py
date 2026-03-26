@@ -270,10 +270,27 @@ class FlowMatching(RegularGridModel):
         self.path = AffineProbPath(scheduler=CondOTScheduler())
         self.target_vars = self.submodel.target_vars  # Here target_vars[0] is supposed to be "co2massmix"
 
-    def forward(self, batch):
+    def forward(self, batch, *, mode=None):
+        """Forward pass with explicit mode dispatch.
+
+        Args:
+            batch: Input batch dict.
+            mode: Override dispatch mode. One of ``"train"``, ``"generate"``,
+                or ``None``.  When ``None`` (default), the mode is inferred
+                from ``self.training`` / ``self.generating`` as before.
+        """
         if not hasattr(self, "generate_kwargs"):
             self.generate_kwargs = {}
-        if self.training:
+
+        # Resolve mode: explicit kwarg takes priority over module state.
+        _mode = mode
+        if _mode is None:
+            if self.training:
+                _mode = "train"
+            elif self.generating:
+                _mode = "generate"
+
+        if _mode == "train":
             x_out, dx_t, time_weight = self.training_forward(batch)
             preds = self.postprocess_outputs(x_out, batch, denormalize=False)
             preds["dx_t"] = dx_t.permute(0, 2, 3, 1).reshape(*preds[self.target_vars[0]].shape)  # [B N C]
@@ -282,7 +299,7 @@ class FlowMatching(RegularGridModel):
                 B = preds[self.target_vars[0]].shape[0]
                 preds["time_loss_weight"] = time_weight.view(B, 1, 1).expand_as(preds[self.target_vars[0]])
             return preds
-        elif self.generating:
+        elif _mode == "generate":
             x_in = self.preprocess_inputs(batch)
             all_levels = x_in[:, : self.nlev * len(self.target_vars), :, :]  # [B C Nlat Nlon]
             # surface_level = x_in[:, :1, :, :]  # [B 1 Nlat Nlon]

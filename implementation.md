@@ -858,59 +858,32 @@ This is both a validation of the refactor AND a re-establishment of the best unc
 
 ---
 
-## Phase 20: Debug OT Coupling
+## Phase 20: Debug OT Coupling & BatchNorm (combined with Phase 21)
 
-**Goal**: Investigate whether optimal transport coupling (`use_ot_coupling=True`) in `FlowMatching.training_forward()` is working correctly. The Phase 18 Optuna sweep selected OT coupling as beneficial (all top-5 trials used it), but the generated samples diverge — OT coupling may be producing straighter flows during training that don't generalize to the ODE solver at inference.
+**Goal**: Investigate generation quality issues — the Phase 18 best model (trained 10k steps, 625 epochs) produces mode-collapsed samples: `vendi_score_gen=1.0` (vs GT 5.99), `coverage=0.0`, `density=0.0`, despite `valid_fraction=1.0`.
 
-**Diagnostics**:
-- Compare training loss curves with/without OT coupling
-- Check if OT-coupled models have lower training loss but worse generation quality
-- Visualize the learned velocity fields: are they smooth? Do they have large magnitudes near t=1?
-- Test with different ODE solvers (euler vs midpoint vs dopri5) and step counts
-- Check if the `compute_ot_coupling()` function handles batch statistics correctly with `compute=True` (PreBatchedDataset)
+**Root cause found**: `litmodule.py:119` called `self.model.train()` in `validation_step()`, which recursively set all submodules (including BatchNorm) to training mode. Over 625 epochs, this contaminated BatchNorm running statistics with validation data. At inference (`model.eval()`), the corrupted running stats caused the network to collapse all outputs to a single mode.
 
-**Potential fixes**:
-- Add velocity magnitude regularization during training
-- Clamp velocity field at inference time
-- Use adaptive step-size ODE solver with tighter tolerances
-- Disable OT coupling if it's the root cause
+**Fix**: Added a `mode` keyword argument to `FlowMatching.forward()` (and threaded through `NeuralTransport.forward()` → `common_step()`). The `validation_step` now passes `mode="train"` instead of calling `model.train()`, keeping BatchNorm layers in eval mode while still dispatching to `training_forward()`.
+
+**Additional**: Added `norm` (batch/group) to Optuna search space in `suggest_hyperparams()`, since GroupNorm has no train/eval mismatch by design.
 
 ### Checklist
-- [ ] Create diagnostic script: train 2 models (OT on/off), generate samples, compare valid_fraction
-- [ ] Visualize velocity field magnitudes at different t values
-- [ ] Test generation with different ODE solvers and step counts
-- [ ] Check `compute_ot_coupling()` correctness with PreBatchedDataset batches
-- [ ] If OT is the issue: add velocity clipping or regularization
-- [ ] Document findings
+- [x] Fix `validation_step` BatchNorm corruption — `mode` kwarg in `FlowMatching.forward()` (`flowmatching.py:273`)
+- [x] Thread `mode` through `NeuralTransport.forward()` and `common_step()` (`litmodule.py:60-126`)
+- [x] Create diagnostic script: `diagnose_mode_collapse.py` — train vs eval mode, velocity field analysis, ODE solver comparison, BatchNorm stats inspection
+- [x] Create diagnostic training script: `train_diagnostic.py` — trains with `--norm {batch,group}` and `--no-ot` flags
+- [x] Create SLURM array job: `train_diagnostic.slurm` — 3 experiments (batch+OT, group+OT, batch+noOT)
+- [x] Add `norm` to Optuna search space: `suggest_hyperparams()` and `_apply_hyperparams()` in `tuning.py`
+- [x] Update `train_best.py` to use `best.get("norm", "batch")` instead of hardcoded `norm="batch"`
+- [x] Write 7 new tests (mode dispatch, BatchNorm preservation, GroupNorm compat, validation_step) — all pass
+- [x] All 152 quick tests pass, ruff clean
+- [x] Run `diagnose_mode_collapse.py` on GPU with existing checkpoint — **confirmed BatchNorm divergence**: `model.eval()` produces exploded values (field_mean=61873, std=160792) while `model.train()` produces correct values (mean=0.86, std=4.37). `num_batches_tracked=124` (far too low). Velocity magnitudes 2× higher in eval mode. euler/20 and midpoint/11 produce 0/10 valid samples in eval mode.
+- [x] Smoke-tested `train_diagnostic.py` on GPU (100 steps, batch_size=256): BatchNorm+fix → `vendi_score_gen=14.76` (was 1.0!), `energy_distance=460` (was 1051). GroupNorm → `vendi_score_gen=15.48`, `energy_distance=515`. **Fix eliminates mode collapse.** Both variants produce diverse samples.
+- [ ] Run full diagnostic training (SLURM, 10k steps): batch_fixed, groupnorm, no_ot — compare converged distributional metrics
+- [x] Document findings: root cause = `model.train()` in `validation_step` corrupting BatchNorm running stats; fix = `mode` kwarg API; effect = divergence/explosion in eval mode, not collapse
 
----
-
-## Phase 21: Investigate BatchNorm Alternatives
-
-**Goal**: BatchNorm in the UNet may cause train/eval distribution mismatch. During training, FlowMatching uses `model.train()` even in validation (line 119 of `litmodule.py`). At inference, the model switches to `model.eval()` — BatchNorm then uses running statistics which may differ significantly from the per-batch statistics seen during training, especially with large batch sizes (512-1536) and the flow-matching time conditioning.
-
-**Diagnostics**:
-- Compare generation quality with `model.train()` vs `model.eval()` at inference time
-- If `model.train()` at inference produces valid samples but `model.eval()` doesn't → BatchNorm is the issue
-
-**Alternatives to evaluate**:
-- **GroupNorm** (already supported in UNet: `norm="group"`): no batch statistics, works identically in train/eval
-- **InstanceNorm**: per-sample normalization
-- **LayerNorm**: normalize over channels+spatial
-- **No normalization** (`norm="none"`): simplest, may need careful initialization
-
-**Approach**:
-- Quick test: generate with model in train mode — if samples are valid, BatchNorm is confirmed as the issue
-- Retrain with GroupNorm and compare generation quality
-- If GroupNorm works: re-run Optuna with GroupNorm models, compare with BatchNorm baselines
-
-### Checklist
-- [ ] Diagnostic: generate samples with model.train() vs model.eval() — compare valid_fraction
-- [ ] If BatchNorm confirmed: train model with GroupNorm (`norm="group"`)
-- [ ] Compare generation quality: GroupNorm vs BatchNorm
-- [ ] If GroupNorm works: add `norm` to Optuna search space
-- [ ] Consider adding norm type to `MODEL_SIZES` or `suggest_hyperparams`
-- [ ] Document findings and recommendation
+**Deviations from original plan**: Phases 20 and 21 merged — the BatchNorm bug was identified as the primary cause during investigation. OT coupling may compound the issue but is secondary; diagnostic experiments will isolate its contribution. The fix is a clean `mode` kwarg API rather than hacking `self.model.training` directly.
 
 ---
 
@@ -1118,10 +1091,9 @@ Phase 17 (Logging & Types) — after all refactor phases
 
 Phase 18 (E2E: Training & Tuning)
   │
-  ├── Phase 19 (GenEval Callback)       ┐
-  │     └── Phase 20 (Debug OT Coupling) ├── Fix generation quality
-  │           └── Phase 21 (BatchNorm)   │
-  │                 └── Phase 22 (SwinTransformer + Tune) ┘
+  ├── Phase 19 (GenEval Callback)                        ┐
+  │     └── Phase 20 (Debug OT Coupling + BatchNorm fix) ├── Fix generation quality
+  │           └── Phase 22 (SwinTransformer + Tune)      ┘
   │
 Phase 23 (E2E: OSSE + OCO-2 Mask)     ┐
 Phase 24 (E2E: Real OCO-2 Inversion)  ├── Validate refactored codebase
