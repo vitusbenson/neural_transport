@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 from neural_transport.evaluation import energy_distance
 from neural_transport.evaluation.suite import EvaluationSuite
+from neural_transport.inference.generation import is_bad_sample
 
 
 class GenerationQualityCallback(pl.Callback):
@@ -37,7 +38,7 @@ class GenerationQualityCallback(pl.Callback):
         self,
         val_dataset,
         n_gt_samples=5,
-        n_gen_samples=5,
+        n_gen_samples=20,
         eval_every_n_epochs=5,
         target_var="co2massmix",
         generate_kwargs=None,
@@ -49,7 +50,10 @@ class GenerationQualityCallback(pl.Callback):
         self.n_gen_samples = n_gen_samples
         self.eval_every_n_epochs = eval_every_n_epochs
         self.target_var = target_var
-        self.generate_kwargs = generate_kwargs or {}
+        # Fast ODE defaults for training-time evaluation
+        _fast_defaults = {"method": "euler", "steps": 5}
+        _fast_defaults.update(generate_kwargs or {})
+        self.generate_kwargs = _fast_defaults
         self.suite = EvaluationSuite(eval_config)
 
     @torch.no_grad()
@@ -88,14 +92,23 @@ class GenerationQualityCallback(pl.Callback):
             model.eval()
 
             gen_fields = []
+            n_valid = 0
+            n_total = self.n_gen_samples
+
             # Use a single batch from val set as template
-            template_batch = {
-                k: v.unsqueeze(0).to(device) for k, v in self.val_dataset[0].items() if isinstance(v, torch.Tensor)
-            }
+            # Squeeze time dim if present (T=1), then add batch dim
+            raw_sample = self.val_dataset[0]
+            template_batch = {}
+            for k, v in raw_sample.items():
+                if not isinstance(v, torch.Tensor):
+                    continue
+                if v.ndim >= 2 and v.shape[0] == 1:
+                    v = v.squeeze(0)  # [1, N, C] -> [N, C]
+                template_batch[k] = v.unsqueeze(0).to(device)  # [N, C] -> [1, N, C]
 
             model.generate_kwargs = self.generate_kwargs
 
-            for _ in range(self.n_gen_samples):
+            for _ in range(n_total):
                 batch_i = {k: v.clone() for k, v in template_batch.items()}
                 with torch.no_grad():
                     preds = model(batch_i)
@@ -105,17 +118,31 @@ class GenerationQualityCallback(pl.Callback):
                         field = field[0, -1]  # Last timestep, first batch
                     elif field.ndim == 3:  # [B, N, C]
                         field = field[0]
-                    gen_fields.append(field)
+                    if not is_bad_sample(field):
+                        gen_fields.append(field)
+                        n_valid += 1
 
             # Restore model state
             model.generating = was_generating
             if was_training:
                 model.train()
 
-            if len(gen_fields) == 0:
+            valid_fraction = n_valid / n_total
+
+            # Always log valid_fraction
+            pl_module.log("GenEval/valid_fraction", valid_fraction)
+
+            if n_valid == 0:
+                logger.warning("GenEval: 0/%d samples valid", n_total)
+                pl_module.log("GenEval/RMSE", float("inf"))
+                pl_module.log("GenEval/energy_distance", float("inf"))
+                pl_module.log("GenEval/gen_std", 0.0)
                 return
 
-            gen_fields = np.stack(gen_fields)  # [n_gen, N, C]
+            if n_valid < 2:
+                logger.warning("GenEval: only %d/%d valid samples, metrics may be noisy", n_valid, n_total)
+
+            gen_fields = np.stack(gen_fields)  # [n_valid, N, C]
 
             # Compute RMSE via EvaluationSuite
             gt_mean = gt_fields.mean(axis=0)

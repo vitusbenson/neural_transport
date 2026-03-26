@@ -256,6 +256,228 @@ def test_gen_eval_callback_produces_metrics(tiny_fm_kwargs, synthetic_datamodule
     assert torch.isfinite(torch.tensor(rmse)), f"GenEval/RMSE is not finite: {rmse}"
     assert torch.isfinite(torch.tensor(e_dist)), f"GenEval/energy_distance is not finite: {e_dist}"
 
+    # Phase 19: valid_fraction should also be logged
+    assert "GenEval/valid_fraction" in metrics, "GenEval/valid_fraction not found"
+    vf = metrics["GenEval/valid_fraction"].item()
+    assert 0.0 <= vf <= 1.0, f"valid_fraction out of range: {vf}"
+
+
+@pytest.mark.slow
+def test_gen_eval_callback_logs_valid_fraction(tiny_fm_kwargs, synthetic_datamodule, tmp_path):
+    """Verify GenEval/valid_fraction is logged and in [0, 1]."""
+    from neural_transport.litmodule import NeuralTransport
+    from neural_transport.training.gen_eval_callback import GenerationQualityCallback
+
+    tiny_fm_kwargs["model_kwargs"]["model_kwargs"]["generating"] = True
+    tiny_fm_kwargs["model_kwargs"]["model_kwargs"]["return_intermediates"] = False
+
+    model = NeuralTransport(**tiny_fm_kwargs)
+    val_ds = _SyntheticCO2Dataset(10, NLAT, NLON, NLEV, include_time=False)
+
+    gen_eval_cb = GenerationQualityCallback(
+        val_dataset=val_ds,
+        n_gt_samples=2,
+        n_gen_samples=5,
+        eval_every_n_epochs=1,
+        target_var="co2massmix",
+        generate_kwargs=dict(steps=3, method="euler"),
+    )
+
+    trainer = pl.Trainer(
+        max_epochs=1,
+        accelerator="cpu",
+        enable_checkpointing=False,
+        enable_progress_bar=False,
+        logger=False,
+        callbacks=[gen_eval_cb],
+        log_every_n_steps=1,
+    )
+    trainer.fit(model, synthetic_datamodule)
+
+    metrics = trainer.callback_metrics
+    assert "GenEval/valid_fraction" in metrics
+    vf = metrics["GenEval/valid_fraction"].item()
+    assert 0.0 <= vf <= 1.0, f"valid_fraction out of range: {vf}"
+    # With synthetic data, all samples should be valid
+    assert vf > 0.0, "Expected some valid samples with synthetic data"
+
+
+def test_gen_eval_callback_fast_ode_defaults():
+    """Verify default generate_kwargs include fast ODE settings."""
+    from unittest.mock import MagicMock
+
+    from neural_transport.training.gen_eval_callback import GenerationQualityCallback
+
+    dummy_ds = MagicMock()
+    dummy_ds.__len__ = MagicMock(return_value=10)
+
+    # Default: fast ODE settings applied
+    cb = GenerationQualityCallback(val_dataset=dummy_ds)
+    assert cb.generate_kwargs["method"] == "euler"
+    assert cb.generate_kwargs["steps"] == 5
+
+    # Explicit kwargs override defaults
+    cb2 = GenerationQualityCallback(
+        val_dataset=dummy_ds,
+        generate_kwargs={"method": "midpoint", "steps": 10},
+    )
+    assert cb2.generate_kwargs["method"] == "midpoint"
+    assert cb2.generate_kwargs["steps"] == 10
+
+    # Partial override: only steps
+    cb3 = GenerationQualityCallback(
+        val_dataset=dummy_ds,
+        generate_kwargs={"steps": 3},
+    )
+    assert cb3.generate_kwargs["method"] == "euler"  # default kept
+    assert cb3.generate_kwargs["steps"] == 3  # overridden
+
+
+@pytest.mark.slow
+def test_gen_eval_callback_handles_all_nan(tiny_fm_kwargs, synthetic_datamodule, tmp_path):
+    """When all generated samples are NaN, valid_fraction=0 and metrics are inf."""
+    from unittest.mock import patch
+
+    from neural_transport.litmodule import NeuralTransport
+    from neural_transport.training.gen_eval_callback import GenerationQualityCallback
+
+    tiny_fm_kwargs["model_kwargs"]["model_kwargs"]["generating"] = True
+    tiny_fm_kwargs["model_kwargs"]["model_kwargs"]["return_intermediates"] = False
+
+    model = NeuralTransport(**tiny_fm_kwargs)
+    val_ds = _SyntheticCO2Dataset(10, NLAT, NLON, NLEV, include_time=False)
+
+    gen_eval_cb = GenerationQualityCallback(
+        val_dataset=val_ds,
+        n_gt_samples=2,
+        n_gen_samples=3,
+        eval_every_n_epochs=1,
+        target_var="co2massmix",
+        generate_kwargs=dict(steps=3, method="euler"),
+    )
+
+    # Patch is_bad_sample to always return True (simulates all-NaN generation)
+    with patch("neural_transport.training.gen_eval_callback.is_bad_sample", return_value=True):
+        trainer = pl.Trainer(
+            max_epochs=1,
+            accelerator="cpu",
+            enable_checkpointing=False,
+            enable_progress_bar=False,
+            logger=False,
+            callbacks=[gen_eval_cb],
+            log_every_n_steps=1,
+        )
+        trainer.fit(model, synthetic_datamodule)
+
+    metrics = trainer.callback_metrics
+    assert "GenEval/valid_fraction" in metrics
+    assert metrics["GenEval/valid_fraction"].item() == 0.0
+
+    # RMSE and energy_distance should be inf
+    assert metrics["GenEval/RMSE"].item() == float("inf")
+    assert metrics["GenEval/energy_distance"].item() == float("inf")
+    assert metrics["GenEval/gen_std"].item() == 0.0
+
+
+@pytest.mark.slow
+def test_optuna_objective_uses_composite_metric(tiny_fm_kwargs, tmp_path):
+    """Verify FMOptunaObjective composite objective uses valid_fraction."""
+    optuna = pytest.importorskip("optuna")
+    from neural_transport.training.gen_eval_callback import GenerationQualityCallback
+    from neural_transport.training.tuning import FMOptunaObjective
+
+    val_ds = _SyntheticCO2Dataset(5, NLAT, NLON, NLEV, include_time=False)
+
+    trainer_kwargs = dict(max_steps=5, accelerator="cpu")
+
+    class _TestCompositeObjective(FMOptunaObjective):
+        """Override to use synthetic data with GenEval callback."""
+
+        def __call__(self, trial):
+            from neural_transport.training.tuning import suggest_hyperparams
+
+            params = suggest_hyperparams(trial)
+            params["model_size"] = "XXS"
+            params["time_loss_weight"] = None
+
+            lit_kwargs, _, tr_kwargs = self._apply_hyperparams(params, trial.number)
+
+            unet_kwargs = lit_kwargs["model_kwargs"]["model_kwargs"]["model_kwargs"]["model_kwargs"]
+            unet_kwargs["embed_dim"] = 16
+            unet_kwargs["enc_filters"] = [[3], [3]]
+            unet_kwargs["dec_filters"] = [[3], [3]]
+
+            # Enable generation mode
+            lit_kwargs["model_kwargs"]["model_kwargs"]["generating"] = True
+            lit_kwargs["model_kwargs"]["model_kwargs"]["return_intermediates"] = False
+
+            tr_kwargs.pop("max_steps", None)
+            tr_kwargs["max_epochs"] = 1
+
+            trial_dir = self.run_dir / f"trial_{trial.number:04d}"
+            trial_dir.mkdir(parents=True, exist_ok=True)
+
+            from neural_transport.litmodule import NeuralTransport
+
+            model = NeuralTransport(**lit_kwargs)
+            dm = SyntheticFMDataModule(n_train=20, n_val=5, nlat=NLAT, nlon=NLON, nlev=NLEV, batch_size=4)
+
+            gen_eval_cb = GenerationQualityCallback(
+                val_dataset=self.val_dataset,
+                n_gt_samples=2,
+                n_gen_samples=3,
+                eval_every_n_epochs=1,
+                target_var="co2massmix",
+                generate_kwargs=dict(steps=3, method="euler"),
+            )
+
+            trainer = pl.Trainer(
+                callbacks=[gen_eval_cb],
+                logger=False,
+                enable_progress_bar=False,
+                **tr_kwargs,
+            )
+            trainer.fit(model, dm)
+
+            # Use the composite objective logic from tuning.py
+            import math
+
+            metrics = {}
+            for key in trainer.callback_metrics:
+                val = trainer.callback_metrics[key]
+                metrics[key] = val.item() if hasattr(val, "item") else float(val)
+
+            valid_fraction = metrics.get("GenEval/valid_fraction", 0.0)
+            e_dist = metrics.get("GenEval/energy_distance", float("inf"))
+
+            if valid_fraction > 0 and math.isfinite(e_dist):
+                objective = e_dist + self.stability_penalty * (1.0 - valid_fraction)
+            elif "Loss/Val_singlestep" in metrics:
+                objective = metrics["Loss/Val_singlestep"] + self.stability_penalty
+            else:
+                objective = float("inf")
+
+            return objective
+
+    objective = _TestCompositeObjective(
+        base_data_kwargs={},
+        base_lit_module_kwargs=tiny_fm_kwargs,
+        base_trainer_kwargs=trainer_kwargs,
+        run_dir=tmp_path / "trials",
+        val_dataset=val_ds,
+        ema_kwargs=None,
+        stability_penalty=10.0,
+    )
+
+    study = optuna.create_study(direction="minimize")
+    study.optimize(objective, n_trials=1)
+
+    assert len(study.trials) == 1
+    trial = study.trials[0]
+    assert trial.state == optuna.trial.TrialState.COMPLETE
+    assert trial.value is not None
+    assert trial.value < float("inf"), f"Trial returned inf: {trial.value}"
+
 
 @pytest.mark.slow
 def test_optuna_objective_runs_single_trial(tiny_fm_kwargs, tmp_path):

@@ -849,12 +849,12 @@ This is both a validation of the refactor AND a re-establishment of the best unc
 - Log per-epoch so pruning can catch unstable configs early
 
 ### Checklist
-- [ ] Update `GenerationQualityCallback` to log `GenEval/valid_fraction` and `GenEval/gen_std`
-- [ ] Increase default `n_gen_samples` in callback (e.g. 20), use fast ODE settings (euler, 5 steps)
-- [ ] Update `FMOptunaObjective` to use composite objective: `energy_distance + penalty * (1 - valid_fraction)`
-- [ ] Add tests for new callback metrics
-- [ ] Re-run Optuna smoke test to verify stability metrics are logged
-- [ ] Update `suggest_hyperparams` if needed (e.g. constrain ODE steps in callback)
+- [x] Update `GenerationQualityCallback` to log `GenEval/valid_fraction` and `GenEval/gen_std`
+- [x] Increase default `n_gen_samples` in callback (e.g. 20), use fast ODE settings (euler, 5 steps)
+- [x] Update `FMOptunaObjective` to use composite objective: `energy_distance + penalty * (1 - valid_fraction)`
+- [x] Add tests for new callback metrics (4 new tests + 1 updated, all 6 slow tests pass)
+- [x] Re-run Optuna smoke test to verify stability metrics are logged (GPU verified: `valid_fraction=1.0`, `energy_distance`, `RMSE`, `gen_std` all logged)
+- [x] `suggest_hyperparams` unchanged — ODE steps are controlled via `generate_kwargs` in callback, not search space
 
 ---
 

@@ -23,6 +23,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import math
 from pathlib import Path
 from typing import Any
 
@@ -166,6 +167,9 @@ class FMOptunaObjective:
             If None, the callback is not used.
         gen_eval_kwargs: Override kwargs for GenerationQualityCallback.
         ema_kwargs: EMA callback kwargs. Set to None to disable EMA.
+        stability_penalty: Penalty weight for (1 - valid_fraction) in the
+            composite objective. A model with valid_fraction=0.5 gets a penalty
+            of stability_penalty * 0.5 added to its energy_distance.
     """
 
     def __init__(
@@ -178,6 +182,7 @@ class FMOptunaObjective:
         gen_eval_kwargs: dict | None = None,
         ema_kwargs: dict | None = None,
         shared_datamodule: Any = None,
+        stability_penalty: float = 10.0,
     ):
         self.base_data_kwargs = base_data_kwargs
         self.base_lit_module_kwargs = base_lit_module_kwargs
@@ -187,6 +192,7 @@ class FMOptunaObjective:
         self.gen_eval_kwargs = gen_eval_kwargs or {}
         self.ema_kwargs = ema_kwargs if ema_kwargs is not None else {"decay": 0.9999, "ema_start_step": 1000}
         self.shared_datamodule = shared_datamodule
+        self.stability_penalty = stability_penalty
 
     def _apply_hyperparams(self, params: dict[str, Any], trial_number: int) -> tuple[dict, dict, dict]:
         """Merge suggested hyperparameters into base configs.
@@ -297,7 +303,7 @@ class FMOptunaObjective:
                     "val_dataset": self.val_dataset,
                     "eval_every_n_epochs": 1,
                     "n_gt_samples": 5,
-                    "n_gen_samples": 5,
+                    "n_gen_samples": 20,
                     **self.gen_eval_kwargs,
                 }
                 callbacks.append(GenerationQualityCallback(**gen_eval_kwargs))
@@ -337,11 +343,15 @@ class FMOptunaObjective:
             with open(trial_dir / "trial_info.json", "w") as f:
                 json.dump(trial_info, f, indent=2)
 
-            # Return objective: prefer GenEval/energy_distance, fall back to val loss
-            if "GenEval/energy_distance" in metrics and metrics["GenEval/energy_distance"] > 0:
-                objective = metrics["GenEval/energy_distance"]
+            # Return composite objective: energy_distance + penalty * (1 - valid_fraction)
+            valid_fraction = metrics.get("GenEval/valid_fraction", 0.0)
+            e_dist = metrics.get("GenEval/energy_distance", float("inf"))
+
+            if valid_fraction > 0 and math.isfinite(e_dist):
+                objective = e_dist + self.stability_penalty * (1.0 - valid_fraction)
             elif "Loss/Val_singlestep" in metrics:
-                objective = metrics["Loss/Val_singlestep"]
+                # Fallback: no valid generations, use val loss with full penalty
+                objective = metrics["Loss/Val_singlestep"] + self.stability_penalty
             else:
                 objective = float("inf")
 
@@ -382,6 +392,7 @@ def run_optuna_study(
     ema_kwargs: dict | None = None,
     seed: int = 42,
     shared_datamodule: Any = None,
+    stability_penalty: float = 10.0,
 ) -> optuna.Study:
     """Create and run an Optuna study for FM hyperparameter tuning.
 
@@ -401,6 +412,7 @@ def run_optuna_study(
         seed: Random seed for reproducibility.
         shared_datamodule: Pre-loaded CarbonDataModule to reuse across trials.
             Avoids reloading ~40GB of data per trial.
+        stability_penalty: Penalty weight for (1 - valid_fraction) in composite objective.
 
     Returns:
         Completed Optuna Study.
@@ -433,6 +445,7 @@ def run_optuna_study(
         gen_eval_kwargs=gen_eval_kwargs,
         ema_kwargs=ema_kwargs,
         shared_datamodule=shared_datamodule,
+        stability_penalty=stability_penalty,
     )
 
     study.optimize(objective, n_trials=n_trials)
