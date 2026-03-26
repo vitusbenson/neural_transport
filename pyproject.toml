@@ -47,6 +47,9 @@ dependencies = [
 Repository = "https://github.com/vitusbenson/neural_transport.git"
 Issues = "https://github.com/vitusbenson/neural_transport/issues"
 
+[project.optional-dependencies]
+tuning = ["optuna>=3.0", "optuna-integration"]
+
 [tool.setuptools.packages.find]
 include = ["neural_transport"]
 exclude = ["experiments*"]

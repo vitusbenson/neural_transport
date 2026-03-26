@@ -804,19 +804,143 @@ This is both a validation of the refactor AND a re-establishment of the best unc
 - Produce publication plots via `run_plots()`
 
 ### Checklist
-- [ ] **Tests first**: Write `tests/test_training_e2e.py` (`@pytest.mark.slow`):
-  - Train 10 steps → validate → metrics are finite
-  - `gen_eval_callback` produces plots in expected directory
-- [ ] Run 100-step training, verify identical metrics to pre-refactor
-- [ ] Create `training/tuning.py` with Optuna objective
-- [ ] Run Optuna study (50 trials, SLURM)
+- [x] **Tests first**: Write `tests/test_training_e2e.py` (`@pytest.mark.slow`):
+  - Train 1 epoch → validate → `Loss/Train` and `Loss/Val_singlestep` are finite
+  - `GenerationQualityCallback` produces `GenEval/RMSE` and `GenEval/energy_distance`
+  - Optuna objective completes a single trial with finite value
+- [x] Create `training/tuning.py` with Optuna objective:
+  - `MODEL_SIZES`: XXS (~100k), XS (~550k), S (~1.2M), M (~4.8M), L (~10.8M)
+  - `suggest_hyperparams()`: lr, weight_decay, warmup_steps, halfcosine_steps, max_lr, model_size, use_ot_coupling, time_sampling (+conditional kwargs), time_loss_weight, gradient_clip_val
+  - `FMOptunaObjective`: mirrors `train_singlestep()` with direct trainer access, EMA, GenEval callback, pruning
+  - `run_optuna_study()`: TPE sampler, MedianPruner, SQLite storage
+  - `get_best_config()`, `export_study_results()`
+- [x] Create `training/study_analysis.py` — publication-quality visualization:
+  - `analyze_study()`: optimization history, parameter importance (fANOVA), parallel coordinates, contour plots, slice plots, summary table, training curves
+- [x] Add optuna optional dependency to `pyproject.toml`
+- [x] Update `training/__init__.py` with conditional exports
+- [x] Guard `litmodule.plots()` against None logger
+- [x] Create experiment scripts in `carbonbench/.../18_fm_tuning/`:
+  - `run_optuna.py` (200 trials, 3k steps each, `--smoke` flag for 2-trial test)
+  - `run_optuna.slurm` (72h, A100)
+  - `train_best.py` (reads best config from Optuna DB, `--smoke` flag)
+  - `train_best.slurm` (24h, A100)
+  - `analyze_results.py` (post-hoc analysis with baseline comparison)
+- [x] All 426 quick tests pass, all 3 slow E2E tests pass, ruff clean
+- [ ] Run `run_optuna.py --smoke` on GPU 7 (requires GPU)
+- [ ] Run `train_best.py --smoke` on GPU 7 (requires GPU)
+- [ ] Run Optuna study (200 trials, SLURM)
 - [ ] Train best config to convergence
 - [ ] Evaluate: distributional metrics + all plots
 - [ ] Compare to pre-refactor model quality
 
 ---
 
-## Phase 19: E2E Validation — OSSE with Real OCO-2 Mask
+## Phase 19: GenEval Callback — Generation Quality During Training
+
+**Goal**: The Phase 18 Optuna sweep optimized velocity-field loss, but the best model produces mostly NaN/divergent samples at inference time (1/200 valid). The training loss does not predict generation quality. Fix this by making the `GenerationQualityCallback` a reliable training signal, without adding excessive overhead.
+
+**Problem**: Current `GenEval/energy_distance` is computed from 5 tiny samples every N epochs — too noisy and small to catch instability. ODE integration at inference (11+ steps) can diverge even when single-step velocity prediction is accurate.
+
+**Approach**:
+- Increase callback sample count to be meaningful (e.g. 20 gen samples) but keep it fast by using fewer ODE steps (3-5 euler steps instead of 11 midpoint)
+- Add a **generation stability metric**: fraction of non-NaN/non-exploding samples (`GenEval/valid_fraction`)
+- Add `GenEval/gen_std` as a mode-collapse detector (std across generated samples should match GT std)
+- Make Optuna objective a weighted combination: penalize trials where `valid_fraction < 1.0` heavily
+- Log per-epoch so pruning can catch unstable configs early
+
+### Checklist
+- [ ] Update `GenerationQualityCallback` to log `GenEval/valid_fraction` and `GenEval/gen_std`
+- [ ] Increase default `n_gen_samples` in callback (e.g. 20), use fast ODE settings (euler, 5 steps)
+- [ ] Update `FMOptunaObjective` to use composite objective: `energy_distance + penalty * (1 - valid_fraction)`
+- [ ] Add tests for new callback metrics
+- [ ] Re-run Optuna smoke test to verify stability metrics are logged
+- [ ] Update `suggest_hyperparams` if needed (e.g. constrain ODE steps in callback)
+
+---
+
+## Phase 20: Debug OT Coupling
+
+**Goal**: Investigate whether optimal transport coupling (`use_ot_coupling=True`) in `FlowMatching.training_forward()` is working correctly. The Phase 18 Optuna sweep selected OT coupling as beneficial (all top-5 trials used it), but the generated samples diverge — OT coupling may be producing straighter flows during training that don't generalize to the ODE solver at inference.
+
+**Diagnostics**:
+- Compare training loss curves with/without OT coupling
+- Check if OT-coupled models have lower training loss but worse generation quality
+- Visualize the learned velocity fields: are they smooth? Do they have large magnitudes near t=1?
+- Test with different ODE solvers (euler vs midpoint vs dopri5) and step counts
+- Check if the `compute_ot_coupling()` function handles batch statistics correctly with `compute=True` (PreBatchedDataset)
+
+**Potential fixes**:
+- Add velocity magnitude regularization during training
+- Clamp velocity field at inference time
+- Use adaptive step-size ODE solver with tighter tolerances
+- Disable OT coupling if it's the root cause
+
+### Checklist
+- [ ] Create diagnostic script: train 2 models (OT on/off), generate samples, compare valid_fraction
+- [ ] Visualize velocity field magnitudes at different t values
+- [ ] Test generation with different ODE solvers and step counts
+- [ ] Check `compute_ot_coupling()` correctness with PreBatchedDataset batches
+- [ ] If OT is the issue: add velocity clipping or regularization
+- [ ] Document findings
+
+---
+
+## Phase 21: Investigate BatchNorm Alternatives
+
+**Goal**: BatchNorm in the UNet may cause train/eval distribution mismatch. During training, FlowMatching uses `model.train()` even in validation (line 119 of `litmodule.py`). At inference, the model switches to `model.eval()` — BatchNorm then uses running statistics which may differ significantly from the per-batch statistics seen during training, especially with large batch sizes (512-1536) and the flow-matching time conditioning.
+
+**Diagnostics**:
+- Compare generation quality with `model.train()` vs `model.eval()` at inference time
+- If `model.train()` at inference produces valid samples but `model.eval()` doesn't → BatchNorm is the issue
+
+**Alternatives to evaluate**:
+- **GroupNorm** (already supported in UNet: `norm="group"`): no batch statistics, works identically in train/eval
+- **InstanceNorm**: per-sample normalization
+- **LayerNorm**: normalize over channels+spatial
+- **No normalization** (`norm="none"`): simplest, may need careful initialization
+
+**Approach**:
+- Quick test: generate with model in train mode — if samples are valid, BatchNorm is confirmed as the issue
+- Retrain with GroupNorm and compare generation quality
+- If GroupNorm works: re-run Optuna with GroupNorm models, compare with BatchNorm baselines
+
+### Checklist
+- [ ] Diagnostic: generate samples with model.train() vs model.eval() — compare valid_fraction
+- [ ] If BatchNorm confirmed: train model with GroupNorm (`norm="group"`)
+- [ ] Compare generation quality: GroupNorm vs BatchNorm
+- [ ] If GroupNorm works: add `norm` to Optuna search space
+- [ ] Consider adding norm type to `MODEL_SIZES` or `suggest_hyperparams`
+- [ ] Document findings and recommendation
+
+---
+
+## Phase 22: SwinTransformer Model + Optuna Tuning
+
+**Goal**: The UNet architecture may have limitations for flow matching on atmospheric data. SwinTransformer (already implemented in `models/swintransformer.py`) uses attention mechanisms that may better capture long-range spatial dependencies in CO2 fields. Train and tune a SwinTransformer FM model, leveraging lessons from Phases 19-21.
+
+**Approach**:
+- Define `MODEL_SIZES` for SwinTransformer (analogous to UNet sizes)
+- Use the improved GenEval callback (Phase 19) and fixes from Phases 20-21
+- Run Optuna sweep with SwinTransformer-specific search space
+- Compare best SwinTransformer vs best UNet on distributional metrics
+
+**Search space additions**:
+- `submodel`: categorical `["unet", "swintransformer"]`
+- SwinTransformer-specific: `window_size`, `num_heads`, `depths`, `embed_dim`
+- Shared: same optimizer/scheduler/FM params as Phase 18
+
+### Checklist
+- [ ] Define SwinTransformer `MODEL_SIZES` (XXS through L)
+- [ ] Update `suggest_hyperparams` to support `submodel` choice
+- [ ] Update `_apply_hyperparams` to handle SwinTransformer model_kwargs
+- [ ] Run Optuna sweep with SwinTransformer configs
+- [ ] Train best SwinTransformer config to convergence
+- [ ] Compare distributional metrics: SwinTransformer vs UNet
+- [ ] Publication-quality comparison plots
+
+---
+
+## Phase 23: E2E Validation — OSSE with Real OCO-2 Mask
 
 **Goal**: Run OSSE experiments using the real OCO-2 observation mask pattern (sparse, irregular, orbit tracks) applied to synthetic CarbonTracker data. Compare all posterior sampling methods.
 
@@ -850,13 +974,13 @@ This validates the full pipeline: data loading → masking → generation → ev
 
 ---
 
-## Phase 20: E2E Validation — Real OCO-2 Inversion
+## Phase 24: E2E Validation — Real OCO-2 Inversion
 
 **Goal**: Run actual inversion using real OCO-2 data via `OCO2DataLoader` + `GenerationPipeline`. Validate the complete real-data pipeline.
 
 **Setup**:
 - Use `OCO2DataLoader` to load real OCO-2 XCO2, averaging kernels, a priori profiles
-- Run best 2-3 methods from Phase 19
+- Run best 2-3 methods from Phase 23
 - Time-series generation over test period
 
 **Evaluation**:
@@ -879,7 +1003,7 @@ This validates the full pipeline: data loading → masking → generation → ev
 
 ---
 
-## Phase 21: Conjugate Integrators — Few-Step Conditioning
+## Phase 25: Conjugate Integrators — Few-Step Conditioning
 
 *Ref: arXiv 2405.17673*
 
@@ -893,7 +1017,7 @@ This validates the full pipeline: data loading → masking → generation → ev
 
 ---
 
-## Phase 22: Advanced FM Training (W-CFM, OAT-FM)
+## Phase 26: Advanced FM Training (W-CFM, OAT-FM)
 
 - [ ] Weighted CFM: Gibbs kernel weighting in `training_forward()`
 - [ ] Time-dependent loss weighting: `w(t) = 1/sigma(t)^2` or SNR-based
@@ -904,7 +1028,7 @@ This validates the full pipeline: data loading → masking → generation → ev
 
 ---
 
-## Phase 23: Conditional Flow Matching (Retraining)
+## Phase 27: Conditional Flow Matching (Retraining)
 
 *Ref: Lipman et al. 2023*
 
@@ -918,7 +1042,7 @@ This validates the full pipeline: data loading → masking → generation → ev
 
 ---
 
-## Phase 24: Grand Comparison
+## Phase 28: Grand Comparison
 
 - [ ] Aggregate `EvalResult` from all methods
 - [ ] Statistical significance tests (paired t-test on per-timestep metrics)
@@ -927,7 +1051,7 @@ This validates the full pipeline: data loading → masking → generation → ev
 
 ---
 
-## Phase 25: Real OCO-2 Full Application
+## Phase 29: Real OCO-2 Full Application
 
 - [ ] Apply all top methods to real satellite data via `GenerationPipeline` + `OCO2DataLoader`
 - [ ] Validate vs CarbonTracker posterior, TCCON, ObsPack surface flasks
@@ -935,7 +1059,7 @@ This validates the full pipeline: data loading → masking → generation → ev
 
 ---
 
-## Phase 26: Multi-step Temporal Conditioning
+## Phase 30: Multi-step Temporal Conditioning
 
 - [ ] Sequential/autoregressive generation
 - [ ] Temporal consistency metrics (autocorrelation, mass conservation)
@@ -943,7 +1067,7 @@ This validates the full pipeline: data loading → masking → generation → ev
 
 ---
 
-## Phase 27: Advanced Ideas (Brainstorm)
+## Phase 31: Advanced Ideas (Brainstorm)
 
 - [ ] Physics-informed guidance via torchtransport
 - [ ] Latent-space FM with encoder/decoder
@@ -955,7 +1079,7 @@ This validates the full pipeline: data loading → masking → generation → ev
 
 ---
 
-## Phase 28: Publication (ACP/GMD)
+## Phase 32: Publication (ACP/GMD)
 
 1. Introduction: CO2 inverse modeling, generative approaches
 2. Background: flow matching, OCO-2, CarbonTracker
@@ -992,11 +1116,17 @@ Phase 2 (Configs)
 
 Phase 17 (Logging & Types) — after all refactor phases
 
-Phase 18 (E2E: Training & Tuning)     ┐
-Phase 19 (E2E: OSSE + OCO-2 Mask)     ├── Validate refactored codebase
-Phase 20 (E2E: Real OCO-2 Inversion)  ┘
-
-Phases 21-28: Development & Publication
+Phase 18 (E2E: Training & Tuning)
+  │
+  ├── Phase 19 (GenEval Callback)       ┐
+  │     └── Phase 20 (Debug OT Coupling) ├── Fix generation quality
+  │           └── Phase 21 (BatchNorm)   │
+  │                 └── Phase 22 (SwinTransformer + Tune) ┘
+  │
+Phase 23 (E2E: OSSE + OCO-2 Mask)     ┐
+Phase 24 (E2E: Real OCO-2 Inversion)  ├── Validate refactored codebase
+                                       ┘
+Phases 25-32: Development & Publication
 ```
 
 ## Lines of Code Impact (Estimated)
@@ -1027,7 +1157,7 @@ Phase-specific gates:
 - After Phase 13: `run_plots()` produces all expected plot files
 - After Phase 16: one carbonbench experiment produces identical metrics JSON
 - After Phase 18: trained model matches pre-refactor quality
-- After Phase 19: OSSE RMSE_xco2_obs < 75% of unconditional, spread-skill in [0.5, 2.0]
+- After Phase 23: OSSE RMSE_xco2_obs < 75% of unconditional, spread-skill in [0.5, 2.0]
 
 ## Key Files Reference
 

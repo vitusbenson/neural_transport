@@ -89,7 +89,7 @@ def train_singlestep(
 ):
     run_dir = Path(run_dir)
 
-    logger = pl.loggers.tensorboard.TensorBoardLogger(run_dir, name="", version="singlestep")
+    tb_logger = pl.loggers.tensorboard.TensorBoardLogger(run_dir, name="", version="singlestep")
     checkpoint_callback = pl.callbacks.ModelCheckpoint(**ckpt_kwargs)
     checkpoint_callback.CHECKPOINT_NAME_LAST = "best"
 
@@ -115,7 +115,7 @@ def train_singlestep(
 
     trainer = pl.Trainer(
         callbacks=callbacks,
-        logger=logger,
+        logger=tb_logger,
         **trainer_kwargs,
     )
 

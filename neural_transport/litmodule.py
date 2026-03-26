@@ -122,7 +122,7 @@ class NeuralTransport(pl.LightningModule):
 
         if isinstance(self.model, MODELWRAPPERS["flowmatching"]):
             for v in preds:
-                if v != "dx_t":
+                if v not in ("dx_t", "time_loss_weight"):
                     preds[v] = preds[v] * batch[f"{v}_scale"] + batch[f"{v}_offset"]
 
         self.log(
@@ -143,7 +143,7 @@ class NeuralTransport(pl.LightningModule):
         self.plots(preds, batch, batch_idx, dataloader_idx)
 
     def plots(self, preds, batch, batch_idx, dataloader_idx):
-        if (batch_idx < 1) and (dataloader_idx == 0) and (self.global_rank == 0):
+        if (batch_idx < 1) and (dataloader_idx == 0) and (self.global_rank == 0) and self.logger is not None:
             plots_val_step(
                 self.logger.experiment,
                 self.current_epoch,
