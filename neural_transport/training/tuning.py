@@ -443,14 +443,33 @@ def run_optuna_study(
 
     sampler = optuna.samplers.TPESampler(seed=seed)
 
-    study = optuna.create_study(
-        study_name=study_name,
-        storage=storage,
-        direction="minimize",
-        pruner=pruner,
-        sampler=sampler,
-        load_if_exists=True,
-    )
+    # Retry study creation with random backoff to handle SQLite race
+    # conditions when multiple SLURM workers start simultaneously.
+    import random
+    import time
+
+    for attempt in range(10):
+        try:
+            study = optuna.create_study(
+                study_name=study_name,
+                storage=storage,
+                direction="minimize",
+                pruner=pruner,
+                sampler=sampler,
+                load_if_exists=True,
+            )
+            break
+        except Exception as e:
+            if attempt == 9:
+                raise
+            wait = random.uniform(1, 5 * (attempt + 1))
+            logger.warning(
+                "Study creation attempt %d failed (%s), retrying in %.1fs",
+                attempt + 1,
+                e,
+                wait,
+            )
+            time.sleep(wait)
 
     objective = FMOptunaObjective(
         base_data_kwargs=base_data_kwargs,
