@@ -69,22 +69,31 @@ MODEL_SIZES: dict[str, dict[str, Any]] = {
 }
 
 
-def suggest_hyperparams(trial: optuna.Trial) -> dict[str, Any]:
+def suggest_hyperparams(
+    trial: optuna.Trial,
+    model_sizes: list[str] | None = None,
+) -> dict[str, Any]:
     """Suggest FM training hyperparameters.
 
     Search space covers:
     - Optimizer: lr, weight_decay
     - LR schedule: warmup_steps, halfcosine_steps, max_lr
-    - Architecture: model_size (XXS/XS/S/M/L)
+    - Architecture: model_size, norm
     - FM training: use_ot_coupling, time_sampling, time_loss_weight
     - Training: gradient_clip_val
 
     Args:
         trial: Optuna trial object.
+        model_sizes: Which model sizes to search over. Defaults to all
+            MODEL_SIZES keys. Restrict to e.g. ``["XS", "S", "M"]`` if
+            larger models don't fit in GPU memory.
 
     Returns:
         Dict of suggested hyperparameters.
     """
+    if model_sizes is None:
+        model_sizes = list(MODEL_SIZES.keys())
+
     params: dict[str, Any] = {
         # Optimizer
         "lr": trial.suggest_float("lr", 1e-5, 1e-2, log=True),
@@ -94,7 +103,7 @@ def suggest_hyperparams(trial: optuna.Trial) -> dict[str, Any]:
         "halfcosine_steps": trial.suggest_int("halfcosine_steps", 3000, 50000),
         "max_lr": trial.suggest_float("max_lr", 0.3, 1.0),
         # Architecture
-        "model_size": trial.suggest_categorical("model_size", list(MODEL_SIZES.keys())),
+        "model_size": trial.suggest_categorical("model_size", model_sizes),
         "norm": trial.suggest_categorical("norm", ["batch", "group"]),
         # FM training
         "use_ot_coupling": trial.suggest_categorical("use_ot_coupling", [True, False]),
@@ -184,6 +193,7 @@ class FMOptunaObjective:
         ema_kwargs: dict | None = None,
         shared_datamodule: Any = None,
         stability_penalty: float = 10.0,
+        model_sizes: list[str] | None = None,
     ):
         self.base_data_kwargs = base_data_kwargs
         self.base_lit_module_kwargs = base_lit_module_kwargs
@@ -193,6 +203,7 @@ class FMOptunaObjective:
         self.gen_eval_kwargs = gen_eval_kwargs or {}
         self.ema_kwargs = ema_kwargs if ema_kwargs is not None else {"decay": 0.9999, "ema_start_step": 1000}
         self.shared_datamodule = shared_datamodule
+        self.model_sizes = model_sizes
         self.stability_penalty = stability_penalty
 
     def _apply_hyperparams(self, params: dict[str, Any], trial_number: int) -> tuple[dict, dict, dict]:
@@ -254,7 +265,7 @@ class FMOptunaObjective:
         Returns:
             Objective value (GenEval/energy_distance or Loss/Val_singlestep).
         """
-        params = suggest_hyperparams(trial)
+        params = suggest_hyperparams(trial, model_sizes=self.model_sizes)
         lit_kwargs, data_kwargs, trainer_kwargs = self._apply_hyperparams(params, trial.number)
 
         trial_dir = self.run_dir / f"trial_{trial.number:04d}"
@@ -395,6 +406,7 @@ def run_optuna_study(
     seed: int = 42,
     shared_datamodule: Any = None,
     stability_penalty: float = 10.0,
+    model_sizes: list[str] | None = None,
 ) -> optuna.Study:
     """Create and run an Optuna study for FM hyperparameter tuning.
 
@@ -415,6 +427,8 @@ def run_optuna_study(
         shared_datamodule: Pre-loaded CarbonDataModule to reuse across trials.
             Avoids reloading ~40GB of data per trial.
         stability_penalty: Penalty weight for (1 - valid_fraction) in composite objective.
+        model_sizes: Which model sizes to search over (e.g. ["XS", "S", "M"]).
+            Defaults to all MODEL_SIZES keys.
 
     Returns:
         Completed Optuna Study.
@@ -448,6 +462,7 @@ def run_optuna_study(
         ema_kwargs=ema_kwargs,
         shared_datamodule=shared_datamodule,
         stability_penalty=stability_penalty,
+        model_sizes=model_sizes,
     )
 
     study.optimize(objective, n_trials=n_trials)
