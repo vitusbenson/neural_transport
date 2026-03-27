@@ -644,6 +644,8 @@ class CarbonDataModule(pl.LightningDataModule):
         self.compute = compute
 
     def setup(self, stage):
+        if stage == "fit" and hasattr(self, "train_dataset"):
+            return  # Already set up; avoid rebuilding PreBatchedDataset (~40GB)
         if stage == "fit":
             self.train_dataset = CarbonDataset(
                 data_path=self.data_path / "train",
