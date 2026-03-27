@@ -713,6 +713,12 @@ class CarbonDataModule(pl.LightningDataModule):
 
         # Use PreBatchedDataset for in-memory data: zero DataLoader overhead
         if self.compute and split in ("train", "val"):
+            # Cache prebatched dataloaders to avoid rebuilding ~40GB per call
+            # (important when reusing shared_datamodule across Optuna trials)
+            cache_attr = f"_cached_{split}_dataloader"
+            if hasattr(self, cache_attr):
+                return getattr(self, cache_attr)
+
             prebatched = PreBatchedDataset(
                 dataset,
                 batch_size=batch_size,
@@ -720,13 +726,15 @@ class CarbonDataModule(pl.LightningDataModule):
             )
             if split == "train":
                 self._train_prebatched = prebatched  # keep ref for epoch shuffle
-            return torch.utils.data.DataLoader(
+            dl = torch.utils.data.DataLoader(
                 prebatched,
                 batch_size=None,  # dataset returns full batches
                 num_workers=0,
                 shuffle=False,  # shuffling handled internally
                 pin_memory=True,
             )
+            setattr(self, cache_attr, dl)
+            return dl
 
         return torch.utils.data.DataLoader(
             dataset,
