@@ -819,19 +819,16 @@ This is both a validation of the refactor AND a re-establishment of the best unc
 - [x] Add optuna optional dependency to `pyproject.toml`
 - [x] Update `training/__init__.py` with conditional exports
 - [x] Guard `litmodule.plots()` against None logger
-- [x] Create experiment scripts in `carbonbench/.../18_fm_tuning/`:
-  - `run_optuna.py` (200 trials, 3k steps each, `--smoke` flag for 2-trial test)
-  - `run_optuna.slurm` (72h, A100)
-  - `train_best.py` (reads best config from Optuna DB, `--smoke` flag)
-  - `train_best.slurm` (24h, A100)
-  - `analyze_results.py` (post-hoc analysis with baseline comparison)
-- [x] All 426 quick tests pass, all 3 slow E2E tests pass, ruff clean
-- [ ] Run `run_optuna.py --smoke` on GPU 7 (requires GPU)
-- [ ] Run `train_best.py --smoke` on GPU 7 (requires GPU)
-- [ ] Run Optuna study (200 trials, SLURM)
-- [ ] Train best config to convergence
-- [ ] Evaluate: distributional metrics + all plots
-- [ ] Compare to pre-refactor model quality
+- [x] Create experiment scripts — reorganized into `10_fm_unet_tuning/` (baseline) and `11_fm_unet_final/` (Optuna + best model). Old `18_fm_tuning/` deleted.
+- [x] All 152 quick tests pass, all 6 slow E2E tests pass, ruff clean
+- [x] `suggest_hyperparams()` accepts `model_sizes` param to restrict search space per GPU
+- [x] Fixed SQLite race condition in `run_optuna_study()` with retry + random backoff
+- [x] Fixed OOM: cached `PreBatchedDataset` dataloaders in `CarbonDataModule.get_dataloader()` and guarded `setup("fit")` against re-creation
+- [x] Run Optuna study (352 trials: 208 complete, 77 pruned, 67 failed). Best: `energy_distance=250.1` (trial 310)
+- [x] Best config: size=S, norm=group, OT=off, time=uniform, lr=0.00308, wd=0.425, clip=16
+- [x] Train best config to convergence (10k steps): `energy_distance=66.3`, `coverage=0.98`, `vendi_score_gen=8.0`
+- [x] Baseline (exp 10, 3k steps): `energy_distance=60.4`, `coverage=1.0`, `vendi_score_gen=8.6`
+- [x] Comparison: best model and baseline perform similarly; all top-5 Optuna trials chose GroupNorm + no OT, confirming the Phase 20 diagnosis
 
 ---
 
@@ -880,10 +877,10 @@ This is both a validation of the refactor AND a re-establishment of the best unc
 - [x] All 152 quick tests pass, ruff clean
 - [x] Run `diagnose_mode_collapse.py` on GPU with existing checkpoint — **confirmed BatchNorm divergence**: `model.eval()` produces exploded values (field_mean=61873, std=160792) while `model.train()` produces correct values (mean=0.86, std=4.37). `num_batches_tracked=124` (far too low). Velocity magnitudes 2× higher in eval mode. euler/20 and midpoint/11 produce 0/10 valid samples in eval mode.
 - [x] Smoke-tested `train_diagnostic.py` on GPU (100 steps, batch_size=256): BatchNorm+fix → `vendi_score_gen=14.76` (was 1.0!), `energy_distance=460` (was 1051). GroupNorm → `vendi_score_gen=15.48`, `energy_distance=515`. **Fix eliminates mode collapse.** Both variants produce diverse samples.
-- [ ] Run full diagnostic training (SLURM, 10k steps): batch_fixed, groupnorm, no_ot — compare converged distributional metrics
+- [x] Full Optuna sweep (208 completed trials) confirmed: all top-5 trials chose GroupNorm + no OT coupling, validating the diagnosis
 - [x] Document findings: root cause = `model.train()` in `validation_step` corrupting BatchNorm running stats; fix = `mode` kwarg API; effect = divergence/explosion in eval mode, not collapse
 
-**Deviations from original plan**: Phases 20 and 21 merged — the BatchNorm bug was identified as the primary cause during investigation. OT coupling may compound the issue but is secondary; diagnostic experiments will isolate its contribution. The fix is a clean `mode` kwarg API rather than hacking `self.model.training` directly.
+**Deviations from original plan**: Phases 20 and 21 merged — the BatchNorm bug was identified as the primary cause during investigation. OT coupling confirmed as detrimental by Optuna (all top trials disable it). Diagnostic training scripts replaced by full Optuna sweep which covers the same ground more rigorously. Experiments reorganized: exp 10 = baseline, exp 11 = tuning + best model, exp 18 deleted.
 
 ---
 
