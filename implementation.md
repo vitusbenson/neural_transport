@@ -900,13 +900,20 @@ This is both a validation of the refactor AND a re-establishment of the best unc
 - Shared: same optimizer/scheduler/FM params as Phase 18
 
 ### Checklist
-- [ ] Define SwinTransformer `MODEL_SIZES` (XXS through L)
-- [ ] Update `suggest_hyperparams` to support `submodel` choice
-- [ ] Update `_apply_hyperparams` to handle SwinTransformer model_kwargs
-- [ ] Run Optuna sweep with SwinTransformer configs
-- [ ] Train best SwinTransformer config to convergence
-- [ ] Compare distributional metrics: SwinTransformer vs UNet
+- [x] Define SwinTransformer `SWIN_MODEL_SIZES` (XXS through L) in `tuning.py` — embed_dim (64-384), depths, num_heads
+- [x] Update `suggest_hyperparams` to support `submodel` choice — conditional norm (UNet) vs drop_path_rate (Swin)
+- [x] Update `_apply_hyperparams` to handle SwinTransformer model_kwargs — sets embed_dim/depths/num_heads/window_size, removes UNet keys
+- [x] Update `run_optuna_study()` and `FMOptunaObjective` with `submodel` parameter
+- [x] Add tests: `test_suggest_hyperparams_swintransformer`, `test_suggest_hyperparams_unet_has_norm`, `test_apply_hyperparams_swintransformer`, `test_swin_fm_train_10_steps` (slow)
+- [x] Create experiment scripts in `12_fm_swin_tuning/`: `run_optuna.py`, `train_best.py`, `analyze_results.py`, SLURM scripts
+- [x] All 437 quick tests pass, ruff clean
+- [x] Run Optuna sweep (186 trials: 116 complete, 42 pruned, 28 failed). Best: `energy_distance=258.9` (trial 155)
+- [x] Best config: size=M, OT=on, time=logit_normal(mean=-0.89,std=1.67), lr=0.00463, wd=0.095, drop_path_rate=0.21, clip=16
+- [x] Train best config to convergence (10k steps, 208 epochs): `energy_distance=106.5`, `coverage=0.82`, `vendi_score_gen=9.67`
+- [x] Comparison: UNet outperforms Swin on fidelity (`energy_distance` 66.3 vs 106.5, `coverage` 0.98 vs 0.82, `wasserstein_mean` 1.07 vs 1.43); Swin produces slightly more diverse samples (`vendi_score` 9.67 vs 8.01)
 - [ ] Publication-quality comparison plots
+
+**Deviations from original plan**: No `submodel` categorical in the Optuna search space — kept as separate studies for cleaner analysis. Swin search converged heavily on size M (104/116 trials), unlike UNet which preferred size S. OT coupling found beneficial for Swin (opposite of UNet). Experiment placed at `12_fm_swin_tuning` (existing 12-16 ablation dirs left in place for now).
 
 ---
 

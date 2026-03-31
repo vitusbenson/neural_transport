@@ -562,3 +562,185 @@ def test_optuna_objective_runs_single_trial(tiny_fm_kwargs, tmp_path):
     assert trial.state == optuna.trial.TrialState.COMPLETE
     assert trial.value is not None
     assert trial.value < float("inf"), f"Trial returned inf: {trial.value}"
+
+
+# ── SwinTransformer tests ──────────────────────────────────────────────
+
+
+@pytest.fixture
+def tiny_swin_fm_kwargs():
+    """Minimal FlowMatching SwinTransformer configuration for CPU testing."""
+    regulargrid_kwargs = dict(
+        input_vars=["co2massmix"],
+        target_vars=["co2massmix"],
+        nlat=NLAT,
+        nlon=NLON,
+        predict_delta=False,
+        add_surfflux=False,
+        dt=3600,
+        massfixer="",
+        targshift=False,
+    )
+
+    wrapper_kwargs = dict(
+        **regulargrid_kwargs,
+        model_kwargs=dict(
+            submodel="swintransformer",
+            model_kwargs=dict(
+                **regulargrid_kwargs,
+                model_kwargs=dict(
+                    in_chans=NLEV + 1,  # nlev + time channel
+                    out_chans=NLEV,
+                    embed_dim=32,
+                    depths=(2,),
+                    num_heads=(2,),
+                    img_size=(16, 32),
+                    patch_size=4,
+                    window_size=(4, 8),
+                    mlp_ratio=2.0,
+                    drop_path_rate=0.0,
+                ),
+            ),
+            generating=False,
+            return_intermediates=False,
+            method="euler",
+            nlev=NLEV,
+            step_size=0.5,
+            use_ot_coupling=False,
+            time_sampling="uniform",
+        ),
+    )
+
+    return dict(
+        model="flowmatching",
+        model_kwargs=wrapper_kwargs,
+        loss="flowmatching_mse",
+        loss_kwargs=dict(),
+        metrics=[],
+        no_grad_step_shedule=None,
+        lr=1e-3,
+        weight_decay=0.0,
+        lr_shedule_kwargs=dict(
+            warmup_steps=5,
+            halfcosine_steps=50,
+            min_lr=1e-6,
+            max_lr=0.8,
+        ),
+        val_dataloader_names=["singlestep"],
+        plot_kwargs=dict(
+            variables=[],
+            layer_idxs=[],
+            n_samples=0,
+            dataset="carbontracker",
+            grid="latlon5.625",
+            vertical_levels="l10",
+            max_workers=1,
+        ),
+    )
+
+
+@pytest.mark.slow
+def test_swin_fm_train_10_steps(tiny_swin_fm_kwargs, synthetic_datamodule, tmp_path):
+    """Train SwinTransformer FM for 1 epoch and verify metrics are finite."""
+    from neural_transport.litmodule import NeuralTransport
+
+    model = NeuralTransport(**tiny_swin_fm_kwargs)
+
+    trainer = pl.Trainer(
+        max_epochs=1,
+        accelerator="cpu",
+        enable_checkpointing=False,
+        enable_progress_bar=False,
+        logger=False,
+        log_every_n_steps=1,
+    )
+
+    trainer.fit(model, synthetic_datamodule)
+
+    assert "Loss/Train" in trainer.callback_metrics
+    train_loss = trainer.callback_metrics["Loss/Train"].item()
+    assert torch.isfinite(torch.tensor(train_loss)), f"Train loss is not finite: {train_loss}"
+
+    assert "Loss/Val_singlestep" in trainer.callback_metrics
+    val_loss = trainer.callback_metrics["Loss/Val_singlestep"].item()
+    assert torch.isfinite(torch.tensor(val_loss)), f"Val loss is not finite: {val_loss}"
+
+
+def test_suggest_hyperparams_swintransformer():
+    """Verify suggest_hyperparams with submodel='swintransformer' produces correct params."""
+    optuna = pytest.importorskip("optuna")
+    from neural_transport.training.tuning import suggest_hyperparams
+
+    study = optuna.create_study()
+    trial = study.ask()
+    params = suggest_hyperparams(trial, submodel="swintransformer")
+
+    # Should have drop_path_rate but NOT norm
+    assert "drop_path_rate" in params
+    assert 0.0 <= params["drop_path_rate"] <= 0.3
+    assert "norm" not in params
+
+    # Should have standard params
+    assert "lr" in params
+    assert "model_size" in params
+    assert "use_ot_coupling" in params
+
+
+def test_suggest_hyperparams_unet_has_norm():
+    """Verify suggest_hyperparams with submodel='unet' produces norm but not drop_path_rate."""
+    optuna = pytest.importorskip("optuna")
+    from neural_transport.training.tuning import suggest_hyperparams
+
+    study = optuna.create_study()
+    trial = study.ask()
+    params = suggest_hyperparams(trial, submodel="unet")
+
+    assert "norm" in params
+    assert params["norm"] in ("batch", "group")
+    assert "drop_path_rate" not in params
+
+
+def test_apply_hyperparams_swintransformer(tiny_swin_fm_kwargs):
+    """Verify _apply_hyperparams correctly sets SwinTransformer kwargs."""
+    pytest.importorskip("optuna")
+    from neural_transport.training.tuning import FMOptunaObjective
+
+    objective = FMOptunaObjective(
+        base_data_kwargs={},
+        base_lit_module_kwargs=tiny_swin_fm_kwargs,
+        base_trainer_kwargs={"max_steps": 5, "accelerator": "cpu"},
+        run_dir="/tmp/test",
+        submodel="swintransformer",
+    )
+
+    params = {
+        "lr": 1e-3,
+        "weight_decay": 0.1,
+        "warmup_steps": 100,
+        "halfcosine_steps": 5000,
+        "max_lr": 0.8,
+        "model_size": "XS",
+        "drop_path_rate": 0.15,
+        "use_ot_coupling": False,
+        "time_sampling": "uniform",
+        "time_sampling_kwargs": None,
+        "time_loss_weight": None,
+        "gradient_clip_val": 32,
+    }
+
+    lit_kwargs, _, _ = objective._apply_hyperparams(params, trial_number=0)
+
+    # Navigate to submodel kwargs
+    fm_kwargs = lit_kwargs["model_kwargs"]["model_kwargs"]
+    submodel_kwargs = fm_kwargs["model_kwargs"]["model_kwargs"]
+
+    assert fm_kwargs["submodel"] == "swintransformer"
+    assert submodel_kwargs["embed_dim"] == 128  # XS
+    assert submodel_kwargs["depths"] == (6,)  # XS
+    assert submodel_kwargs["num_heads"] == (4,)  # XS
+    assert submodel_kwargs["drop_path_rate"] == 0.15
+    assert submodel_kwargs["window_size"] == (8, 8)
+    # UNet keys should be removed
+    assert "enc_filters" not in submodel_kwargs
+    assert "dec_filters" not in submodel_kwargs
+    assert "norm" not in submodel_kwargs

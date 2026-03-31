@@ -68,31 +68,50 @@ MODEL_SIZES: dict[str, dict[str, Any]] = {
     ),
 }
 
+# ── SwinTransformer model size definitions ─────────────────────────────
+# Scale width (embed_dim) and depth (depths/num_heads).
+# Fixed architectural params: img_size=(64,96), patch_size=4, window_size=(8,8), mlp_ratio=4.0
+
+SWIN_MODEL_SIZES: dict[str, dict[str, Any]] = {
+    "XXS": dict(embed_dim=64, depths=(4,), num_heads=(4,)),
+    "XS": dict(embed_dim=128, depths=(6,), num_heads=(4,)),
+    "S": dict(embed_dim=192, depths=(8,), num_heads=(6,)),
+    "M": dict(embed_dim=256, depths=(12,), num_heads=(8,)),
+    "L": dict(embed_dim=384, depths=(12,), num_heads=(12,)),
+}
+
 
 def suggest_hyperparams(
     trial: optuna.Trial,
     model_sizes: list[str] | None = None,
+    submodel: str = "unet",
 ) -> dict[str, Any]:
     """Suggest FM training hyperparameters.
 
     Search space covers:
     - Optimizer: lr, weight_decay
     - LR schedule: warmup_steps, halfcosine_steps, max_lr
-    - Architecture: model_size, norm
+    - Architecture: model_size, norm (UNet only), drop_path_rate (Swin only)
     - FM training: use_ot_coupling, time_sampling, time_loss_weight
     - Training: gradient_clip_val
 
     Args:
         trial: Optuna trial object.
         model_sizes: Which model sizes to search over. Defaults to all
-            MODEL_SIZES keys. Restrict to e.g. ``["XS", "S", "M"]`` if
-            larger models don't fit in GPU memory.
+            sizes for the chosen submodel. Restrict to e.g. ``["XS", "S", "M"]``
+            if larger models don't fit in GPU memory.
+        submodel: Architecture type — ``"unet"`` or ``"swintransformer"``.
 
     Returns:
         Dict of suggested hyperparameters.
     """
+    if submodel == "swintransformer":
+        available_sizes = SWIN_MODEL_SIZES
+    else:
+        available_sizes = MODEL_SIZES
+
     if model_sizes is None:
-        model_sizes = list(MODEL_SIZES.keys())
+        model_sizes = list(available_sizes.keys())
 
     params: dict[str, Any] = {
         # Optimizer
@@ -104,7 +123,6 @@ def suggest_hyperparams(
         "max_lr": trial.suggest_float("max_lr", 0.3, 1.0),
         # Architecture
         "model_size": trial.suggest_categorical("model_size", model_sizes),
-        "norm": trial.suggest_categorical("norm", ["batch", "group"]),
         # FM training
         "use_ot_coupling": trial.suggest_categorical("use_ot_coupling", [True, False]),
         "time_sampling": trial.suggest_categorical("time_sampling", ["uniform", "logit_normal", "beta"]),
@@ -112,6 +130,12 @@ def suggest_hyperparams(
         # Training
         "gradient_clip_val": trial.suggest_categorical("gradient_clip_val", [16, 32, 64]),
     }
+
+    # Architecture-specific params
+    if submodel == "swintransformer":
+        params["drop_path_rate"] = trial.suggest_float("drop_path_rate", 0.0, 0.3)
+    else:
+        params["norm"] = trial.suggest_categorical("norm", ["batch", "group"])
 
     # Conditional params for time_sampling distributions
     if params["time_sampling"] == "logit_normal":
@@ -194,6 +218,7 @@ class FMOptunaObjective:
         shared_datamodule: Any = None,
         stability_penalty: float = 10.0,
         model_sizes: list[str] | None = None,
+        submodel: str = "unet",
     ):
         self.base_data_kwargs = base_data_kwargs
         self.base_lit_module_kwargs = base_lit_module_kwargs
@@ -204,6 +229,7 @@ class FMOptunaObjective:
         self.ema_kwargs = ema_kwargs if ema_kwargs is not None else {"decay": 0.9999, "ema_start_step": 1000}
         self.shared_datamodule = shared_datamodule
         self.model_sizes = model_sizes
+        self.submodel = submodel
         self.stability_penalty = stability_penalty
 
     def _apply_hyperparams(self, params: dict[str, Any], trial_number: int) -> tuple[dict, dict, dict]:
@@ -228,16 +254,31 @@ class FMOptunaObjective:
         lit_kwargs["lr_shedule_kwargs"]["max_lr"] = params["max_lr"]
 
         # Architecture — update model size in the nested model_kwargs
-        model_size_config = MODEL_SIZES[params["model_size"]]
         wrapper_kwargs = lit_kwargs.get("model_kwargs", {})
         fm_kwargs = wrapper_kwargs.get("model_kwargs", {})
         inner_model_kwargs = fm_kwargs.get("model_kwargs", {})
-        unet_kwargs = inner_model_kwargs.get("model_kwargs", {})
+        submodel_kwargs = inner_model_kwargs.get("model_kwargs", {})
 
-        unet_kwargs["embed_dim"] = model_size_config["embed_dim"]
-        unet_kwargs["enc_filters"] = model_size_config["enc_filters"]
-        unet_kwargs["dec_filters"] = model_size_config["dec_filters"]
-        unet_kwargs["norm"] = params.get("norm", "batch")
+        if self.submodel == "swintransformer":
+            fm_kwargs["submodel"] = "swintransformer"
+            swin_size_config = SWIN_MODEL_SIZES[params["model_size"]]
+            submodel_kwargs["embed_dim"] = swin_size_config["embed_dim"]
+            submodel_kwargs["depths"] = swin_size_config["depths"]
+            submodel_kwargs["num_heads"] = swin_size_config["num_heads"]
+            submodel_kwargs["img_size"] = (64, 96)
+            submodel_kwargs["patch_size"] = 4
+            submodel_kwargs["window_size"] = (8, 8)
+            submodel_kwargs["mlp_ratio"] = 4.0
+            submodel_kwargs["drop_path_rate"] = params.get("drop_path_rate", 0.1)
+            # Remove UNet-specific keys
+            for key in ("enc_filters", "dec_filters", "norm", "act"):
+                submodel_kwargs.pop(key, None)
+        else:
+            model_size_config = MODEL_SIZES[params["model_size"]]
+            submodel_kwargs["embed_dim"] = model_size_config["embed_dim"]
+            submodel_kwargs["enc_filters"] = model_size_config["enc_filters"]
+            submodel_kwargs["dec_filters"] = model_size_config["dec_filters"]
+            submodel_kwargs["norm"] = params.get("norm", "batch")
 
         # FM training params
         fm_kwargs["use_ot_coupling"] = params["use_ot_coupling"]
@@ -265,7 +306,7 @@ class FMOptunaObjective:
         Returns:
             Objective value (GenEval/energy_distance or Loss/Val_singlestep).
         """
-        params = suggest_hyperparams(trial, model_sizes=self.model_sizes)
+        params = suggest_hyperparams(trial, model_sizes=self.model_sizes, submodel=self.submodel)
         lit_kwargs, data_kwargs, trainer_kwargs = self._apply_hyperparams(params, trial.number)
 
         trial_dir = self.run_dir / f"trial_{trial.number:04d}"
@@ -407,6 +448,7 @@ def run_optuna_study(
     shared_datamodule: Any = None,
     stability_penalty: float = 10.0,
     model_sizes: list[str] | None = None,
+    submodel: str = "unet",
 ) -> optuna.Study:
     """Create and run an Optuna study for FM hyperparameter tuning.
 
@@ -428,7 +470,8 @@ def run_optuna_study(
             Avoids reloading ~40GB of data per trial.
         stability_penalty: Penalty weight for (1 - valid_fraction) in composite objective.
         model_sizes: Which model sizes to search over (e.g. ["XS", "S", "M"]).
-            Defaults to all MODEL_SIZES keys.
+            Defaults to all sizes for the chosen submodel.
+        submodel: Architecture type — ``"unet"`` or ``"swintransformer"``.
 
     Returns:
         Completed Optuna Study.
@@ -482,6 +525,7 @@ def run_optuna_study(
         shared_datamodule=shared_datamodule,
         stability_penalty=stability_penalty,
         model_sizes=model_sizes,
+        submodel=submodel,
     )
 
     study.optimize(objective, n_trials=n_trials)

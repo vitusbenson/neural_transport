@@ -10,6 +10,9 @@ from neural_transport.training.train import (
 
 try:
     from neural_transport.training.tuning import (
+        SWIN_MODEL_SIZES as SWIN_MODEL_SIZES,
+    )
+    from neural_transport.training.tuning import (
         FMOptunaObjective as FMOptunaObjective,
     )
     from neural_transport.training.tuning import (
