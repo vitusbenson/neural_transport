@@ -99,3 +99,41 @@ def plot_spread_maps(result, ctx: PlotContext) -> None:
         ax.set_title("Ensemble Spread")
         ax.set_xticks([])
         ax.set_yticks([])
+
+
+@register_plot(
+    name="conditioning_residual",
+    categories=["conditioning"],
+    description="Histogram of residuals at observed locations (pred - obs)",
+)
+def plot_conditioning_residual(result, ctx: PlotContext) -> None:
+    """Histogram of (prediction - GT) at observed pixels.
+
+    Should be tightly concentrated around 0 if conditioning works.
+    Uses ensemble mean as the prediction.
+    """
+    meta = getattr(result, "metadata", {})
+    pred = meta.get("pred")
+    gt = meta.get("gt")
+    mask_2d = meta.get("mask_2d")
+
+    if pred is None or gt is None or mask_2d is None:
+        return
+
+    pred = np.asarray(pred)
+    gt = np.asarray(gt)
+    mask_2d = np.asarray(mask_2d, dtype=bool)
+
+    if mask_2d.sum() == 0:
+        return
+
+    residuals = pred[mask_2d] - gt[mask_2d]
+
+    with ctx.figure("conditioning_residual") as fig:
+        ax = fig.add_subplot(111)
+        ax.hist(residuals.ravel(), bins=50, color="steelblue", edgecolor="white", linewidth=0.5, density=True)
+        ax.axvline(0, color="red", linestyle="--", linewidth=1, label="Zero")
+        ax.set_xlabel("Residual (Pred - GT at obs)")
+        ax.set_ylabel("Density")
+        ax.set_title(f"Conditioning Residuals (n={mask_2d.sum()}, std={residuals.std():.4f})")
+        ax.legend(fontsize=7)

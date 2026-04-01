@@ -159,6 +159,9 @@ class AblationRunner:
         logger.info("--- Evaluating: %s ---", name)
         generate_kwargs = compat_to_generate_kwargs(config)
 
+        import time as _time
+
+        _t0 = _time.perf_counter()
         try:
             # 1. Generate samples via GenerationPipeline
             pipeline = GenerationPipeline(model, dataset, target_vars_3d=self.target_vars, device=self.device)
@@ -198,6 +201,8 @@ class AblationRunner:
                 # Target zarr not available (e.g., in tests); skip compat scoring
                 compat_metrics = {}
 
+            compat_metrics["wall_time_sec"] = _time.perf_counter() - _t0
+
             # 3. Save metrics JSON
             metrics_path = eval_dir / "metrics_summary.json"
             with open(metrics_path, "w") as f:
@@ -223,10 +228,14 @@ class AblationRunner:
                 gt_2d = gt_field.reshape(grid_info.nlat, grid_info.nlon, -1)
 
                 suite = EvaluationSuite(self.eval_config)
+                # Reshape lat weights to broadcast with [nlat, nlon, nlev] data
+                lat_w = grid_info.cos_lat_weights_2d
+                if gt_2d.ndim == 3 and lat_w.ndim == 2:
+                    lat_w = lat_w[:, :, None]
                 eval_result = suite.evaluate_ensemble(
                     samples,
                     gt_2d,
-                    lat_weights=grid_info.cos_lat_weights_2d,
+                    lat_weights=lat_w,
                     metadata={
                         "config_name": name,
                         "generate_config": config.to_dict(),

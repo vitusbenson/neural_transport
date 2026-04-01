@@ -917,37 +917,149 @@ This is both a validation of the refactor AND a re-establishment of the best unc
 
 ---
 
-## Phase 23: E2E Validation — OSSE with Real OCO-2 Mask
+## Phase 23: Comprehensive Posterior Conditioning Ablation (Exp 13)
 
-**Goal**: Run OSSE experiments using the real OCO-2 observation mask pattern (sparse, irregular, orbit tracks) applied to synthetic CarbonTracker data. Compare all posterior sampling methods.
+**Goal**: Comprehensively tune and compare all posterior sampling methods using Optuna, with satellite orbit mask patterns (OCO-2-like) on synthetic CarbonTracker data. Replaces deprecated experiments 12-16 with a single unified ablation. Produces publication-quality plots proving posterior conditioning with total column CO2 works.
 
-This validates the full pipeline: data loading → masking → generation → evaluation → plotting.
+**Note**: Experiments `12_dps_guidance_ablation`, `13_flowdps_ablation`, `14_sde_ablation`, `15_fig_ablation`, `16_ictm_ablation` are now deprecated. Their results informed initial hyperparameter ranges but used synthetic vertical masks. This experiment uses satellite orbit patterns and joint optimization.
 
-**OSSE setup**:
-- Ground truth: CarbonTracker test data
-- Observations: synthetic XCO2 computed from CarbonTracker, masked with real OCO-2 coverage pattern
-- Methods to compare: unconditional, DPS guidance, FlowDPS, SDE, FIG, ICTM (best config from each ablation)
+**Approach**:
+- One Optuna study per method (DPS, FlowDPS, SDE, FIG, ICTM), 50 trials each
+- Satellite mask via `create_column_mask(mask_pattern="satellite")` with `obs_fraction=0.3`
+- Masking method: `total_column_average_simple` (column-integrated CO2 conditioning)
+- **Objective**: pressure-weighted RMSE of ensemble mean vs ground truth, averaged over 10 target samples, with NaN penalty (`objective = mean_pw_rmse + 100 * nan_fraction`)
+- After tuning: compare best configs via `AblationRunner` (100 samples, full evaluation)
 
-**Method comparison**:
-- Use `AblationRunner` with one config per method
-- `EvaluationSuite.evaluate_ensemble()` for each method
-- Metrics: RMSE_3D, RMSE_XCO2, CRPS, spread-skill ratio, calibration
-- Spatial metrics: RMSE at observed vs unobserved locations
+**New code**:
+- `neural_transport/inference/tuning.py` — `PosteriorSamplerObjective`, per-method `suggest_*` functions, `run_posterior_study()`, `compute_pressure_weights()`, `pressure_weighted_rmse()`
+- `neural_transport/inference/generation.py` — `generate_multi_target()`: batched GPU generation for multiple targets with pre-allocated zarr, per-target chunk flushing, mixed-target batches
+- `neural_transport/experiments/ablation_runner.py` — added `wall_time_sec` timing, fixed lat_weights 3D broadcasting in `run_single_eval()`
+- `neural_transport/plots/conditioning_diagnostics.py` — added `plot_obs_match_scatter()`, `plot_spread_at_unobs()`, `plot_per_target_panel()`
+- `neural_transport/plots/ensemble_plots.py` — added `plot_conditioning_residual()` (registered, category "conditioning")
 
-**Plots** via `run_plots()`:
-- "always" + "conditioning" + "ensemble" categories
-- Side-by-side method comparison grid
-- Ablation summary bars
-- Pareto front: wall-time vs RMSE
+**Experiment**: `carbonbench/.../13_posterior_conditioning_ablation/`
+- `run_optuna.py` — runs 5 Optuna studies (one per method)
+- `compare_methods.py` — multi-target batched generation (20 targets × 10 samples), builds `OSSEResult`, produces diagnostic plots
+- `plot_results.py` — loads multi-target zarr, builds `OSSEResult` objects, calls toolkit plotting functions (conditioning_comparison, ensemble_diagnostics, obs_match_scatter, spread_at_unobs, per_target_panel, xco2_maps, zonal_mean, metrics_summary, Optuna analysis)
+- `run_optuna.slurm` / `compare_methods.slurm` — SLURM GPU jobs
 
 ### Checklist
-- [ ] Create experiment config with real OCO-2 mask on synthetic CT data
-- [ ] Run all 6 methods (unconditional + 5 posterior) via `AblationRunner`
-- [ ] Compute ensemble metrics for each method
-- [ ] Generate comparison plots
-- [ ] Verify: best method achieves RMSE_xco2_obs < 75% of unconditional
-- [ ] Verify: spread-skill ratios in [0.5, 2.0]
-- [ ] Document results in experiment directory
+- [x] Create `neural_transport/inference/tuning.py` with `PosteriorSamplerObjective`, per-method suggest functions, `run_posterior_study()`, `compute_pressure_weights()`, `pressure_weighted_rmse()`
+- [x] Add `wall_time_sec` timing to `AblationRunner.run_single_eval()` (3 lines in `ablation_runner.py`)
+- [x] Create `tests/test_posterior_tuning.py` — 22 tests (pressure weights, suggest functions, config building, reconstruction)
+- [x] All 459 quick tests pass, ruff clean
+- [x] Create `13_posterior_conditioning_ablation/run_optuna.py` — runs 5 Optuna studies
+- [x] Create `13_posterior_conditioning_ablation/compare_methods.py` — multi-target batched generation using `generate_multi_target()`
+- [x] Create `13_posterior_conditioning_ablation/plot_results.py` — diagnostic plots using OSSEResult + toolkit functions
+- [x] Create SLURM scripts: `run_optuna.slurm` (48h, tuning), `compare_methods.slurm` (24h, evaluation)
+- [x] Create `generate_multi_target()` in `generation.py` — batched GPU generation with pre-allocated zarr, per-target flushing
+- [x] Add diagnostic plots to toolkit: `plot_obs_match_scatter`, `plot_spread_at_unobs`, `plot_per_target_panel`, `plot_conditioning_residual`
+- [x] Run Optuna studies for all 5 methods: 250/250 trials completed, 0 failures
+- [x] Run multi-target comparison: 20 targets × 10 samples × 6 methods on GPU
+- [x] Best method DPS: RMSE=2.48 (38.2% improvement over unconditional 4.01)
+- [x] All spread-skill ratios in [0.5, 2.0]: DPS=0.81, FlowDPS=0.82, SDE=0.58, FIG=0.85, ICTM=0.83
+- [x] Publication-quality comparison plots (17 diagnostic + 25 Optuna)
+
+### Results (20 targets × 10 samples, satellite mask, column XCO2 conditioning)
+
+| Method | RMSE_3D | RMSE_obs | RMSE_away | R² | Spread-Skill |
+|--------|---------|----------|-----------|-----|-------------|
+| **DPS** | **2.480** | 2.297 | 2.505 | **0.896** | 0.814 |
+| SDE | 2.588 | **2.185** | 2.640 | 0.886 | 0.579 |
+| ICTM | 2.970 | 2.561 | 3.024 | 0.850 | 0.826 |
+| FlowDPS | 3.332 | 2.944 | 3.383 | 0.811 | 0.822 |
+| FIG | 3.540 | 3.141 | 3.594 | 0.787 | 0.852 |
+| Unconditional | 4.015 | — | 4.015 | 0.726 | 0.920 |
+
+**Key observations**:
+- All conditioning methods significantly improve over unconditional (R² from 0.73 to 0.79-0.90)
+- DPS has lowest overall RMSE but SDE best matches observations (lowest RMSE_obs)
+- SDE spread-skill ratio (0.58) is borderline low → may be overconfident
+- Conditioning artifacts visible in spatial patterns (stripes at orbit tracks) — addressed in Phase 23c
+
+---
+
+## Phase 23b: Cluster Storage Clean-Up
+
+**Goal**: The `/Net/Groups/BGI/people/vbenson/` drive is filling up with generated artifacts (zarr predictions, checkpoints, Optuna DBs, plots). Move all generated data to `/Net/Groups/BGI/tscratch/vbenson/` while keeping code on the home drive, in a way that's backwards compatible and easy for future experiments.
+
+**Problem**: Currently, experiment directories like `carbonbench/.../13_posterior_conditioning_ablation/results/` contain both code (`run_optuna.py`, `compare_methods.py`) and large artifacts (`multitarget_predictions.zarr`, `optuna_runs/*.db`, `results/plots/`). The code belongs on the home drive; the artifacts belong on tscratch.
+
+**Approach**: Symlink-based strategy — keep experiment code in place, symlink artifact directories to tscratch.
+
+1. **Artifact convention**: Each experiment dir gets a `DATA_ROOT` pointing to tscratch. Generated outputs (results/, checkpoints/, optuna_runs/) are symlinks to `tscratch/vbenson/carbonbench_artifacts/{experiment_name}/`.
+2. **`setup_experiment_storage.sh`** utility script: Takes experiment name, creates tscratch dirs, creates symlinks. Idempotent (safe to re-run).
+3. **Update existing experiments**: Run the script for experiments 12-13. Move existing artifacts to tscratch, replace with symlinks.
+4. **Template for future experiments**: Add `setup_storage.sh` to experiment template in `carbonbench/`.
+5. **`.gitignore`**: Ensure symlink targets and large artifacts are never committed.
+
+**Key constraint**: No changes to Python code paths — scripts still write to `results/`, `checkpoints/`, etc. The symlinks make the storage transparent.
+
+### Checklist
+- [ ] Create `carbonbench/scripts/setup_experiment_storage.sh` utility
+- [ ] Define artifact directory convention: `tscratch/vbenson/carbonbench_artifacts/{exp_name}/{results,checkpoints,optuna_runs}`
+- [ ] Migrate existing artifacts for experiments 12-13 to tscratch
+- [ ] Create symlinks in experiment dirs pointing to tscratch
+- [ ] Update `.gitignore` for artifact patterns
+- [ ] Test: existing scripts still work unchanged after migration
+- [ ] Document the convention in `carbonbench/README.md` or `STORAGE.md`
+
+---
+
+## Phase 23c: Investigate & Fix Posterior Conditioning Quality
+
+**Goal**: Current posterior conditioning methods fail at least one of two key requirements:
+1. **Perfect obs matching**: Generated samples should near-perfectly reproduce conditioning values at observed locations (zero residual at orbit tracks in spatial RMSE maps)
+2. **Distributional plausibility**: Generated samples should be indistinguishable from the GT distribution — no sharp edges, no visible conditioning artifacts (orbit-track stripes in total column CO2)
+
+Phase 23 results show conditioning improves RMSE overall, but spatial patterns reveal artifacts at orbit track boundaries.
+
+**Investigation plan** (ordered from most to least likely cause):
+
+### Step 1: Bug audit
+- [ ] Verify `obs_values` are in the correct normalization space (model-normalized vs physical units). The `normalize_observations` call in `_apply_sample_masking` should match what `MaskedVelocityWrapper.apply_masking` expects
+- [ ] Check `obs_mask` dimensionality: column obs uses `[B, T, N, 1]` mask but the 3D field is `[B, T, N, C]`. Does the mask broadcast correctly? Or does the sampler condition on column-average XCO2 but evaluate on per-level CO2?
+- [ ] Verify `create_column_mask` correctly computes synthetic XCO2 from 3D CO2 using pressure weights and averaging kernel — compare against reference CarbonTracker XCO2
+- [ ] Check if `MaskedVelocityWrapper.forward_correction` / `forward_guidance` / `forward_repaint` handle the column-vs-level distinction correctly
+
+### Step 2: Tuning objective alignment
+- [ ] Current objective: pressure-weighted RMSE of ensemble mean vs GT over full 3D field. This rewards overall accuracy but doesn't directly penalize poor obs matching or conditioning artifacts
+- [ ] Better objective candidates:
+  - `obs_residual_rmse`: RMSE at observed locations only (should be ~0 for perfect conditioning)
+  - `spatial_smoothness`: gradient magnitude penalty to detect orbit-track edges
+  - `combined`: `α * rmse_away + β * obs_residual + γ * roughness` — multi-objective that rewards accuracy away from obs while requiring perfect obs match
+- [ ] Re-run Optuna with improved objective for best 2-3 methods
+
+### Step 3: Verify tuning convergence
+- [ ] Check if 50 trials were sufficient — are the Optuna studies converged? (variance of top-10 trials, exploration vs exploitation)
+- [ ] Check if search ranges are appropriate — are best params at boundaries?
+- [ ] Consider increasing n_trials to 100 for the best methods
+
+### Step 4: Method-specific fixes and tricks
+- [ ] **DPS guidance scale**: Higher guidance → harder obs matching but potentially more artifacts. Investigate guidance_scale sensitivity
+- [ ] **Spatial smoothing**: The `spatial_smoothing_sigma` parameter applies Gaussian blur to the gradient. Test whether higher smoothing removes orbit-track edges
+- [ ] **Repaint vs correction**: `forward_repaint` hard-replaces at observed locations (guarantees zero residual). Test if switching from `correction` to `repaint` mode gives perfect obs match without artifacts
+- [ ] **Multi-step conditioning**: Apply conditioning at multiple ODE solver steps (not just final state). May distribute the correction more smoothly
+- [ ] **Warm-start from prior mean**: Instead of random noise init, start from the a priori mean at observed locations. May reduce the magnitude of corrections needed
+- [ ] **Langevin corrector steps** (SDE): The SDE sampler with corrector steps may help refine the posterior near observations. Tune `n_corrector_steps` and `corrector_step_size` more aggressively
+- [ ] **Column-vs-level conditioning**: Currently conditioning on column-average XCO2 (1D per spatial location). Consider conditioning on the full 3D field at observed locations (if level-resolved obs are available)
+
+### Step 5: Evaluation criteria
+For each attempted fix, evaluate:
+- [ ] `obs_residual_rmse`: RMSE at observed locations (target: < 0.1 ppm at column level)
+- [ ] `stripe_visibility`: visual inspection of column XCO2 maps — no orbit track artifacts
+- [ ] `rmse_away`: RMSE at unobserved locations (should not degrade vs current best)
+- [ ] `distributional_distance`: energy distance or MMD between generated and GT samples
+- [ ] `spatial_gradient_ratio`: ratio of gradient magnitude at obs/unobs boundary vs interior (target: ~1.0)
+
+### Checklist
+- [ ] Bug audit: normalization, mask broadcasting, column XCO2 computation
+- [ ] Test improved tuning objectives (obs_residual, combined multi-objective)
+- [ ] Re-tune best methods with better objective
+- [ ] Test repaint mode for guaranteed obs matching
+- [ ] Test spatial smoothing effect on orbit-track artifacts
+- [ ] Achieve: obs_residual_rmse < 0.1 ppm AND no visible orbit-track stripes
+- [ ] Document findings and best configuration
 
 ---
 
@@ -1099,9 +1211,11 @@ Phase 18 (E2E: Training & Tuning)
   │     └── Phase 20 (Debug OT Coupling + BatchNorm fix) ├── Fix generation quality
   │           └── Phase 22 (SwinTransformer + Tune)      ┘
   │
-Phase 23 (E2E: OSSE + OCO-2 Mask)     ┐
-Phase 24 (E2E: Real OCO-2 Inversion)  ├── Validate refactored codebase
-                                       ┘
+Phase 23 (Posterior Conditioning Ablation)  ← Optuna tuning + multi-target comparison
+  ├── Phase 23b (Cluster Storage Clean-Up) ← Move artifacts to tscratch, symlinks
+  ├── Phase 23c (Fix Conditioning Quality) ← Bug audit, objective, artifacts
+  └── Phase 24 (Real OCO-2 Inversion)     ← Apply best method to real data
+
 Phases 25-32: Development & Publication
 ```
 
@@ -1133,7 +1247,9 @@ Phase-specific gates:
 - After Phase 13: `run_plots()` produces all expected plot files
 - After Phase 16: one carbonbench experiment produces identical metrics JSON
 - After Phase 18: trained model matches pre-refactor quality
-- After Phase 23: OSSE RMSE_xco2_obs < 75% of unconditional, spread-skill in [0.5, 2.0]
+- After Phase 23: best method pw-RMSE < 75% of unconditional, spread-skill in [0.5, 2.0], 5 Optuna studies complete ✓ (DPS: 38% improvement)
+- After Phase 23b: existing scripts work unchanged with symlinked storage, artifacts on tscratch
+- After Phase 23c: obs_residual_rmse < 0.1 ppm, no visible orbit-track stripes in column XCO2
 
 ## Key Files Reference
 

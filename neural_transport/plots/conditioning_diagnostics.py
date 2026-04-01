@@ -524,3 +524,216 @@ def plot_zonal_mean_single(result, ctx: PlotContext) -> None:
 
     fig.tight_layout()
     ctx.savefig(fig, "zonal_mean")
+
+
+# ---------------------------------------------------------------------------
+# Multi-target diagnostic plots (accept zarr data or OSSEResult dicts)
+# ---------------------------------------------------------------------------
+
+
+def plot_obs_match_scatter(results, out_dir, level_idx=0, imgformats=None):
+    """Scatter plot of prediction vs GT at observed pixels, per method.
+
+    Perfect conditioning → points on the diagonal.
+
+    Parameters
+    ----------
+    results : dict[str, OSSEResult]
+    out_dir : str or Path
+    level_idx : int
+        Vertical level for comparison (-1 for column mean).
+    imgformats : list[str]
+    """
+    if imgformats is None:
+        imgformats = ["png", "pdf"]
+    plt.rcParams.update(mpl_rc_params)
+
+    n_exp = len(results)
+    fig, axes = plt.subplots(1, n_exp, figsize=(4 * n_exp, 4), squeeze=False)
+
+    for col, (name, res) in enumerate(results.items()):
+        ax = axes[0, col]
+        ens_mean = res.ensemble_mean
+        gt = res.gt
+        mask = res.mask_2d
+
+        if mask is None or mask.sum() == 0:
+            ax.text(0.5, 0.5, "No obs", transform=ax.transAxes, ha="center", va="center", color="gray")
+            ax.set_title(name, fontsize=9)
+            continue
+
+        if level_idx == -1:
+            pred_vals = ens_mean.mean(axis=-1)[mask]
+            gt_vals = gt.mean(axis=-1)[mask]
+        else:
+            pred_vals = ens_mean[:, :, level_idx][mask]
+            gt_vals = gt[:, :, level_idx][mask]
+
+        ax.scatter(gt_vals, pred_vals, s=3, alpha=0.5, color="C0")
+        lims = [min(gt_vals.min(), pred_vals.min()), max(gt_vals.max(), pred_vals.max())]
+        ax.plot(lims, lims, "k--", linewidth=0.8, alpha=0.5, label="Perfect")
+        ax.set_xlabel("GT at obs")
+        ax.set_ylabel("Pred at obs")
+        ax.set_title(name, fontsize=9)
+        ax.set_aspect("equal")
+        rmse_obs = np.sqrt(np.mean((pred_vals - gt_vals) ** 2))
+        ax.text(0.05, 0.92, f"RMSE={rmse_obs:.3f}", transform=ax.transAxes, fontsize=7)
+
+    fig.suptitle("Obs Match: Prediction vs GT at Observed Pixels", fontsize=11)
+    plt.tight_layout()
+    save_figure(fig, out_dir, "obs_match_scatter", imgformats=imgformats)
+
+
+def plot_spread_at_unobs(results, out_dir, level_idx=0, imgformats=None):
+    """Spread map showing ensemble std ONLY at unobserved locations, per method.
+
+    Parameters
+    ----------
+    results : dict[str, OSSEResult]
+    out_dir : str or Path
+    level_idx : int
+        Vertical level (-1 for column mean).
+    imgformats : list[str]
+    """
+    if imgformats is None:
+        imgformats = ["png", "pdf"]
+    plt.rcParams.update(mpl_rc_params)
+
+    n_exp = len(results)
+    fig, axes = plt.subplots(1, n_exp, figsize=(4 * n_exp, 3.5), squeeze=False)
+
+    spreads = []
+    for name, res in results.items():
+        if level_idx == -1:
+            spread = res.samples.std(axis=0).mean(axis=-1)
+        else:
+            spread = res.samples[:, :, :, level_idx].std(axis=0)
+        if res.mask_2d is not None:
+            spread_unobs = np.where(~res.mask_2d, spread, np.nan)
+        else:
+            spread_unobs = spread
+        spreads.append(spread_unobs)
+
+    vmax = max(np.nanpercentile(s, 98) for s in spreads if np.any(np.isfinite(s)))
+
+    for col, (name, spread) in enumerate(zip(results.keys(), spreads)):
+        ax = axes[0, col]
+        im = ax.imshow(spread, origin="lower", cmap="inferno", vmin=0, vmax=vmax, aspect="auto")
+        ax.set_title(name, fontsize=9)
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    fig.colorbar(im, ax=axes.ravel().tolist(), label="Ensemble Spread (unobs only)", shrink=0.8)
+    fig.suptitle("Spread at Unobserved Locations", fontsize=11)
+    plt.tight_layout()
+    save_figure(fig, out_dir, "spread_at_unobs", imgformats=imgformats)
+
+
+def plot_per_target_panel(
+    samples_per_target,
+    gt_per_target,
+    mask_per_target,
+    obs_values_per_target,
+    out_dir,
+    method_name="",
+    n_targets_show=4,
+    n_samples_show=5,
+    level_idx=0,
+    imgformats=None,
+):
+    """Per-target sample gallery: GT | Masked obs | Samples | Ens mean | |Error|.
+
+    Parameters
+    ----------
+    samples_per_target : dict[int, np.ndarray]
+        Mapping target_pos → samples array [n_samples, nlat, nlon, nlev].
+    gt_per_target : dict[int, np.ndarray]
+        Mapping target_pos → GT array [nlat, nlon, nlev].
+    mask_per_target : dict[int, np.ndarray]
+        Mapping target_pos → obs mask [nlat, nlon] bool.
+    obs_values_per_target : dict[int, np.ndarray]
+        Mapping target_pos → obs values [nlat, nlon].
+    out_dir : str or Path
+    method_name : str
+    n_targets_show : int
+    n_samples_show : int
+    level_idx : int
+    imgformats : list[str]
+    """
+    if imgformats is None:
+        imgformats = ["png", "pdf"]
+    plt.rcParams.update(mpl_rc_params)
+
+    targets = sorted(samples_per_target.keys())[:n_targets_show]
+    n_rows = len(targets)
+    n_cols = 3 + n_samples_show + 1  # GT, Obs, Ens.Mean, Samples..., |Error|
+
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(3 * n_cols, 3 * n_rows),
+        gridspec_kw={"wspace": 0.05, "hspace": 0.3},
+    )
+    if n_rows == 1:
+        axes = axes[np.newaxis, :]
+
+    for row, t_pos in enumerate(targets):
+        gt = gt_per_target[t_pos]
+        samples = samples_per_target[t_pos]
+        mask = mask_per_target.get(t_pos)
+
+        if level_idx == -1:
+            gt_slice = gt.mean(axis=-1)
+            ens_mean = samples.mean(axis=0).mean(axis=-1)
+            sample_slices = [s.mean(axis=-1) for s in samples[:n_samples_show]]
+        else:
+            gt_slice = gt[:, :, level_idx]
+            ens_mean = samples.mean(axis=0)[:, :, level_idx]
+            sample_slices = [s[:, :, level_idx] for s in samples[:n_samples_show]]
+
+        vmin = np.nanpercentile(gt_slice, 2)
+        vmax = np.nanpercentile(gt_slice, 98)
+
+        # Col 0: GT
+        axes[row, 0].imshow(gt_slice, origin="lower", cmap="cividis", vmin=vmin, vmax=vmax, aspect="auto")
+        if row == 0:
+            axes[row, 0].set_title("GT", fontsize=9)
+        axes[row, 0].set_ylabel(f"Target {t_pos}", fontsize=8)
+
+        # Col 1: Observed (masked)
+        if mask is not None:
+            obs_display = np.where(mask, gt_slice, np.nan)
+        else:
+            obs_display = np.full_like(gt_slice, np.nan)
+        axes[row, 1].imshow(obs_display, origin="lower", cmap="cividis", vmin=vmin, vmax=vmax, aspect="auto")
+        if row == 0:
+            axes[row, 1].set_title("Observed", fontsize=9)
+
+        # Cols 2..2+n_samples: Individual samples
+        for s_i, s_slice in enumerate(sample_slices):
+            axes[row, 2 + s_i].imshow(s_slice, origin="lower", cmap="cividis", vmin=vmin, vmax=vmax, aspect="auto")
+            if row == 0:
+                axes[row, 2 + s_i].set_title(f"Sample {s_i}", fontsize=9)
+
+        # Col -2: Ensemble mean
+        axes[row, -2].imshow(ens_mean, origin="lower", cmap="cividis", vmin=vmin, vmax=vmax, aspect="auto")
+        if row == 0:
+            axes[row, -2].set_title("Ens. Mean", fontsize=9)
+
+        # Col -1: |Error|
+        diff = np.abs(ens_mean - gt_slice)
+        dmax = np.nanpercentile(diff, 98) if diff.size > 0 else 1.0
+        axes[row, -1].imshow(diff, origin="lower", cmap="Reds", vmin=0, vmax=max(dmax, 1e-8), aspect="auto")
+        if row == 0:
+            axes[row, -1].set_title("|Error|", fontsize=9)
+
+        for ax in axes[row]:
+            ax.set_xticks([])
+            ax.set_yticks([])
+
+    title = "Per-Target Sample Gallery"
+    if method_name:
+        title += f" — {method_name}"
+    fig.suptitle(title, fontsize=12)
+    plt.tight_layout()
+    save_figure(fig, out_dir, f"per_target_panel{'_' + method_name if method_name else ''}", imgformats=imgformats)

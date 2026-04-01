@@ -831,3 +831,243 @@ def generate_for_distributional_eval(
         batch_size=batch_size,
         generate_kwargs=generate_kwargs,
     )
+
+
+# ── Multi-target batched generation ─────────────────────────────────────
+
+
+def generate_multi_target(
+    model,
+    dataset,
+    target_indices: list[int],
+    n_samples_per_target: int = 10,
+    batch_size: int = 20,
+    generate_kwargs: dict | None = None,
+    out_dir: str | Path = ".",
+    device: str = "cuda",
+    target_var: str = "co2massmix",
+    verbose: bool = True,
+    seed: int = 42,
+) -> Path:
+    """Generate conditioned ensembles for multiple targets in GPU-efficient batches.
+
+    Pre-allocates a zarr store with ``(target, sample)`` as separate dimensions,
+    processes work items in batches of ``batch_size`` on GPU, and flushes each
+    target's results to zarr as soon as all its samples are collected.
+
+    Parameters
+    ----------
+    model : NeuralTransport
+        Pre-trained model (will be set to eval/generate mode).
+    dataset : CarbonDataset
+        Dataset providing target fields and normalization stats.
+    target_indices : list[int]
+        Which dataset time indices to use as conditioning targets.
+    n_samples_per_target : int
+        Ensemble members to generate per target.
+    batch_size : int
+        GPU batch size (items processed in parallel).
+    generate_kwargs : dict, optional
+        Generation config (masking, sampler, steps, etc.).
+    out_dir : str or Path
+        Output directory for zarr store.
+    device : str
+        Torch device.
+    target_var : str
+        Target variable name (e.g. "co2massmix").
+    verbose : bool
+        Show progress bar.
+    seed : int
+        Random seed for reproducibility.
+
+    Returns
+    -------
+    Path
+        Path to the written zarr store.
+    """
+    import zarr
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    zarr_path = out_dir / "multitarget_predictions.zarr"
+
+    if generate_kwargs is None:
+        generate_kwargs = {}
+
+    n_targets = len(target_indices)
+
+    # ── Setup model ──
+    model = model.eval().to(device)
+    model.return_intermediates = False
+    model.model.generate_kwargs = generate_kwargs
+
+    # Determine grid shape from first dataset item
+    sample_data = dataset[target_indices[0]][target_var]
+    if sample_data.ndim == 3:  # [T, N, C]
+        _, N, nlev = sample_data.shape
+    else:  # [N, C]
+        N, nlev = sample_data.shape
+
+    # Get nlat, nlon from dataset
+    grid = dataset.grid
+    if grid.startswith("latlon"):
+        res = float(grid.replace("latlon", ""))
+        nlat = int(180 / res)
+        nlon = int(360 / res)
+    else:
+        nlat = nlon = int(np.sqrt(N))
+
+    # ── Pre-allocate zarr ──
+    store = zarr.open(str(zarr_path), mode="w")
+    store.create_array(
+        "predictions",
+        shape=(n_targets, n_samples_per_target, nlat, nlon, nlev),
+        chunks=(1, n_samples_per_target, nlat, nlon, nlev),
+        dtype="float32",
+    )
+    store.create_array("gt", shape=(n_targets, nlat, nlon, nlev), chunks=(1, nlat, nlon, nlev), dtype="float32")
+    store.create_array("obs_mask", shape=(n_targets, nlat, nlon), chunks=(1, nlat, nlon), dtype="bool")
+    store.create_array("obs_values", shape=(n_targets, nlat, nlon), chunks=(1, nlat, nlon), dtype="float32")
+    store.create_array("target_time_idx", shape=(n_targets,), dtype="int64")
+    # Optional: pressure weights and AK (same shape per target if column obs)
+    store.create_array(
+        "pressure_weights",
+        shape=(n_targets, nlat, nlon, nlev),
+        chunks=(1, nlat, nlon, nlev),
+        dtype="float32",
+    )
+    store.create_array("ak", shape=(n_targets, nlat, nlon, nlev), chunks=(1, nlat, nlon, nlev), dtype="float32")
+
+    # ── Prepare masked batches per target (computed once, cached) ──
+    mask_source = generate_kwargs.get("mask_source", "column")
+    mask_pattern = generate_kwargs.get("mask_pattern", "satellite")
+    obs_fraction = generate_kwargs.get("obs_fraction", 0.2)
+    ak_10 = generate_kwargs.get("ak_10", None)
+    masking = generate_kwargs.get("masking", True)
+
+    # Temporary pipeline for masking utility (reuses _apply_sample_masking)
+    pipeline = GenerationPipeline(model, dataset, target_vars_3d=[target_var], device=device, verbose=False)
+
+    cached_batches = {}
+    cached_gt = {}
+    cached_obs_info = {}
+
+    logger.info("Preparing masked batches for %d targets...", n_targets)
+    for t_pos, t_idx in enumerate(target_indices):
+        base_batch = {k: v.unsqueeze(0).to(device) for k, v in dataset[t_idx].items()}
+
+        # Extract ground truth BEFORE masking
+        gt_tensor = base_batch[target_var].clone()  # [1, T, N, C] or [1, N, C]
+        if gt_tensor.ndim == 4:
+            gt_np = gt_tensor[0, 0].cpu().numpy().reshape(nlat, nlon, nlev)
+        else:
+            gt_np = gt_tensor[0].cpu().numpy().reshape(nlat, nlon, nlev)
+
+        if masking:
+            pipeline._apply_sample_masking(
+                base_batch, model, mask_source, mask_pattern, obs_fraction, ak_10, target_var
+            )
+
+            # Extract obs info for zarr
+            obs_mask_tensor = base_batch.get("obs_mask")
+            obs_values_tensor = base_batch.get("obs_values")
+            if obs_mask_tensor is not None:
+                # Column obs: obs_mask is [B, T, N, 1] → [nlat, nlon]
+                om = obs_mask_tensor[0, 0, :, 0].cpu().numpy().reshape(nlat, nlon)
+                ov = obs_values_tensor[0, 0, :, 0].cpu().numpy().reshape(nlat, nlon)
+            else:
+                om = np.zeros((nlat, nlon), dtype=bool)
+                ov = np.full((nlat, nlon), np.nan, dtype=np.float32)
+
+            # Extract pressure weights and AK if available
+            pw_tensor = base_batch.get("pressure_weight")
+            ak_tensor = base_batch.get("xco2_averaging_kernel")
+            if pw_tensor is not None:
+                pw_np = pw_tensor[0, 0].cpu().numpy().reshape(nlat, nlon, nlev)
+                ak_np = ak_tensor[0, 0].cpu().numpy().reshape(nlat, nlon, nlev)
+            else:
+                pw_np = np.zeros((nlat, nlon, nlev), dtype=np.float32)
+                ak_np = np.zeros((nlat, nlon, nlev), dtype=np.float32)
+        else:
+            om = np.zeros((nlat, nlon), dtype=bool)
+            ov = np.full((nlat, nlon), np.nan, dtype=np.float32)
+            pw_np = np.zeros((nlat, nlon, nlev), dtype=np.float32)
+            ak_np = np.zeros((nlat, nlon, nlev), dtype=np.float32)
+
+        cached_batches[t_pos] = base_batch
+        cached_gt[t_pos] = gt_np
+        cached_obs_info[t_pos] = (om, ov, pw_np, ak_np)
+
+        # Write GT and obs info immediately (these don't depend on generation)
+        store["gt"][t_pos] = gt_np
+        store["obs_mask"][t_pos] = om
+        store["obs_values"][t_pos] = ov
+        store["pressure_weights"][t_pos] = pw_np
+        store["ak"][t_pos] = ak_np
+        store["target_time_idx"][t_pos] = t_idx
+
+    # ── Build work items ordered by target ──
+    work_items = []
+    for t_pos in range(n_targets):
+        for s_idx in range(n_samples_per_target):
+            work_items.append((t_pos, s_idx))
+
+    # ── Process in GPU batches ──
+    # Buffer: accumulate predictions per target
+    target_buffers: dict[int, list[np.ndarray]] = {t: [] for t in range(n_targets)}
+
+    n_batches = (len(work_items) + batch_size - 1) // batch_size
+    iterator = range(n_batches)
+    if verbose:
+        iterator = tqdm(iterator, desc="Generating (batched)", total=n_batches)
+
+    for batch_idx in iterator:
+        start = batch_idx * batch_size
+        end = min(start + batch_size, len(work_items))
+        batch_items = work_items[start:end]
+
+        # Stack batches: cat along batch dimension
+        stacked = {}
+        for key in cached_batches[0]:
+            tensors = [cached_batches[t_pos][key] for (t_pos, _) in batch_items]
+            stacked[key] = torch.cat(tensors, dim=0)  # [B, ...]
+
+        # Generate noise
+        noise_shape = stacked[target_var].shape  # [B, T, N, C]
+        stacked["noise"] = torch.randn(
+            noise_shape, device=device, generator=torch.Generator(device=device).manual_seed(seed + start)
+        )
+
+        # Forward pass
+        with torch.no_grad():
+            preds = model(stacked)
+
+        # Extract predictions
+        pred_tensor = preds[target_var]  # [B, N, C]
+        pred_np = pred_tensor.cpu().numpy()  # [B, N, C]
+
+        # Distribute to per-target buffers
+        for i, (t_pos, s_idx) in enumerate(batch_items):
+            sample = pred_np[i].reshape(nlat, nlon, nlev)
+            target_buffers[t_pos].append(sample)
+
+            # Flush when target complete
+            if len(target_buffers[t_pos]) == n_samples_per_target:
+                samples_array = np.stack(target_buffers[t_pos])  # [n_samples, nlat, nlon, nlev]
+                store["predictions"][t_pos] = samples_array.astype(np.float32)
+                target_buffers[t_pos] = []  # Free memory
+                logger.debug("Flushed target %d (dataset idx %d) to zarr", t_pos, target_indices[t_pos])
+
+    # Flush any remaining buffers (shouldn't happen if work items are ordered correctly)
+    for t_pos, buf in target_buffers.items():
+        if buf:
+            logger.warning(
+                "Target %d has %d/%d samples (incomplete), flushing partial", t_pos, len(buf), n_samples_per_target
+            )
+            samples_array = np.stack(buf)
+            store["predictions"][t_pos, : len(buf)] = samples_array.astype(np.float32)
+
+    logger.info(
+        "Multi-target generation complete: %d targets × %d samples → %s", n_targets, n_samples_per_target, zarr_path
+    )
+    return zarr_path
