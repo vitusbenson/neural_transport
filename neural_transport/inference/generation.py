@@ -414,7 +414,9 @@ class GenerationPipeline:
 
     # ── Sample mode ──
 
-    def _apply_sample_masking(self, batch, model, mask_source, mask_pattern, obs_fraction, ak_10, target_var):
+    def _apply_sample_masking(
+        self, batch, model, mask_source, mask_pattern, obs_fraction, ak_10, target_var, soft_boundary_sigma=0.0
+    ):
         """Apply masking for sample mode. Modifies batch in-place."""
         if mask_source in ("column", "xco2"):
             obs_mask, obs_values = create_column_mask(
@@ -425,11 +427,19 @@ class GenerationPipeline:
                 nlat=self.nlat,
                 nlon=self.nlon,
                 ak_10=ak_10,
+                soft_boundary_sigma=soft_boundary_sigma,
             )
             batch["obs_mask"] = obs_mask
             obs_values_normed = model.model.normalize_observations(
                 obs_values, batch, target_var=target_var, targshift=False
             )
+            # Replace NaN at unobserved locations with 0. This is safe because:
+            # - With binary mask (no obs_weight): torch.where(obs_mask, ...) skips NaN locations
+            # - With soft mask (obs_weight): obs_weight * (... - obs_values) needs finite obs_values
+            #   to avoid 0 * NaN = NaN at boundary pixels
+            import torch
+
+            obs_values_normed = torch.nan_to_num(obs_values_normed, nan=0.0)
             batch["obs_values"] = obs_values_normed
         elif mask_pattern is None:
             obs_mask, obs_values = create_oco2_mask(batch, target_var=target_var)
@@ -460,6 +470,7 @@ class GenerationPipeline:
         noise_pattern = generate_kwargs.get("noise_pattern", None)
         analyze_noise = generate_kwargs.get("analyze_noise", False)
         ak_10 = generate_kwargs.get("ak_10", None)
+        soft_boundary_sigma = generate_kwargs.get("soft_boundary_sigma", 0.0)
 
         zarrpath, obspath, prototype_zarr, model = self._setup(
             out_dir, generate_kwargs, rollout, freq, zarr_filename, zero_surfflux, remap
@@ -482,7 +493,14 @@ class GenerationPipeline:
             base_batch = {k: v.unsqueeze(0).to(self.device) for k, v in self.dataset[0].items()}
             if masking:
                 self._apply_sample_masking(
-                    base_batch, model, mask_source, mask_pattern, obs_fraction, ak_10, self.target_vars_3d[0]
+                    base_batch,
+                    model,
+                    mask_source,
+                    mask_pattern,
+                    obs_fraction,
+                    ak_10,
+                    self.target_vars_3d[0],
+                    soft_boundary_sigma=soft_boundary_sigma,
                 )
 
         iterator = range(n_samples)
@@ -944,6 +962,7 @@ def generate_multi_target(
     obs_fraction = generate_kwargs.get("obs_fraction", 0.2)
     ak_10 = generate_kwargs.get("ak_10", None)
     masking = generate_kwargs.get("masking", True)
+    soft_boundary_sigma = generate_kwargs.get("soft_boundary_sigma", 0.0)
 
     # Temporary pipeline for masking utility (reuses _apply_sample_masking)
     pipeline = GenerationPipeline(model, dataset, target_vars_3d=[target_var], device=device, verbose=False)
@@ -965,7 +984,14 @@ def generate_multi_target(
 
         if masking:
             pipeline._apply_sample_masking(
-                base_batch, model, mask_source, mask_pattern, obs_fraction, ak_10, target_var
+                base_batch,
+                model,
+                mask_source,
+                mask_pattern,
+                obs_fraction,
+                ak_10,
+                target_var,
+                soft_boundary_sigma=soft_boundary_sigma,
             )
 
             # Extract obs info for zarr

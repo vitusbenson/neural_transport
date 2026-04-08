@@ -2,6 +2,7 @@ from neural_transport.inference.samplers.base import BaseSampler, PosteriorSampl
 from neural_transport.inference.samplers.fig import FIGSampler
 from neural_transport.inference.samplers.flowdps import FlowDPSSampler
 from neural_transport.inference.samplers.ictm import ICTMSampler
+from neural_transport.inference.samplers.mcg import MCGSampler
 from neural_transport.inference.samplers.ode import ODESampler
 from neural_transport.inference.samplers.sde import StochasticPosteriorSampler
 
@@ -11,6 +12,7 @@ SAMPLER_REGISTRY: dict[str, type[BaseSampler]] = {
     "sde": StochasticPosteriorSampler,
     "fig": FIGSampler,
     "ictm": ICTMSampler,
+    "mcg": MCGSampler,
 }
 
 
@@ -34,6 +36,7 @@ __all__ = [
     "StochasticPosteriorSampler",
     "FIGSampler",
     "ICTMSampler",
+    "MCGSampler",
     "SAMPLER_REGISTRY",
     "create_sampler",
 ]

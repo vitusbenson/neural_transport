@@ -130,6 +130,7 @@ def create_column_mask(
     nlat=32,
     nlon=64,
     ak_10=None,
+    soft_boundary_sigma=0.0,
 ):
     """
     Create synthetic XCO2 column observations from a 3D CO2 field using
@@ -220,6 +221,20 @@ def create_column_mask(
 
         obs_mask[:, t_idx, obs_indices, :] = True
         obs_values[:, t_idx, obs_indices, :] = xco2[:, t_idx, obs_indices, :]
+
+    # Compute soft obs_weight (float [0,1]) by blurring the binary mask.
+    # Only set obs_weight when soft_boundary_sigma > 0 — when it's 0, the
+    # conditioning code uses the binary obs_mask via torch.where which correctly
+    # handles NaN obs_values at unobserved locations. Using obs_weight with
+    # binary mask would multiply NaN by 0, producing NaN.
+    if soft_boundary_sigma > 0:
+        from neural_transport.tools.spatial import gaussian_smooth_2d
+
+        # Reshape [B, T, N, 1] → [B*T, 1, nlat, nlon] for 2D smoothing
+        mask_float = obs_mask.float().reshape(B * T, nlat, nlon, 1).permute(0, 3, 1, 2)
+        obs_weight = gaussian_smooth_2d(mask_float, soft_boundary_sigma)
+        obs_weight = obs_weight.permute(0, 2, 3, 1).reshape(B, T, N, 1)
+        batch["obs_weight"] = obs_weight
 
     # Add AK, prior, and pressure_weight to batch for prepare_masking_config
     batch["xco2_averaging_kernel"] = ak
@@ -338,7 +353,9 @@ def masking_interpolate(x, t, obs_mask, obs_values):
     return torch.where(obs_mask.bool(), blended, x)
 
 
-def masking_total_column_average_simple(x, obs_mask, obs_values, forward_model, ak=None, pressure_weights=None):
+def masking_total_column_average_simple(
+    x, obs_mask, obs_values, forward_model, ak=None, pressure_weights=None, obs_weight=None
+):
     """Uniform additive column correction at observed locations."""
     if ak is None:
         ak = torch.ones(x.shape, device=x.device)
@@ -351,6 +368,8 @@ def masking_total_column_average_simple(x, obs_mask, obs_values, forward_model, 
     column_error = obs_values.detach() - xco2  # [B 1 Nlat Nlon]
 
     distributed_correction = column_error / h_ak_sum  # [B C Nlat Nlon] - uniform per level
+    if obs_weight is not None:
+        return x + obs_weight * distributed_correction
     return torch.where(obs_mask.bool(), x + distributed_correction, x)
 
 
@@ -413,7 +432,7 @@ _MASKING_METHODS = {
 _METHODS_WITH_T = {"interpolate"}
 
 
-_COLUMN_SIMPLE_KWARGS = {"ak", "pressure_weights"}
+_COLUMN_SIMPLE_KWARGS = {"ak", "pressure_weights", "obs_weight"}
 _COLUMN_MULT_KWARGS = {
     "ak",
     "pressure_weights",

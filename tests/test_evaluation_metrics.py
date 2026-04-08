@@ -357,3 +357,81 @@ class TestBackwardCompatibility:
         from neural_transport.tools.metrics import compute_error_scalars
 
         assert callable(compute_error_scalars)
+
+
+# ---------------------------------------------------------------------------
+# Conditioning diagnostic metrics (Phase 23c)
+# ---------------------------------------------------------------------------
+
+
+class TestGradientAtBoundary:
+    """Tests for gradient_at_boundary metric."""
+
+    def test_smooth_field_low_ratio(self):
+        from neural_transport.inference.metrics import gradient_at_boundary
+
+        # Smooth field + arbitrary mask → gradient ratio near 1
+        nlat, nlon = 32, 64
+        y, x = np.mgrid[0:nlat, 0:nlon]
+        field = np.sin(2 * np.pi * x / nlon)  # smooth sine wave
+        mask = np.zeros((nlat, nlon), dtype=bool)
+        mask[8:24, 16:48] = True
+        result = gradient_at_boundary(field, mask)
+        assert np.isfinite(result["gradient_ratio"])
+        # Smooth field should have ratio near 1 (no sharp boundary)
+        assert result["gradient_ratio"] < 3.0
+
+    def test_step_at_boundary_high_ratio(self):
+        from neural_transport.inference.metrics import gradient_at_boundary
+
+        # Field with a step exactly at the mask edge
+        nlat, nlon = 32, 64
+        mask = np.zeros((nlat, nlon), dtype=bool)
+        mask[8:24, 16:48] = True
+        field = mask.astype(float) * 10.0  # step function at mask edge
+        result = gradient_at_boundary(field, mask)
+        assert result["gradient_ratio"] > 2.0
+
+    def test_empty_mask_returns_nan(self):
+        from neural_transport.inference.metrics import gradient_at_boundary
+
+        field = np.random.randn(16, 32)
+        mask = np.zeros((16, 32), dtype=bool)
+        result = gradient_at_boundary(field, mask)
+        assert np.isnan(result["gradient_ratio"])
+
+
+class TestXco2ObsResidual:
+    """Tests for xco2_obs_residual metric."""
+
+    def test_perfect_match_zero_residual(self):
+        from neural_transport.inference.metrics import xco2_obs_residual
+
+        nlat, nlon, nlev = 8, 16, 10
+        field = np.random.randn(nlat, nlon, nlev)
+        pw = np.ones(nlev) / nlev
+        ak = np.ones(nlev)
+        mask = np.ones((nlat, nlon), dtype=bool)
+        # Ensemble mean == GT → zero residual
+        assert xco2_obs_residual(field, field, mask, pw, ak) == pytest.approx(0.0)
+
+    def test_different_fields_positive_residual(self):
+        from neural_transport.inference.metrics import xco2_obs_residual
+
+        nlat, nlon, nlev = 8, 16, 10
+        pred = np.random.randn(nlat, nlon, nlev)
+        gt = pred + 1.0  # offset
+        pw = np.ones(nlev) / nlev
+        ak = np.ones(nlev)
+        mask = np.ones((nlat, nlon), dtype=bool)
+        residual = xco2_obs_residual(pred, gt, mask, pw, ak)
+        assert residual > 0
+
+    def test_no_mask_returns_nan(self):
+        from neural_transport.inference.metrics import xco2_obs_residual
+
+        nlat, nlon, nlev = 8, 16, 10
+        field = np.random.randn(nlat, nlon, nlev)
+        pw = np.ones(nlev) / nlev
+        ak = np.ones(nlev)
+        assert np.isnan(xco2_obs_residual(field, field, None, pw, ak))

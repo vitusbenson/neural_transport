@@ -123,6 +123,7 @@ def suggest_dps_params(trial: optuna.Trial) -> dict[str, Any]:
         "sigma_obs": trial.suggest_float("sigma_obs", 0.05, 5.0, log=True),
         "guidance_scale": trial.suggest_float("guidance_scale", 0.1, 10.0, log=True),
         "spatial_smoothing_sigma": trial.suggest_float("spatial_smoothing_sigma", 0.0, 5.0),
+        "soft_boundary_sigma": trial.suggest_float("soft_boundary_sigma", 0.0, 3.0),
     }
     masking_time = trial.suggest_categorical("masking_time", ["none", "smooth_late_masking"])
     if masking_time == "none":
@@ -139,6 +140,7 @@ def suggest_flowdps_params(trial: optuna.Trial) -> dict[str, Any]:
         "sampler": "flowdps",
         "sigma_obs": trial.suggest_float("sigma_obs", 0.005, 2.0, log=True),
         "spatial_smoothing_sigma": trial.suggest_float("spatial_smoothing_sigma", 0.0, 5.0),
+        "soft_boundary_sigma": trial.suggest_float("soft_boundary_sigma", 0.0, 3.0),
         "fresh_noise": trial.suggest_categorical("fresh_noise", [True, False]),
         "steps": trial.suggest_categorical("steps", [11, 21, 51]),
     }
@@ -149,6 +151,8 @@ def suggest_sde_params(trial: optuna.Trial) -> dict[str, Any]:
     params: dict[str, Any] = {
         "sampler": "sde",
         "sigma_obs": trial.suggest_float("sigma_obs", 0.01, 2.0, log=True),
+        "spatial_smoothing_sigma": trial.suggest_float("spatial_smoothing_sigma", 0.0, 5.0),
+        "soft_boundary_sigma": trial.suggest_float("soft_boundary_sigma", 0.0, 3.0),
         "sigma_max": trial.suggest_float("sigma_max", 0.05, 2.0, log=True),
         "noise_schedule": trial.suggest_categorical("noise_schedule", ["annealed", "constant", "cosine"]),
         "use_projection": trial.suggest_categorical("use_projection", [True, False]),
@@ -167,6 +171,8 @@ def suggest_fig_params(trial: optuna.Trial) -> dict[str, Any]:
     return {
         "sampler": "fig",
         "sigma_obs": trial.suggest_float("sigma_obs", 0.01, 2.0, log=True),
+        "spatial_smoothing_sigma": trial.suggest_float("spatial_smoothing_sigma", 0.0, 5.0),
+        "soft_boundary_sigma": trial.suggest_float("soft_boundary_sigma", 0.0, 3.0),
         "step_size_c": trial.suggest_float("step_size_c", 0.5, 100.0, log=True),
         "k_steps": trial.suggest_int("k_steps", 1, 10),
         "noise_scale_w": trial.suggest_float("noise_scale_w", 0.0, 2.0),
@@ -179,10 +185,24 @@ def suggest_ictm_params(trial: optuna.Trial) -> dict[str, Any]:
     return {
         "sampler": "ictm",
         "sigma_obs": trial.suggest_float("sigma_obs", 0.01, 2.0, log=True),
+        "spatial_smoothing_sigma": trial.suggest_float("spatial_smoothing_sigma", 0.0, 5.0),
+        "soft_boundary_sigma": trial.suggest_float("soft_boundary_sigma", 0.0, 3.0),
         "r_max": trial.suggest_float("r_max", 0.05, 5.0, log=True),
         "r_schedule": trial.suggest_categorical("r_schedule", ["constant", "decreasing", "increasing", "cosine"]),
         "n_inner_steps": trial.suggest_int("n_inner_steps", 1, 10),
         "inner_lr": trial.suggest_float("inner_lr", 0.005, 1.0, log=True),
+    }
+
+
+def suggest_mcg_params(trial: optuna.Trial) -> dict[str, Any]:
+    """Suggest MCG (Manifold Constrained Gradient) hyperparameters."""
+    return {
+        "sampler": "mcg",
+        "sigma_obs": trial.suggest_float("sigma_obs", 0.005, 2.0, log=True),
+        "spatial_smoothing_sigma": trial.suggest_float("spatial_smoothing_sigma", 0.0, 5.0),
+        "soft_boundary_sigma": trial.suggest_float("soft_boundary_sigma", 0.0, 3.0),
+        "fresh_noise": trial.suggest_categorical("fresh_noise", [True, False]),
+        "n_forward_steps": trial.suggest_int("n_forward_steps", 1, 5),
     }
 
 
@@ -192,6 +212,7 @@ SUGGEST_FUNCS: dict[str, Any] = {
     "sde": suggest_sde_params,
     "fig": suggest_fig_params,
     "ictm": suggest_ictm_params,
+    "mcg": suggest_mcg_params,
 }
 
 METHODS = list(SUGGEST_FUNCS.keys())
@@ -687,5 +708,348 @@ def _reconstruct_method_params(method: str, optuna_params: dict) -> dict[str, An
             "inner_lr": p["inner_lr"],
         }
 
+    elif method == "mcg":
+        return {
+            "sampler": "mcg",
+            "sigma_obs": p["sigma_obs"],
+            "spatial_smoothing_sigma": p.get("spatial_smoothing_sigma", 0.0),
+            "soft_boundary_sigma": p.get("soft_boundary_sigma", 0.0),
+            "fresh_noise": p.get("fresh_noise", True),
+            "n_forward_steps": p.get("n_forward_steps", 1),
+        }
+
     else:
         raise ValueError(f"Unknown method: {method}")
+
+
+# ── Multi-objective tuning (NSGA-II) ───────────────────────────────────
+
+
+class MultiObjectivePosteriorObjective:
+    """NSGA-II multi-objective for posterior sampler tuning.
+
+    Returns 3 objectives (all minimize):
+    - pw_rmse_away: pressure-weighted RMSE at unobserved locations
+    - obs_residual_xco2: column XCO2 RMSE at observed locations
+    - roughness: spatial roughness of column XCO2 ensemble mean
+
+    Parameters
+    ----------
+    model, dataset, method, base_config, grid_info, target_vars,
+    n_targets, n_samples, run_dir, device: same as PosteriorSamplerObjective.
+    nan_penalty : float
+        Additive penalty per objective for NaN fraction.
+    """
+
+    def __init__(
+        self,
+        model: Any,
+        dataset: Any,
+        method: str,
+        base_config: GenerateConfig,
+        grid_info: Any,
+        target_vars: list[str] | None = None,
+        n_targets: int = 10,
+        n_samples: int = 10,
+        nan_penalty: float = 100.0,
+        run_dir: Path | str = "tuning_runs",
+        device: str = "cuda",
+    ):
+        if method not in SUGGEST_FUNCS:
+            raise ValueError(f"Unknown method '{method}'. Choose from: {METHODS}")
+
+        self.model = model
+        self.dataset = dataset
+        self.method = method
+        self.base_config = base_config
+        self.grid_info = grid_info
+        self.target_vars = target_vars or ["co2massmix"]
+        self.n_targets = min(n_targets, len(dataset))
+        self.n_samples = n_samples
+        self.nan_penalty = nan_penalty
+        self.run_dir = Path(run_dir)
+        self.device = device
+
+        self.pressure_weights = compute_pressure_weights(grid_info.levels)
+        self.cos_lat_weights = np.cos(np.deg2rad(grid_info.lat))
+
+    def __call__(self, trial: optuna.Trial) -> tuple[float, float, float]:
+        """Run a single Optuna trial. Returns (rmse_away, obs_residual, roughness)."""
+        suggest_fn = SUGGEST_FUNCS[self.method]
+        method_params = suggest_fn(trial)
+
+        config = _build_generate_config(method_params, self.base_config)
+        generate_kwargs = compat_to_generate_kwargs(config)
+
+        trial_dir = self.run_dir / f"trial_{trial.number:04d}"
+        trial_dir.mkdir(parents=True, exist_ok=True)
+
+        trial_config = {"trial_number": trial.number, "method": self.method, "params": method_params}
+        with open(trial_dir / "trial_config.json", "w") as f:
+            json.dump(trial_config, f, indent=2, default=str)
+
+        logger.info("Trial %d [%s]: %s", trial.number, self.method, method_params)
+
+        try:
+            rmses_away = []
+            obs_residuals = []
+            roughness_values = []
+            total_samples = 0
+            nan_samples = 0
+
+            for target_idx in range(self.n_targets):
+                result = self._evaluate_target(target_idx, generate_kwargs, trial_dir)
+                total_samples += result["n_total"]
+                nan_samples += result["n_total"] - result["n_valid"]
+                if result["rmse_away"] is not None:
+                    rmses_away.append(result["rmse_away"])
+                if result["obs_residual"] is not None:
+                    obs_residuals.append(result["obs_residual"])
+                if result["roughness"] is not None:
+                    roughness_values.append(result["roughness"])
+
+            nan_fraction = nan_samples / max(total_samples, 1)
+            penalty = self.nan_penalty * nan_fraction
+
+            obj_rmse_away = (float(np.mean(rmses_away)) if rmses_away else float("inf")) + penalty
+            obj_obs_residual = (float(np.mean(obs_residuals)) if obs_residuals else float("inf")) + penalty
+            obj_roughness = (float(np.mean(roughness_values)) if roughness_values else float("inf")) + penalty
+
+            trial_info = {
+                "trial_number": trial.number,
+                "method": self.method,
+                "params": method_params,
+                "rmse_away": obj_rmse_away,
+                "obs_residual": obj_obs_residual,
+                "roughness": obj_roughness,
+                "nan_fraction": nan_fraction,
+                "status": "complete",
+            }
+            with open(trial_dir / "trial_info.json", "w") as f:
+                json.dump(trial_info, f, indent=2, default=str)
+
+            logger.info(
+                "Trial %d: rmse_away=%.4f, obs_res=%.4f, rough=%.4f",
+                trial.number,
+                obj_rmse_away,
+                obj_obs_residual,
+                obj_roughness,
+            )
+            return obj_rmse_away, obj_obs_residual, obj_roughness
+
+        except Exception as e:
+            logger.error("Trial %d failed: %s", trial.number, e, exc_info=True)
+            return float("inf"), float("inf"), float("inf")
+
+    def _evaluate_target(
+        self,
+        target_idx: int,
+        generate_kwargs: dict,
+        trial_dir: Path,
+    ) -> dict:
+        """Generate ensemble for one target and compute multi-objective metrics."""
+        import tempfile
+
+        from neural_transport.inference.metrics import (
+            compute_xco2_column,
+            spatial_roughness,
+        )
+        from neural_transport.inference.metrics import (
+            rmse_away as _rmse_away,
+        )
+
+        gk = dict(generate_kwargs)
+        gk["n_samples"] = self.n_samples
+        gk["condition_one_timestep"] = True
+
+        with tempfile.TemporaryDirectory(prefix=f"trial{trial_dir.name}_t{target_idx}_") as tmp:
+            pipeline = GenerationPipeline(
+                self.model,
+                self.dataset,
+                target_vars_3d=self.target_vars,
+                device=self.device,
+                verbose=False,
+            )
+            ds_pred = pipeline.run(tmp, freq="QS", rollout=False, save_obs=False, **gk)
+
+        target_var = self.target_vars[0]
+        pred = ds_pred[target_var]
+        if "trajectory_steps" in pred.dims:
+            pred = pred.isel(trajectory_steps=-1)
+        if "time" in pred.dims:
+            pred = pred.isel(time=0)
+
+        samples_np = pred.values
+        n_total = samples_np.shape[0]
+        if samples_np.ndim == 3:
+            samples_np = samples_np.reshape(n_total, self.grid_info.nlat, self.grid_info.nlon, -1)
+
+        valid_mask = np.isfinite(samples_np).all(axis=(1, 2, 3))
+        n_valid = int(valid_mask.sum())
+
+        if n_valid == 0:
+            return {"rmse_away": None, "obs_residual": None, "roughness": None, "n_valid": 0, "n_total": n_total}
+
+        ensemble_mean = samples_np[valid_mask].mean(axis=0)
+
+        # Ground truth
+        gt = self.dataset[0][target_var].numpy()
+        if gt.ndim == 3:
+            gt = gt[0]
+        gt_2d = gt.reshape(self.grid_info.nlat, self.grid_info.nlon, -1)
+
+        # Get obs mask from the generation output
+        mask_2d = None
+        if "obs_mask" in ds_pred:
+            mask_raw = ds_pred["obs_mask"].values
+            # obs_mask may have extra dims (sample, time, etc.) — squeeze to 2D
+            while mask_raw.ndim > 2:
+                mask_raw = mask_raw[0]
+            if mask_raw.size == self.grid_info.nlat * self.grid_info.nlon:
+                mask_2d = mask_raw.reshape(self.grid_info.nlat, self.grid_info.nlon).astype(bool)
+
+        # 1. RMSE at unobserved locations
+        val_rmse_away = _rmse_away(ensemble_mean, gt_2d, mask_2d)
+
+        # 2. Column XCO2 obs residual
+        val_obs_residual = None
+        if mask_2d is not None and mask_2d.any():
+            xco2_pred = compute_xco2_column(ensemble_mean, self.pressure_weights, np.ones_like(self.pressure_weights))
+            xco2_gt = compute_xco2_column(gt_2d, self.pressure_weights, np.ones_like(self.pressure_weights))
+            diff = xco2_pred - xco2_gt
+            val_obs_residual = float(np.sqrt(np.mean(diff[mask_2d] ** 2)))
+
+        # 3. Spatial roughness of column XCO2
+        val_roughness = None
+        xco2_ens = compute_xco2_column(ensemble_mean, self.pressure_weights, np.ones_like(self.pressure_weights))
+        if xco2_ens.ndim == 2:
+            rough = spatial_roughness(xco2_ens)
+            val_roughness = (rough["roughness_lat"] + rough["roughness_lon"]) / 2.0
+
+        return {
+            "rmse_away": val_rmse_away if np.isfinite(val_rmse_away) else None,
+            "obs_residual": val_obs_residual,
+            "roughness": val_roughness,
+            "n_valid": n_valid,
+            "n_total": n_total,
+        }
+
+
+def select_from_pareto(
+    study: optuna.Study,
+    obs_residual_threshold: float = 0.5,
+) -> list[optuna.trial.FrozenTrial]:
+    """Select trials from Pareto front satisfying obs_residual constraint.
+
+    Filters Pareto-optimal trials where obs_residual (objective 1) is below
+    the threshold, then sorts by rmse_away (objective 0).
+
+    Parameters
+    ----------
+    study : optuna.Study
+        Multi-objective study with 3 directions.
+    obs_residual_threshold : float
+        Maximum allowed obs_residual_xco2.
+
+    Returns
+    -------
+    list[FrozenTrial] — filtered and sorted Pareto-optimal trials.
+    """
+    pareto_trials = study.best_trials  # Pareto front
+    filtered = [t for t in pareto_trials if t.values[1] <= obs_residual_threshold]
+    filtered.sort(key=lambda t: t.values[0])  # sort by rmse_away
+    return filtered
+
+
+def run_multi_objective_study(
+    method: str,
+    model: Any,
+    dataset: Any,
+    grid_info: Any,
+    base_config: GenerateConfig,
+    study_name: str,
+    storage: str,
+    run_dir: Path | str,
+    *,
+    target_vars: list[str] | None = None,
+    n_trials: int = 100,
+    n_targets: int = 10,
+    n_samples: int = 10,
+    nan_penalty: float = 100.0,
+    device: str = "cuda",
+    seed: int = 42,
+) -> optuna.Study:
+    """Create and run an NSGA-II multi-objective study for posterior sampling.
+
+    Returns
+    -------
+    optuna.Study with 3 objectives: rmse_away, obs_residual, roughness.
+    """
+    import random
+    import time
+
+    run_dir = Path(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    sampler = optuna.samplers.NSGAIISampler(seed=seed)
+
+    for attempt in range(10):
+        try:
+            study = optuna.create_study(
+                study_name=study_name,
+                storage=storage,
+                directions=["minimize", "minimize", "minimize"],
+                sampler=sampler,
+                load_if_exists=True,
+            )
+            break
+        except Exception as e:
+            if attempt == 9:
+                raise
+            wait = random.uniform(1, 5 * (attempt + 1))
+            logger.warning("Study creation attempt %d failed (%s), retrying in %.1fs", attempt + 1, e, wait)
+            time.sleep(wait)
+
+    objective = MultiObjectivePosteriorObjective(
+        model=model,
+        dataset=dataset,
+        method=method,
+        base_config=base_config,
+        grid_info=grid_info,
+        target_vars=target_vars,
+        n_targets=n_targets,
+        n_samples=n_samples,
+        nan_penalty=nan_penalty,
+        run_dir=run_dir,
+        device=device,
+    )
+
+    study.optimize(objective, n_trials=n_trials, catch=(Exception,))
+
+    n_complete = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
+    logger.info(
+        "Multi-objective study '%s' done: %d trials (%d complete)",
+        study_name,
+        len(study.trials),
+        n_complete,
+    )
+
+    if n_complete > 0:
+        pareto = study.best_trials
+        logger.info("Pareto front: %d trials", len(pareto))
+
+        summary = {
+            "study_name": study_name,
+            "method": method,
+            "n_trials": len(study.trials),
+            "n_complete": n_complete,
+            "n_pareto": len(pareto),
+            "pareto_trials": [
+                {"number": t.number, "values": t.values, "params": t.params}
+                for t in pareto[:10]  # top 10
+            ],
+        }
+        with open(run_dir / "study_summary.json", "w") as f:
+            json.dump(summary, f, indent=2, default=str)
+
+    return study

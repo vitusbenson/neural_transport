@@ -142,6 +142,79 @@ def spatial_roughness(field_2d):
     }
 
 
+def gradient_at_boundary(field_2d, mask_2d):
+    """Ratio of spatial gradient magnitude at mask boundary vs interior.
+
+    A ratio >> 1 indicates sharp discontinuities at the observation mask edge
+    (e.g., orbit-track stripe artifacts).
+
+    Parameters
+    ----------
+    field_2d : np.ndarray, shape [nlat, nlon]
+    mask_2d : np.ndarray, shape [nlat, nlon], bool
+
+    Returns
+    -------
+    dict with 'gradient_ratio', 'gradient_boundary', 'gradient_interior'.
+    Returns NaN if boundary or interior is too small.
+    """
+    # Compute gradient magnitude via finite differences
+    grad_lat = np.diff(field_2d, axis=0)  # [nlat-1, nlon]
+    grad_lon = np.diff(field_2d, axis=1)  # [nlat, nlon-1]
+    # Pad to original size (repeat last row/col)
+    grad_lat = np.concatenate([grad_lat, grad_lat[-1:, :]], axis=0)
+    grad_lon = np.concatenate([grad_lon, grad_lon[:, -1:]], axis=1)
+    grad_mag = np.sqrt(grad_lat**2 + grad_lon**2)
+
+    # Boundary = mask edge (dilated mask XOR original mask)
+    from scipy.ndimage import binary_dilation
+
+    dilated = binary_dilation(mask_2d, iterations=1)
+    boundary = dilated & ~mask_2d  # 1-pixel band outside the mask edge
+
+    # Interior = not boundary and not within 2 pixels of boundary
+    far_from_boundary = ~binary_dilation(boundary, iterations=2)
+    interior = far_from_boundary
+
+    n_boundary = boundary.sum()
+    n_interior = interior.sum()
+
+    if n_boundary < 5 or n_interior < 5:
+        return {"gradient_ratio": np.nan, "gradient_boundary": np.nan, "gradient_interior": np.nan}
+
+    g_boundary = float(np.mean(grad_mag[boundary]))
+    g_interior = float(np.mean(grad_mag[interior]))
+    ratio = g_boundary / max(g_interior, 1e-12)
+
+    return {"gradient_ratio": ratio, "gradient_boundary": g_boundary, "gradient_interior": g_interior}
+
+
+def xco2_obs_residual(ensemble_mean, gt, mask_2d, pressure_weights, ak):
+    """Column XCO2 RMSE at observed locations.
+
+    Computes XCO2 for both ensemble mean and GT, then measures RMSE
+    only at observed spatial locations.
+
+    Parameters
+    ----------
+    ensemble_mean : np.ndarray, shape [nlat, nlon, nlev]
+    gt : np.ndarray, shape [nlat, nlon, nlev]
+    mask_2d : np.ndarray, shape [nlat, nlon], bool
+    pressure_weights : np.ndarray, shape [nlat, nlon, nlev] or [nlev]
+    ak : np.ndarray, shape [nlat, nlon, nlev] or [nlev]
+
+    Returns
+    -------
+    float — RMSE of column XCO2 at observed locations, or NaN.
+    """
+    if mask_2d is None or not mask_2d.any():
+        return np.nan
+    xco2_pred = compute_xco2_column(ensemble_mean, pressure_weights, ak)
+    xco2_gt = compute_xco2_column(gt, pressure_weights, ak)
+    diff = xco2_pred - xco2_gt
+    return float(np.sqrt(np.mean(diff[mask_2d] ** 2)))
+
+
 @dataclass
 class MetricsResult:
     """Structured container for all OSSE evaluation metrics."""
@@ -160,6 +233,8 @@ class MetricsResult:
     sample_spread: float = np.nan
     crps_mean: float = np.nan
     calibration_error: float = np.nan
+    gradient_ratio: float = np.nan
+    xco2_obs_residual: float = np.nan
 
     def to_dict(self):
         return asdict(self)

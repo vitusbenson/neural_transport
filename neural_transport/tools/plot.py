@@ -384,6 +384,7 @@ def plots_val_step(
     vertical_levels="l10",
     max_workers=32,
     plot_every_n_epochs=1,
+    save_val_ds=False,
 ):
     ds = create_val_step_dataset(preds, batch, dataset=dataset, grid=grid, vertical_levels=vertical_levels)
 
@@ -393,14 +394,15 @@ def plots_val_step(
             ds[f"{molecule}molemix_next"] = massmix_to_molemix(ds[f"{molecule}massmix_next"])
             ds[f"{molecule}molemix_pred"] = massmix_to_molemix(ds[f"{molecule}massmix_pred"])
 
-    try:
-        outpath = Path(logger_experiment.log_dir) / "val_ds" / f"ds_{current_epoch}.nc"
-        outpath.parent.mkdir(exist_ok=True, parents=True)
-        if outpath.exists():
-            outpath.unlink()
-        ds.to_netcdf(outpath)
-    except TypeError:
-        print("Not saving Val Set")
+    if save_val_ds:
+        try:
+            outpath = Path(logger_experiment.log_dir) / "val_ds" / f"ds_{current_epoch}.nc"
+            outpath.parent.mkdir(exist_ok=True, parents=True)
+            if outpath.exists():
+                outpath.unlink()
+            ds.to_netcdf(outpath)
+        except TypeError:
+            print("Not saving Val Set")
 
     if current_epoch % plot_every_n_epochs != 0:
         return

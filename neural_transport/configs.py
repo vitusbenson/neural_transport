@@ -24,7 +24,7 @@ DEFAULT_TARGET_PRESSURES = (1013, 843, 441, 73)
 MAX_N_DISTRIBUTIONAL = 200  # distributional_metrics.py:50,79,309,353
 
 # Known sampler names (None = ODE baseline)
-KNOWN_SAMPLERS = {"flowdps", "sde", "fig", "ictm"}
+KNOWN_SAMPLERS = {"flowdps", "sde", "fig", "ictm", "mcg"}
 
 
 # ── Dataclasses ──────────────────────────────────────────────────────────
@@ -37,6 +37,7 @@ class SamplerParams:
     # Shared
     sigma_obs: float = 0.1
     spatial_smoothing_sigma: float = 0.0
+    soft_boundary_sigma: float = 0.0  # Gaussian blur of obs mask → soft [0,1] weights (0 = binary mask)
     fresh_noise: bool = True
 
     # SDE
@@ -58,6 +59,9 @@ class SamplerParams:
     r_schedule: str = "decreasing"
     n_inner_steps: int = 1
     inner_lr: float = 0.1
+
+    # MCG (Manifold Constrained Gradient)
+    n_forward_steps: int = 1  # 1 = single Tweedie, >1 = multi-step Euler forward shooting
 
 
 @dataclass

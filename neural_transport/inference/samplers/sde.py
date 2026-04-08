@@ -116,8 +116,11 @@ class StochasticPosteriorSampler(PosteriorSampler):
             h_ak = fm._get_h_ak_for_x(x_t)
 
             xco2_hat = fm.forward(x_hat)
-            obs_safe = torch.where(self.obs_mask, self.obs_values.detach(), torch.zeros_like(xco2_hat))
-            column_error = torch.where(self.obs_mask, obs_safe - xco2_hat, torch.zeros_like(xco2_hat))
+            if self.obs_weight is not None:
+                column_error = self.obs_weight * (self.obs_values.detach() - xco2_hat)
+            else:
+                obs_safe = torch.where(self.obs_mask, self.obs_values.detach(), torch.zeros_like(xco2_hat))
+                column_error = torch.where(self.obs_mask, obs_safe - xco2_hat, torch.zeros_like(xco2_hat))
 
             if self.spatial_smoothing_sigma > 0:
                 column_error = _gaussian_smooth_2d(column_error, self.spatial_smoothing_sigma)

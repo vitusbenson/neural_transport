@@ -97,10 +97,12 @@ class TestSuggestFunctions:
         # Use a fixed trial via enqueue
         return optuna.trial.FixedTrial(
             {
-                # DPS
+                # Shared
                 "sigma_obs": 0.5,
-                "guidance_scale": 1.0,
                 "spatial_smoothing_sigma": 2.0,
+                "soft_boundary_sigma": 1.0,
+                # DPS
+                "guidance_scale": 1.0,
                 "masking_time": "none",
                 # FlowDPS
                 "fresh_noise": True,
@@ -123,11 +125,13 @@ class TestSuggestFunctions:
                 "inner_lr": 0.1,
                 # DPS conditional
                 "t_threshold": 0.9,
+                # MCG
+                "n_forward_steps": 2,
             }
         )
 
     def test_all_methods_present(self):
-        assert set(METHODS) == {"dps", "flowdps", "sde", "fig", "ictm"}
+        assert set(METHODS) == {"dps", "flowdps", "sde", "fig", "ictm", "mcg"}
 
     def test_suggest_dps(self, mock_trial):
         params = SUGGEST_FUNCS["dps"](mock_trial)
@@ -159,6 +163,18 @@ class TestSuggestFunctions:
         assert params["sampler"] == "ictm"
         assert "r_max" in params
         assert "n_inner_steps" in params
+
+    def test_suggest_mcg(self, mock_trial):
+        params = SUGGEST_FUNCS["mcg"](mock_trial)
+        assert params["sampler"] == "mcg"
+        assert "n_forward_steps" in params
+        assert "soft_boundary_sigma" in params
+
+    @pytest.mark.parametrize("method", METHODS)
+    def test_all_suggest_have_soft_boundary_sigma(self, mock_trial, method):
+        """All suggest functions should include soft_boundary_sigma."""
+        params = SUGGEST_FUNCS[method](mock_trial)
+        assert "soft_boundary_sigma" in params
 
 
 # ── Config building ──────────────────────────────────────────────────────
@@ -202,6 +218,7 @@ class TestReconstructMethodParams:
             "sigma_obs": 0.5,
             "guidance_scale": 1.0,
             "spatial_smoothing_sigma": 0.0,
+            "soft_boundary_sigma": 1.0,
             "masking_time": "none",
             "fresh_noise": True,
             "steps": 21,
@@ -217,7 +234,29 @@ class TestReconstructMethodParams:
             "r_schedule": "decreasing",
             "n_inner_steps": 2,
             "inner_lr": 0.1,
+            "n_forward_steps": 2,
         }
         result = _reconstruct_method_params(method, flat_params)
         assert isinstance(result, dict)
         assert "sampler" in result or (method == "dps" and result.get("sampler") is None)
+
+
+class TestMultiObjective:
+    def test_select_from_pareto_empty(self):
+        import optuna
+
+        from neural_transport.inference.tuning import select_from_pareto
+
+        study = optuna.create_study(directions=["minimize", "minimize", "minimize"])
+        result = select_from_pareto(study, obs_residual_threshold=0.5)
+        assert result == []
+
+    def test_multi_objective_class_exists(self):
+        from neural_transport.inference.tuning import MultiObjectivePosteriorObjective
+
+        assert callable(MultiObjectivePosteriorObjective)
+
+    def test_run_multi_objective_study_exists(self):
+        from neural_transport.inference.tuning import run_multi_objective_study
+
+        assert callable(run_multi_objective_study)

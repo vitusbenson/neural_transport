@@ -198,7 +198,7 @@ class TestODESampler:
 class TestSamplerInterface:
     """Interface tests parametrized over all sampler types."""
 
-    @pytest.fixture(params=["ode", "flowdps", "sde", "fig", "ictm"])
+    @pytest.fixture(params=["ode", "flowdps", "sde", "fig", "ictm", "mcg"])
     def sampler_instance(self, request, mock_velocity_wrapper, sample_masking_config):
         if request.param == "ode":
             return ODESampler(velocity_model=mock_velocity_wrapper, method="euler")
@@ -221,6 +221,14 @@ class TestSamplerInterface:
             return ICTMSampler(
                 velocity_model=mock_velocity_wrapper,
                 masking_config=sample_masking_config,
+            )
+        elif request.param == "mcg":
+            from neural_transport.inference.samplers.mcg import MCGSampler
+
+            return MCGSampler(
+                velocity_model=mock_velocity_wrapper,
+                masking_config=sample_masking_config,
+                n_forward_steps=1,
             )
 
     @pytest.mark.quick
@@ -253,6 +261,73 @@ class TestSamplerInterface:
 
         result = sampler_instance.sample(x_init, time_grid)
         assert torch.isfinite(result).all()
+
+
+# ── MCG-specific tests ─────────────────────────────────────────────────
+
+
+class TestMCGForwardShooting:
+    B, C, H, W = 2, 5, 4, 8
+
+    @pytest.mark.quick
+    def test_single_step_finite(self, mock_velocity_wrapper, sample_masking_config):
+        from neural_transport.inference.samplers.mcg import MCGSampler
+
+        sampler = MCGSampler(
+            velocity_model=mock_velocity_wrapper,
+            masking_config=sample_masking_config,
+            n_forward_steps=1,
+        )
+        x_init = torch.randn(self.B, self.C, self.H, self.W)
+        result = sampler.sample(x_init, torch.linspace(0, 1, 6))
+        assert torch.isfinite(result).all()
+
+    @pytest.mark.quick
+    def test_multi_step_finite(self, mock_velocity_wrapper, sample_masking_config):
+        from neural_transport.inference.samplers.mcg import MCGSampler
+
+        sampler = MCGSampler(
+            velocity_model=mock_velocity_wrapper,
+            masking_config=sample_masking_config,
+            n_forward_steps=3,
+        )
+        x_init = torch.randn(self.B, self.C, self.H, self.W)
+        result = sampler.sample(x_init, torch.linspace(0, 1, 6))
+        assert torch.isfinite(result).all()
+
+    @pytest.mark.quick
+    def test_multi_step_correct_shape(self, mock_velocity_wrapper, sample_masking_config):
+        from neural_transport.inference.samplers.mcg import MCGSampler
+
+        sampler = MCGSampler(
+            velocity_model=mock_velocity_wrapper,
+            masking_config=sample_masking_config,
+            n_forward_steps=3,
+        )
+        x_init = torch.randn(self.B, self.C, self.H, self.W)
+        result = sampler.sample(x_init, torch.linspace(0, 1, 6))
+        assert result.shape == (self.B, self.C, self.H, self.W)
+
+    @pytest.mark.quick
+    def test_backward_compat_kwargs(self, mock_velocity_wrapper, sample_masking_config):
+        """Old manifold_alpha/n_manifold_steps kwargs should be accepted silently."""
+        from neural_transport.inference.samplers.mcg import MCGSampler
+
+        sampler = MCGSampler(
+            velocity_model=mock_velocity_wrapper,
+            masking_config=sample_masking_config,
+            manifold_alpha=0.5,
+            n_manifold_steps=2,
+        )
+        assert sampler.n_forward_steps == 1  # default, old params ignored
+
+    @pytest.mark.quick
+    def test_create_sampler_mcg(self, mock_velocity_wrapper, sample_masking_config):
+        sampler = create_sampler("mcg", mock_velocity_wrapper, sample_masking_config, n_forward_steps=2)
+        from neural_transport.inference.samplers.mcg import MCGSampler
+
+        assert isinstance(sampler, MCGSampler)
+        assert sampler.n_forward_steps == 2
 
 
 # ── create_sampler factory ──────────────────────────────────────────────

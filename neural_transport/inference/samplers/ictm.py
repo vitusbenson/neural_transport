@@ -106,8 +106,11 @@ class ICTMSampler(PosteriorSampler):
         for _ in range(self.n_inner_steps):
             # Observation gradient: H^T(H(x) - y) / sigma_obs^2
             xco2_x = fm.forward(x)
-            obs_safe = torch.where(self.obs_mask, self.obs_values.detach(), torch.zeros_like(xco2_x))
-            column_error = torch.where(self.obs_mask, xco2_x - obs_safe, torch.zeros_like(xco2_x))
+            if self.obs_weight is not None:
+                column_error = self.obs_weight * (xco2_x - self.obs_values.detach())
+            else:
+                obs_safe = torch.where(self.obs_mask, self.obs_values.detach(), torch.zeros_like(xco2_x))
+                column_error = torch.where(self.obs_mask, xco2_x - obs_safe, torch.zeros_like(xco2_x))
 
             if self.spatial_smoothing_sigma > 0:
                 column_error = _gaussian_smooth_2d(column_error, self.spatial_smoothing_sigma)

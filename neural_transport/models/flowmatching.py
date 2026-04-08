@@ -53,6 +53,12 @@ _SAMPLER_KWARGS_MAP = {
         "n_inner_steps",
         "inner_lr",
     ],
+    "mcg": [
+        "sigma_obs",
+        "spatial_smoothing_sigma",
+        "fresh_noise",
+        "n_forward_steps",
+    ],
 }
 
 
@@ -102,6 +108,8 @@ class MaskedVelocityWrapper(VelocityWrapper):
         self.ak = masking_config.get("ak", None)
         self.pressure_weights = masking_config.get("pressure_weights", None)
         self.time_grid = masking_config.get("time_grid", None)
+        # Soft obs_weight: float [0,1] field (from gaussian blur of binary mask)
+        self.obs_weight = masking_config.get("obs_weight", None)
 
         self.masking_time = generate_kwargs.get("masking_time", None)
         self.t_threshold = generate_kwargs.get("t_threshold", 0.9)
@@ -153,7 +161,10 @@ class MaskedVelocityWrapper(VelocityWrapper):
         mask_weight = get_temporal_weight(t, self.masking_time, self.t_threshold)
 
         v_obs = mask_weight * target_v + (1.0 - mask_weight) * v
-        v_projected = torch.where(self.obs_mask, v_obs, v)
+        if self.obs_weight is not None:
+            v_projected = self.obs_weight * v_obs + (1.0 - self.obs_weight) * v
+        else:
+            v_projected = torch.where(self.obs_mask, v_obs, v)
 
         return v_projected
 
@@ -164,14 +175,20 @@ class MaskedVelocityWrapper(VelocityWrapper):
         if self.ak is not None:
             h_ak = self.forward_model._get_h_ak_for_x(x)
             xco2 = self.forward_model.forward(x)
-            obs_safe = torch.where(self.obs_mask, self.obs_values.detach(), torch.zeros_like(xco2))
-            column_error = torch.where(self.obs_mask, xco2 - obs_safe, torch.zeros_like(xco2))
+            if self.obs_weight is not None:
+                column_error = self.obs_weight * (xco2 - self.obs_values.detach())
+            else:
+                obs_safe = torch.where(self.obs_mask, self.obs_values.detach(), torch.zeros_like(xco2))
+                column_error = torch.where(self.obs_mask, xco2 - obs_safe, torch.zeros_like(xco2))
             if self.spatial_smoothing_sigma > 0:
                 column_error = _gaussian_smooth_2d(column_error, self.spatial_smoothing_sigma)
             guidance = (h_ak / (self.sigma_obs**2)) * column_error
         else:
-            obs_safe = torch.where(self.obs_mask, self.obs_values.detach(), torch.zeros_like(x))
-            guidance = torch.where(self.obs_mask, (x - obs_safe) / (self.sigma_obs**2), torch.zeros_like(x))
+            if self.obs_weight is not None:
+                guidance = self.obs_weight * (x - self.obs_values.detach()) / (self.sigma_obs**2)
+            else:
+                obs_safe = torch.where(self.obs_mask, self.obs_values.detach(), torch.zeros_like(x))
+                guidance = torch.where(self.obs_mask, (x - obs_safe) / (self.sigma_obs**2), torch.zeros_like(x))
             if self.spatial_smoothing_sigma > 0:
                 guidance = _gaussian_smooth_2d(guidance, self.spatial_smoothing_sigma)
 
@@ -195,7 +212,11 @@ class MaskedVelocityWrapper(VelocityWrapper):
             target_v = (self.obs_values - x) / remaining_time
 
         mask_weight = get_temporal_weight(t, self.masking_time, self.t_threshold)
-        v_final = torch.where(self.obs_mask, mask_weight * target_v + (1 - mask_weight) * v, v)
+        v_conditioned = mask_weight * target_v + (1 - mask_weight) * v
+        if self.obs_weight is not None:
+            v_final = self.obs_weight * v_conditioned + (1.0 - self.obs_weight) * v
+        else:
+            v_final = torch.where(self.obs_mask, v_conditioned, v)
         return v_final
 
     def apply_masking(self, x, t):
@@ -457,6 +478,14 @@ class FlowMatching(RegularGridModel):
         target_mean = batch[f"{self.target_vars[0]}_offset"].view(B, 1, 1, 1)
         target_std = batch[f"{self.target_vars[0]}_scale"].view(B, 1, 1, 1)
 
+        # Soft observation weight (float [0,1]) for smooth boundaries
+        obs_weight = None
+        if "obs_weight" in batch:
+            if "xco2_averaging_kernel" in batch:
+                obs_weight = batch["obs_weight"].reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2)
+            else:
+                obs_weight = batch["obs_weight"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)
+
         masking_config = {
             "obs_mask": obs_mask,  # [B 1 Nlat Nlon]
             "obs_values": obs_values,  # [B 1 Nlat Nlon]
@@ -468,6 +497,7 @@ class FlowMatching(RegularGridModel):
             "xco2_prior": xco2_prior,
             "co2_profile_prior": co2_profile_prior,
             "pressure_weights": pressure_weights,  # [B C Nlat Nlon] or None
+            "obs_weight": obs_weight,  # [B 1 Nlat Nlon] float or None
         }
         return masking_config
 

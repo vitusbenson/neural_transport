@@ -74,11 +74,14 @@ class FIGSampler(PosteriorSampler):
         xco2_x = fm.forward(x)  # [B, 1, Nlat, Nlon]
 
         # Column error at observed locations: H(x) - y_t
-        column_error = torch.where(
-            self.obs_mask,
-            xco2_x - y_t,
-            torch.zeros_like(xco2_x),
-        )
+        if self.obs_weight is not None:
+            column_error = self.obs_weight * (xco2_x - y_t)
+        else:
+            column_error = torch.where(
+                self.obs_mask,
+                xco2_x - y_t,
+                torch.zeros_like(xco2_x),
+            )
 
         # Optional spatial smoothing
         if self.spatial_smoothing_sigma > 0:

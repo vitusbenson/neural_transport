@@ -66,6 +66,7 @@ class PosteriorSampler(BaseSampler):
         self.xco2_prior = masking_config.get("xco2_prior", None)
         self.co2_profile_prior = masking_config.get("co2_profile_prior", None)
         self.targshift_mean = masking_config.get("targshift_mean", None)
+        self.obs_weight = masking_config.get("obs_weight", None)
 
         self.forward_model = XCO2ForwardModel.from_masking_config(masking_config)
 
@@ -90,6 +91,7 @@ class PosteriorSampler(BaseSampler):
             self.obs_mask,
             self.sigma_obs,
             self.spatial_smoothing_sigma,
+            obs_weight=self.obs_weight,
         )
 
     def _renoise(self, x_hat_proj: Tensor, t_next: Tensor, z: Tensor) -> Tensor:

@@ -177,13 +177,19 @@ class XCO2ForwardModel:
         return self.h_ak * col_error
 
     def project(
-        self, x_hat: Tensor, obs_values: Tensor, obs_mask: Tensor, sigma: float, spatial_smoothing_sigma: float = 0.0
+        self,
+        x_hat: Tensor,
+        obs_values: Tensor,
+        obs_mask: Tensor,
+        sigma: float,
+        spatial_smoothing_sigma: float = 0.0,
+        obs_weight: Tensor | None = None,
     ) -> Tensor:
         """Pseudoinverse projection onto column measurement manifold.
 
         x_hat_k += (h_k * a_k) * (y - H(x_hat)) / (||h*a||^2 + sigma^2)
 
-        Only modifies at observed locations (via obs_mask).
+        Only modifies at observed locations (via obs_mask or obs_weight).
 
         Parameters
         ----------
@@ -209,9 +215,12 @@ class XCO2ForwardModel:
         # Forward model: H(x_hat)
         xco2_hat = self.forward(x_hat)  # [B, 1, Nlat, Nlon]
 
-        # Column error: y - H(x_hat), zeroed at unobserved locations
-        obs_safe = torch.where(obs_mask, obs_values.detach(), torch.zeros_like(xco2_hat))
-        column_error = torch.where(obs_mask, obs_safe - xco2_hat, torch.zeros_like(xco2_hat))
+        # Column error: y - H(x_hat), weighted by obs_weight or masked by obs_mask
+        if obs_weight is not None:
+            column_error = obs_weight * (obs_values.detach() - xco2_hat)
+        else:
+            obs_safe = torch.where(obs_mask, obs_values.detach(), torch.zeros_like(xco2_hat))
+            column_error = torch.where(obs_mask, obs_safe - xco2_hat, torch.zeros_like(xco2_hat))
 
         # Optional spatial smoothing of column error
         if spatial_smoothing_sigma > 0:
