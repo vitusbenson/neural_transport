@@ -10,7 +10,6 @@ import torch
 from torch import Tensor
 
 from neural_transport.inference.samplers.base import PosteriorSampler
-from neural_transport.tools.spatial import gaussian_smooth_2d as _gaussian_smooth_2d
 
 
 class StochasticPosteriorSampler(PosteriorSampler):
@@ -109,23 +108,11 @@ class StochasticPosteriorSampler(PosteriorSampler):
             # Prior score from Tweedie: score = v_theta / (1 - t)
             score = v_theta / (1.0 - t_scalar).clamp(min=1e-6)
 
-            # Likelihood gradient (same as DPS Phase 5)
+            # Likelihood gradient via shared base class method
+            # _compute_likelihood_gradient returns h_ak * (H(x) - y) / sigma^2
+            # Langevin needs the negative (pointing toward y), so negate
             x_hat = self._tweedie_estimate(x_t, t_tensor, v_theta)
-
-            fm = self.forward_model
-            h_ak = fm._get_h_ak_for_x(x_t)
-
-            xco2_hat = fm.forward(x_hat)
-            if self.obs_weight is not None:
-                column_error = self.obs_weight * (self.obs_values.detach() - xco2_hat)
-            else:
-                obs_safe = torch.where(self.obs_mask, self.obs_values.detach(), torch.zeros_like(xco2_hat))
-                column_error = torch.where(self.obs_mask, obs_safe - xco2_hat, torch.zeros_like(xco2_hat))
-
-            if self.spatial_smoothing_sigma > 0:
-                column_error = _gaussian_smooth_2d(column_error, self.spatial_smoothing_sigma)
-
-            lik_grad = h_ak * column_error / (self.sigma_obs**2)
+            lik_grad = -self._compute_likelihood_gradient(x_hat)
 
             # Langevin step
             noise = torch.randn_like(x_t)

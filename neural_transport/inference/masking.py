@@ -10,6 +10,39 @@ import torch
 from neural_transport.configs import DT_FALLBACK, SATELLITE_TILT_RAD, SWATH_SPACING_FACTOR
 from neural_transport.tools.conversion import molemix_to_massmix
 
+# ── Pressure weight utilities ────────────────────────────────────────────
+
+
+def compute_pressure_weights_from_batch(
+    p_bottom: np.ndarray | torch.Tensor,
+    p_top: np.ndarray | torch.Tensor,
+) -> np.ndarray | torch.Tensor:
+    """Compute column pressure weights h_k = (p_bottom_k - p_top_k) / p_surface.
+
+    This is the canonical computation for pressure weights used in XCO2
+    forward models. The weights are spatially varying because surface
+    pressure varies with topography.
+
+    Parameters
+    ----------
+    p_bottom : array-like, shape [..., nlev]
+        Bottom pressure of each level (hPa). Level 0 = surface.
+    p_top : array-like, shape [..., nlev]
+        Top pressure of each level (hPa).
+
+    Returns
+    -------
+    h_k : same type and shape as input
+        Normalized pressure weights (sum over levels ~ 1 per column).
+    """
+    dp = p_bottom - p_top
+    if isinstance(p_bottom, torch.Tensor):
+        p_surface = p_bottom[..., 0:1].clamp(min=1e-6)
+    else:
+        p_surface = np.maximum(p_bottom[..., 0:1], 1e-6)
+    return dp / p_surface
+
+
 # ── Section A: Mask creation ─────────────────────────────────────────────
 
 

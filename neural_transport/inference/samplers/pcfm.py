@@ -1,13 +1,11 @@
-"""MCG (Manifold Constrained Gradient) posterior sampler — fixed OT-interpolant version.
+"""PCFM (Physics-Constrained Flow Matching) posterior sampler.
 
-Replaces the original manifold projection (Chung et al., NeurIPS 2022) with a
-PCFM-style OT-interpolant approach (Utkarsh et al., 2025, arXiv 2506.04171).
+Reference: Utkarsh et al., 2025, arXiv 2506.04171.
 
-Instead of re-noising + re-velocity (which destroys the conditioning signal),
-we forward-shoot to estimate the clean sample, project onto the column
-measurement manifold, and OT-interpolant back.  With ``n_forward_steps=1``
-this is equivalent to FlowDPS; with ``n_forward_steps>1`` we use multi-step
-Euler integration for a better clean estimate before projection.
+Forward-shoot → column projection → lambda-blend → OT-interpolant re-noise.
+With ``lambda_penalty=1.0`` this is equivalent to MCG (hard projection).
+With ``lambda_penalty<1.0`` the projection is softened, blending the
+projected and unprojected clean estimates.
 """
 
 import torch
@@ -16,14 +14,14 @@ from torch import Tensor
 from neural_transport.inference.samplers.base import PosteriorSampler
 
 
-class MCGSampler(PosteriorSampler):
-    """Manifold-Constrained Gradient posterior sampler (OT-interpolant version).
+class PCFMSampler(PosteriorSampler):
+    """Physics-Constrained Flow Matching posterior sampler.
 
     At each step t_n -> t_{n+1}:
-      1. Forward shoot: estimate clean sample x_hat via Tweedie (n_forward_steps=1)
-         or multi-step Euler integration to t=1 (n_forward_steps>1).
-      2. Column projection: x_hat_proj = project(x_hat, y)
-      3. OT interpolant back: x_{t+1} = (1-t_{n+1})*z + t_{n+1}*x_hat_proj
+      1. Forward shoot: estimate clean sample x_hat via Tweedie or multi-step Euler.
+      2. Column projection: x_hat_proj = project(x_hat, y).
+      3. Lambda blend: x_hat_soft = (1 - lambda) * x_hat + lambda * x_hat_proj.
+      4. OT interpolant back: x_{t+1} = (1 - t_{n+1}) * z + t_{n+1} * x_hat_soft.
 
     Args:
         velocity_model: Unconditional velocity model (forward(x, t) -> v).
@@ -32,6 +30,7 @@ class MCGSampler(PosteriorSampler):
         spatial_smoothing_sigma: Gaussian smoothing of column error (0 = none).
         fresh_noise: If True, draw fresh z each step for re-noising.
         n_forward_steps: Number of Euler steps for forward shooting (1 = single Tweedie).
+        lambda_penalty: Blending weight for projection (1.0 = hard, 0.0 = none).
     """
 
     def __init__(
@@ -42,17 +41,16 @@ class MCGSampler(PosteriorSampler):
         spatial_smoothing_sigma=0.0,
         fresh_noise=True,
         n_forward_steps=1,
-        # Deprecated — kept for backward compat with old configs/Optuna studies
-        manifold_alpha=0.5,
-        n_manifold_steps=1,
+        lambda_penalty=1.0,
     ):
         super().__init__(velocity_model, masking_config, sigma_obs, spatial_smoothing_sigma)
         self.fresh_noise = fresh_noise
         self.n_forward_steps = max(1, int(n_forward_steps))
+        self.lambda_penalty = float(lambda_penalty)
 
     @torch.no_grad()
     def sample(self, x_init: Tensor, time_grid: Tensor, return_intermediates: bool = False) -> Tensor:
-        """Run MCG sampling loop.
+        """Run PCFM sampling loop.
 
         Args:
             x_init: [B, C, Nlat, Nlon] initial noise.
@@ -77,7 +75,11 @@ class MCGSampler(PosteriorSampler):
             # 2. Column projection
             x_hat_proj = self._project_column(x_hat)
 
-            # 3. Re-noise with fresh or fixed noise (OT interpolant back)
+            # 3. Lambda blend: soft constraint relaxation
+            if self.lambda_penalty < 1.0:
+                x_hat_proj = (1.0 - self.lambda_penalty) * x_hat + self.lambda_penalty * x_hat_proj
+
+            # 4. Re-noise with fresh or fixed noise (OT interpolant back)
             if self.fresh_noise and i < len(time_grid) - 2:
                 z = torch.randn_like(x_t)
 

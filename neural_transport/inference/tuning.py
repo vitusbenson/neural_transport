@@ -31,7 +31,6 @@ import numpy as np
 import optuna
 
 from neural_transport.configs import GenerateConfig, compat_to_generate_kwargs
-from neural_transport.inference.generation import GenerationPipeline
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +205,57 @@ def suggest_mcg_params(trial: optuna.Trial) -> dict[str, Any]:
     }
 
 
+def suggest_pcfm_params(trial: optuna.Trial) -> dict[str, Any]:
+    """Suggest PCFM (Physics-Constrained Flow Matching) hyperparameters."""
+    return {
+        "sampler": "pcfm",
+        "sigma_obs": trial.suggest_float("sigma_obs", 0.005, 2.0, log=True),
+        "spatial_smoothing_sigma": trial.suggest_float("spatial_smoothing_sigma", 0.0, 5.0),
+        "soft_boundary_sigma": trial.suggest_float("soft_boundary_sigma", 0.0, 3.0),
+        "fresh_noise": trial.suggest_categorical("fresh_noise", [True, False]),
+        "n_forward_steps": trial.suggest_int("n_forward_steps", 1, 5),
+        "lambda_penalty": trial.suggest_float("lambda_penalty", 0.1, 1.0),
+    }
+
+
+def suggest_fmps_params(trial: optuna.Trial) -> dict[str, Any]:
+    """Suggest FMPS (Flow Matching Posterior Sampling) hyperparameters."""
+    params: dict[str, Any] = {
+        "sampler": "fmps",
+        "sigma_obs": trial.suggest_float("sigma_obs", 0.01, 2.0, log=True),
+        "spatial_smoothing_sigma": trial.suggest_float("spatial_smoothing_sigma", 0.0, 5.0),
+        "soft_boundary_sigma": trial.suggest_float("soft_boundary_sigma", 0.0, 3.0),
+        "guidance_strength": trial.suggest_float("guidance_strength", 0.1, 50.0, log=True),
+        "r_schedule": trial.suggest_categorical("r_schedule", ["linear", "cosine", "constant"]),
+        "svd_rank": trial.suggest_int("svd_rank", 0, 10),
+        "grad_clip_norm": trial.suggest_float("grad_clip_norm", 0.1, 10.0, log=True),
+    }
+    use_spectral = trial.suggest_categorical("use_spectral_filter", [True, False])
+    if use_spectral:
+        params["spectral_k_low"] = trial.suggest_int("spectral_k_low", 2, 8)
+        params["spectral_k_high"] = trial.suggest_int("spectral_k_high", 8, 16)
+    else:
+        params["spectral_k_low"] = 0
+        params["spectral_k_high"] = 0
+    return params
+
+
+def suggest_dflow_params(trial: optuna.Trial) -> dict[str, Any]:
+    """Suggest D-Flow (source optimization) hyperparameters."""
+    return {
+        "sampler": "dflow",
+        "sigma_obs": trial.suggest_float("sigma_obs", 0.01, 2.0, log=True),
+        "spatial_smoothing_sigma": trial.suggest_float("spatial_smoothing_sigma", 0.0, 5.0),
+        "soft_boundary_sigma": trial.suggest_float("soft_boundary_sigma", 0.0, 3.0),
+        "n_opt_steps": trial.suggest_int("n_opt_steps", 10, 200),
+        "lr": trial.suggest_float("lr", 1e-4, 1e-1, log=True),
+        "reg_weight": trial.suggest_float("reg_weight", 1e-3, 10.0, log=True),
+        "reg_type": trial.suggest_categorical("reg_type", ["l2", "norm_diff", "chi_prior"]),
+        "optimizer": trial.suggest_categorical("optimizer", ["adam", "lbfgs"]),
+        "use_checkpointing": trial.suggest_categorical("use_checkpointing", [True, False]),
+    }
+
+
 SUGGEST_FUNCS: dict[str, Any] = {
     "dps": suggest_dps_params,
     "flowdps": suggest_flowdps_params,
@@ -213,6 +263,9 @@ SUGGEST_FUNCS: dict[str, Any] = {
     "fig": suggest_fig_params,
     "ictm": suggest_ictm_params,
     "mcg": suggest_mcg_params,
+    "pcfm": suggest_pcfm_params,
+    "fmps": suggest_fmps_params,
+    "dflow": suggest_dflow_params,
 }
 
 METHODS = list(SUGGEST_FUNCS.keys())
@@ -326,6 +379,11 @@ class PosteriorSamplerObjective:
         self.run_dir = Path(run_dir)
         self.device = device
 
+        # Pre-select diverse target indices (fixed across trials for fair comparison)
+        rng = np.random.RandomState(42)
+        self.target_indices = sorted(rng.choice(len(dataset), size=self.n_targets, replace=False).tolist())
+        logger.info("Evaluation targets (dataset indices): %s", self.target_indices)
+
         # Precompute weights
         self.pressure_weights = compute_pressure_weights(grid_info.levels)
         self.cos_lat_weights = np.cos(np.deg2rad(grid_info.lat))
@@ -353,8 +411,8 @@ class PosteriorSamplerObjective:
             total_samples = 0
             nan_samples = 0
 
-            for target_idx in range(self.n_targets):
-                rmse, n_valid, n_total = self._evaluate_target(target_idx, generate_kwargs, trial_dir)
+            for dataset_idx in self.target_indices:
+                rmse, n_valid, n_total = self._evaluate_target(dataset_idx, generate_kwargs, trial_dir)
                 if rmse is not None:
                     rmses.append(rmse)
                 total_samples += n_total
@@ -410,52 +468,46 @@ class PosteriorSamplerObjective:
 
     def _evaluate_target(
         self,
-        target_idx: int,
+        dataset_idx: int,
         generate_kwargs: dict,
         trial_dir: Path,
     ) -> tuple[float | None, int, int]:
         """Generate ensemble for one target and compute pw-RMSE.
 
+        Uses generate_multi_target (which correctly handles per-target
+        conditioning) on a single target index.
+
+        Args:
+            dataset_idx: Index into self.dataset for this target.
+
         Returns (rmse_or_None, n_valid_samples, n_total_samples).
         """
-        # Override to generate n_samples conditioned on this target
-        gk = dict(generate_kwargs)
-        gk["n_samples"] = self.n_samples
-        gk["condition_one_timestep"] = True
+        from neural_transport.inference.generation import generate_multi_target
 
-        # Use a temp dir for zarr output (we don't need to keep it)
-        with tempfile.TemporaryDirectory(prefix=f"trial{trial_dir.name}_t{target_idx}_") as tmp:
-            # Create pipeline with full dataset but condition on target_idx sample
-            pipeline = GenerationPipeline(
-                self.model,
-                self.dataset,
-                target_vars_3d=self.target_vars,
-                device=self.device,
-                verbose=False,
-            )
-
-            ds_pred = pipeline.run(
-                tmp,
-                freq="QS",
-                rollout=False,
-                save_obs=False,
-                **gk,
-            )
-
-        # Extract samples from the prediction dataset
         target_var = self.target_vars[0]
-        pred = ds_pred[target_var]
-        if "trajectory_steps" in pred.dims:
-            pred = pred.isel(trajectory_steps=-1)
-        if "time" in pred.dims:
-            pred = pred.isel(time=0)
 
-        samples_np = pred.values  # [n_samples, cell, level] or [n_samples, nlat, nlon, level]
+        with tempfile.TemporaryDirectory(prefix=f"trial{trial_dir.name}_t{dataset_idx}_") as tmp:
+            zarr_path = generate_multi_target(
+                model=self.model,
+                dataset=self.dataset,
+                target_indices=[dataset_idx],
+                n_samples_per_target=self.n_samples,
+                batch_size=self.n_samples,
+                generate_kwargs=generate_kwargs,
+                out_dir=tmp,
+                device=self.device,
+                target_var=target_var,
+                verbose=False,
+                seed=dataset_idx,  # different seed per target for diversity
+            )
+
+            import zarr as zarr_lib
+
+            store = zarr_lib.open_group(str(zarr_path), mode="r")
+            samples_np = np.array(store["predictions"])[0]  # [n_samples, nlat, nlon, nlev]
+            gt_np = np.array(store["gt"])[0]  # [nlat, nlon, nlev]
+
         n_total = samples_np.shape[0]
-
-        # Reshape to [n_samples, nlat, nlon, nlev]
-        if samples_np.ndim == 3:
-            samples_np = samples_np.reshape(n_total, self.grid_info.nlat, self.grid_info.nlon, -1)
 
         # Check for NaN/Inf
         valid_mask = np.isfinite(samples_np).all(axis=(1, 2, 3))
@@ -467,15 +519,9 @@ class PosteriorSamplerObjective:
         # Ensemble mean of valid samples
         ensemble_mean = samples_np[valid_mask].mean(axis=0)  # [nlat, nlon, nlev]
 
-        # Ground truth
-        gt = self.dataset[0][target_var].numpy()
-        if gt.ndim == 3:
-            gt = gt[0]  # remove time dim
-        gt_2d = gt.reshape(self.grid_info.nlat, self.grid_info.nlon, -1)
-
         rmse = pressure_weighted_rmse(
             ensemble_mean,
-            gt_2d,
+            gt_np,
             self.pressure_weights,
             self.cos_lat_weights,
         )
@@ -718,6 +764,46 @@ def _reconstruct_method_params(method: str, optuna_params: dict) -> dict[str, An
             "n_forward_steps": p.get("n_forward_steps", 1),
         }
 
+    elif method == "pcfm":
+        return {
+            "sampler": "pcfm",
+            "sigma_obs": p["sigma_obs"],
+            "spatial_smoothing_sigma": p.get("spatial_smoothing_sigma", 0.0),
+            "soft_boundary_sigma": p.get("soft_boundary_sigma", 0.0),
+            "fresh_noise": p.get("fresh_noise", True),
+            "n_forward_steps": p.get("n_forward_steps", 1),
+            "lambda_penalty": p.get("lambda_penalty", 1.0),
+        }
+
+    elif method == "fmps":
+        result = {
+            "sampler": "fmps",
+            "sigma_obs": p["sigma_obs"],
+            "spatial_smoothing_sigma": p.get("spatial_smoothing_sigma", 0.0),
+            "soft_boundary_sigma": p.get("soft_boundary_sigma", 0.0),
+            "guidance_strength": p.get("guidance_strength", 1.0),
+            "r_schedule": p.get("r_schedule", "linear"),
+            "svd_rank": p.get("svd_rank", 0),
+            "grad_clip_norm": p.get("grad_clip_norm", 1.0),
+            "spectral_k_low": p.get("spectral_k_low", 0),
+            "spectral_k_high": p.get("spectral_k_high", 0),
+        }
+        return result
+
+    elif method == "dflow":
+        return {
+            "sampler": "dflow",
+            "sigma_obs": p["sigma_obs"],
+            "spatial_smoothing_sigma": p.get("spatial_smoothing_sigma", 0.0),
+            "soft_boundary_sigma": p.get("soft_boundary_sigma", 0.0),
+            "n_opt_steps": p.get("n_opt_steps", 50),
+            "lr": p.get("lr", 1e-2),
+            "reg_weight": p.get("reg_weight", 1.0),
+            "reg_type": p.get("reg_type", "l2"),
+            "optimizer": p.get("optimizer", "adam"),
+            "use_checkpointing": p.get("use_checkpointing", False),
+        }
+
     else:
         raise ValueError(f"Unknown method: {method}")
 
@@ -770,6 +856,10 @@ class MultiObjectivePosteriorObjective:
         self.run_dir = Path(run_dir)
         self.device = device
 
+        # Pre-select diverse target indices (fixed across trials)
+        rng = np.random.RandomState(42)
+        self.target_indices = sorted(rng.choice(len(dataset), size=self.n_targets, replace=False).tolist())
+
         self.pressure_weights = compute_pressure_weights(grid_info.levels)
         self.cos_lat_weights = np.cos(np.deg2rad(grid_info.lat))
 
@@ -797,8 +887,8 @@ class MultiObjectivePosteriorObjective:
             total_samples = 0
             nan_samples = 0
 
-            for target_idx in range(self.n_targets):
-                result = self._evaluate_target(target_idx, generate_kwargs, trial_dir)
+            for dataset_idx in self.target_indices:
+                result = self._evaluate_target(dataset_idx, generate_kwargs, trial_dir)
                 total_samples += result["n_total"]
                 nan_samples += result["n_total"] - result["n_valid"]
                 if result["rmse_away"] is not None:
@@ -843,13 +933,16 @@ class MultiObjectivePosteriorObjective:
 
     def _evaluate_target(
         self,
-        target_idx: int,
+        dataset_idx: int,
         generate_kwargs: dict,
         trial_dir: Path,
     ) -> dict:
         """Generate ensemble for one target and compute multi-objective metrics."""
         import tempfile
 
+        import zarr as zarr_lib
+
+        from neural_transport.inference.generation import generate_multi_target
         from neural_transport.inference.metrics import (
             compute_xco2_column,
             spatial_roughness,
@@ -858,31 +951,29 @@ class MultiObjectivePosteriorObjective:
             rmse_away as _rmse_away,
         )
 
-        gk = dict(generate_kwargs)
-        gk["n_samples"] = self.n_samples
-        gk["condition_one_timestep"] = True
-
-        with tempfile.TemporaryDirectory(prefix=f"trial{trial_dir.name}_t{target_idx}_") as tmp:
-            pipeline = GenerationPipeline(
-                self.model,
-                self.dataset,
-                target_vars_3d=self.target_vars,
-                device=self.device,
-                verbose=False,
-            )
-            ds_pred = pipeline.run(tmp, freq="QS", rollout=False, save_obs=False, **gk)
-
         target_var = self.target_vars[0]
-        pred = ds_pred[target_var]
-        if "trajectory_steps" in pred.dims:
-            pred = pred.isel(trajectory_steps=-1)
-        if "time" in pred.dims:
-            pred = pred.isel(time=0)
 
-        samples_np = pred.values
+        with tempfile.TemporaryDirectory(prefix=f"trial{trial_dir.name}_t{dataset_idx}_") as tmp:
+            zarr_path = generate_multi_target(
+                model=self.model,
+                dataset=self.dataset,
+                target_indices=[dataset_idx],
+                n_samples_per_target=self.n_samples,
+                batch_size=self.n_samples,
+                generate_kwargs=generate_kwargs,
+                out_dir=tmp,
+                device=self.device,
+                target_var=target_var,
+                verbose=False,
+                seed=dataset_idx,
+            )
+
+            store = zarr_lib.open_group(str(zarr_path), mode="r")
+            samples_np = np.array(store["predictions"])[0]  # [n_samples, nlat, nlon, nlev]
+            gt_2d = np.array(store["gt"])[0]  # [nlat, nlon, nlev]
+            mask_raw = np.array(store["obs_mask"])[0]  # [nlat, nlon] or similar
+
         n_total = samples_np.shape[0]
-        if samples_np.ndim == 3:
-            samples_np = samples_np.reshape(n_total, self.grid_info.nlat, self.grid_info.nlon, -1)
 
         valid_mask = np.isfinite(samples_np).all(axis=(1, 2, 3))
         n_valid = int(valid_mask.sum())
@@ -892,21 +983,10 @@ class MultiObjectivePosteriorObjective:
 
         ensemble_mean = samples_np[valid_mask].mean(axis=0)
 
-        # Ground truth
-        gt = self.dataset[0][target_var].numpy()
-        if gt.ndim == 3:
-            gt = gt[0]
-        gt_2d = gt.reshape(self.grid_info.nlat, self.grid_info.nlon, -1)
-
-        # Get obs mask from the generation output
+        # Obs mask
         mask_2d = None
-        if "obs_mask" in ds_pred:
-            mask_raw = ds_pred["obs_mask"].values
-            # obs_mask may have extra dims (sample, time, etc.) — squeeze to 2D
-            while mask_raw.ndim > 2:
-                mask_raw = mask_raw[0]
-            if mask_raw.size == self.grid_info.nlat * self.grid_info.nlon:
-                mask_2d = mask_raw.reshape(self.grid_info.nlat, self.grid_info.nlon).astype(bool)
+        if mask_raw.size == self.grid_info.nlat * self.grid_info.nlon:
+            mask_2d = mask_raw.reshape(self.grid_info.nlat, self.grid_info.nlon).astype(bool)
 
         # 1. RMSE at unobserved locations
         val_rmse_away = _rmse_away(ensemble_mean, gt_2d, mask_2d)

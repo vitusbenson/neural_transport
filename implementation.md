@@ -1165,25 +1165,274 @@ Compare on 20 targets × 10 samples:
 - Best method + FGPS frequency filtering
 
 ### Checklist
-- [ ] Implement PCFM sampler (`samplers/pcfm.py`), register, add suggest function
-- [ ] Implement FMPS sampler (`samplers/fmps.py`), register, add suggest function
-- [ ] Implement DiffStateGrad as `_project_to_svd_subspace()` in sampler base class
-- [ ] Implement FGPS post-processing in `evaluation/spectral.py` or `inference/filtering.py`
-- [ ] Write tests for all new samplers (shape, no NaN, interface compliance)
-- [ ] Tune each method (single-objective Optuna, 50 trials)
-- [ ] Run ablation experiment (6+ methods × 20 targets × 10 samples)
+- [x] Implement PCFM sampler (`samplers/pcfm.py`), register, add suggest function
+- [x] Implement FMPS sampler (`samplers/fmps.py`), register, add suggest function
+- [x] Implement DiffStateGrad as `_project_to_svd_subspace()` in sampler base class
+- [x] Implement FGPS as `_spectral_filter()` in sampler base class (time-varying low-pass via FFT)
+- [x] Extract `_forward_shoot()` and `_compute_likelihood_gradient()` to `PosteriorSampler` base class (shared by MCG/PCFM and FMPS/SDE)
+- [x] Write tests for all new samplers (87 tests in test_samplers.py, 191 quick tests total, all pass)
+- [x] Create experiment scripts: `run_optuna_v4.py` (SLURM array, 2 tasks), `compare_methods_v4.py` (SLURM array, 7 tasks)
+- [ ] Tune each method (single-objective Optuna, 50 trials) — submit `run_optuna_v4.slurm`
+- [ ] Run ablation experiment (7 methods × 20 targets × 10 samples) — submit `compare_methods_v4.slurm`
 - [ ] Identify best method or combination
 - [ ] Document findings and update Phase 23 results
 
 ---
 
-## Phase 24: E2E Validation — Real OCO-2 Inversion
+## Phase 23f: D-Flow Source Optimization Sampler
+
+**Goal**: Implement D-Flow (arXiv 2402.14017, arXiv 2602.21469) as a posterior sampling method and compare it against FMPS and other methods. D-Flow optimizes the initial noise x₀ by backpropagating through the ODE solver, keeping learned dynamics frozen. This is fundamentally different from velocity-field methods (FMPS, DPS) and project-renoise methods (FlowDPS, MCG, PCFM).
+
+**Algorithm**:
+1. Initialize x₀ from Gaussian noise
+2. For N optimization steps: integrate ODE (t=0→1) with `enable_grad=True`, compute likelihood loss `||H(x₁) - y||² / (2σ²)` + regularization on x₀, backprop and update x₀
+3. Final ODE solve produces output
+
+**Key design**: Uses `flow_matching.solver.ODESolver` with `enable_grad=True` — no custom ODE solver needed. Three regularization options: L2, norm-diff (typical set), chi-prior (chi-squared concentration). Supports Adam and L-BFGS optimizers.
+
+### Checklist
+- [x] Add D-Flow config fields to `configs.py` (KNOWN_SAMPLERS + SamplerParams)
+- [x] Implement `DFlowSampler` in `samplers/dflow.py` using ODESolver with enable_grad
+- [x] Register in `samplers/__init__.py` and `_SAMPLER_KWARGS_MAP`
+- [x] Add `suggest_dflow_params()` to `tuning.py` with Optuna search space
+- [x] Add tests: parametrized fixture, regularization types, optimizer types, intermediates
+- [x] Update experiment scripts: run_optuna.py, compare_methods.py, plot_results.py
+- [x] Update SLURM scripts: run_optuna.slurm (array 0-89), compare_methods.slurm (array 0-9)
+- [x] Create `run_dflow.sh` with SLURM job dependencies (tuning → comparison → plotting)
+- [x] Run D-Flow Optuna tuning (88/100 trials completed, 3 workers timed out at 12h)
+- [x] Analyze results: D-Flow vs FMPS comparison
+- [x] Document findings and update Phase 23 results
+
+### Phase 23f Results (20 targets × 20 samples, best Optuna config)
+
+**Best D-Flow config**: Adam optimizer, L2 regularization, 138 opt steps, lr=0.003, reg_weight=0.14, sigma_obs=0.022, use_checkpointing=True
+
+| Method | pw-RMSE | CRPS | Spread | Skill | Sp/Sk |
+|--------|---------|------|--------|-------|-------|
+| **D-Flow** | **1.44** | **0.66** | 1.01 | 1.44 | 0.70 |
+| **FMPS** | **1.88** | **0.90** | 1.35 | 1.88 | 0.72 |
+| FlowDPS | 2.71 | 1.26 | 2.90 | 2.71 | 1.07 |
+| ICTM | 2.98 | 1.62 | 1.42 | 2.98 | 0.48 |
+| MCG | 3.02 | 1.67 | 1.32 | 3.02 | 0.44 |
+| PCFM | 3.05 | 1.48 | 3.03 | 3.05 | 0.99 |
+| DPS | 3.31 | 1.57 | 2.31 | 3.31 | 0.70 |
+| SDE | 3.47 | 1.69 | 2.59 | 3.47 | 0.75 |
+| FIG | 3.48 | 1.79 | 2.30 | 3.48 | 0.66 |
+
+**Observations**:
+- D-Flow beats FMPS by 23% on pw-RMSE (1.44 vs 1.88) and 27% on CRPS (0.66 vs 0.90)
+- Both D-Flow and FMPS dominate all other methods — gap from #2 to #3 (FlowDPS 2.71) is larger than #1 to #2
+- D-Flow has tighter ensembles (spread 1.01 vs 1.35) — source optimization converges toward a single mode
+- Both are slightly underdispersive (Sp/Sk ~0.70), could benefit from D-Flow SGLD extension (arXiv 2602.21469)
+- Adam strongly preferred over L-BFGS; norm_diff and l2 regularization both work well
+
+---
+
+## Phase 24: Conditional Flow Matching with Transport Priors
+
+**Goal**: Train a new flow matching model that conditions on the CO2 field and wind fields from the previous timestep, providing the model with physical transport priors. This enables auto-regressive trajectory generation and dramatically improves the model's physical consistency compared to the current instantaneous (unconditional) model.
+
+**Motivation**: The current FM model generates CO2 fields from pure noise — it has no knowledge of the previous atmospheric state. By conditioning on the previous CO2 field (with targshift subtracted) and the previous wind fields (u, v), the model learns the *transport step* rather than the full distribution, producing physically consistent temporal evolution.
+
+### Data Configuration
+
+**New forcing variables**: Previous timestep's CO2 (`co2massmix`) and wind fields (`u`, `v`). Temperature is excluded — wind fields provide transport information without redundant thermodynamic variables.
+
+```python
+data_kwargs = dict(
+    target_vars=["co2massmix"],          # predict next CO2 (10 levels)
+    forcing_vars=["co2massmix", "u", "v"],  # condition on previous CO2 + wind (30 channels)
+    n_timesteps=1,
+    batch_size_train=256,  # reduced from 512 due to 3x more input channels
+)
+```
+
+**Channel layout**: The UNet input will be `[x_t (10), co2massmix_prev (10), u_prev (10), v_prev (10), t (1)] = 41 channels`. Target vars come first (replaced by x_t during training), forcing vars are concatenated after, time channel last.
+
+```python
+in_chans = nlev * (len(target_vars) + len(forcing_vars)) + 1  # 10*(1+3) + 1 = 41
+out_chans = nlev * len(target_vars)                             # 10
+```
+
+**targshift**: Applied only to `co2massmix` (both target and forcing copy), since it's in `target_vars`. Wind fields (`u`, `v`) are normalized via their own `_offset`/`_scale` from the dataset. The forcing `co2massmix` at the previous timestep also gets targshift since it's the same variable — this means the model sees the *anomaly* of the previous CO2 field, which is what we want.
+
+### Training
+
+Use existing infrastructure — the only changes are to `data_kwargs` and `model_kwargs`:
+
+**Files to modify**:
+- Create new experiment dir: `carbonbench/.../24_fm_unet_transport_prior/train.py`
+- Copy from `11_fm_unet_final/train_best.py`, update `forcing_vars`, `in_chans`, `batch_size`
+
+**Training config**:
+```python
+regulargrid_kwargs = dict(
+    input_vars=["co2massmix", "co2massmix", "u", "v"],  # target + forcing
+    target_vars=["co2massmix"],
+    targshift=True,
+    ...
+)
+model_kwargs = dict(in_chans=41, out_chans=10, embed_dim=128, ...)
+```
+
+### Inference Modes
+
+After training, the model supports multiple generation modes:
+
+#### Mode 1: Instantaneous (single-step)
+Feed CarbonTracker CO2 and wind from the previous timestep as conditioning, generate next timestep. This is the simplest mode — just condition on ground-truth previous state.
+
+- **Input**: GT `co2massmix[t-1]`, GT `u[t-1]`, GT `v[t-1]` → **Output**: generated `co2massmix[t]`
+- Evaluation: Same as current unconditional eval but with transport priors
+- Static inputs passed via `VelocityWrapper(static_inputs=...)` during inference
+
+#### Mode 2: Auto-regressive (full trajectory)
+Generate a trajectory by feeding each generated CO2 field back as the conditioning for the next step. Wind fields come from CarbonTracker (external forcing).
+
+- **Input at step k**: generated `co2massmix[t+k-1]`, GT `u[t+k-1]`, GT `v[t+k-1]` → **Output**: generated `co2massmix[t+k]`
+- Wind fields from CarbonTracker at each timestep (known external forcing)
+- Generated CO2 is fed back auto-regressively
+- Evaluation: trajectory quality, error accumulation, physical consistency
+
+#### Mode 3: Sliding-window (e.g. 1-month chunks)
+Re-initialize from CarbonTracker every N steps, then auto-regress within each window. Trade-off between trajectory coherence and error accumulation.
+
+### Implementation Plan
+
+**Step 1**: Create training experiment `24_fm_unet_transport_prior/`
+- Copy `train_best.py` from `11_fm_unet_final/`
+- Update `forcing_vars=["co2massmix", "u", "v"]`, `in_chans=41`
+- Reduce `batch_size_train` to fit in GPU memory (41 vs 11 input channels)
+- Train with same schedule, OT coupling, targshift
+
+**Step 2**: Extend `inference_forward()` in `flowmatching.py`
+- Pass forcing variables as `static_inputs` to `VelocityWrapper`
+- Extract forcing channels from `x_in` (channels `nlev*len(target_vars):`) as static inputs
+- This already works via `VelocityWrapper.forward()` concatenation — just needs plumbing
+
+**Step 3**: Implement auto-regressive generation loop
+- New function `generate_autoregressive()` in `neural_transport/inference/generation.py`
+- Takes: model, initial CO2 state, wind field sequence, n_steps
+- At each step: constructs batch with previous CO2 + current wind → runs `model(batch)` → extracts CO2
+- Returns: trajectory `[T, B, C, Nlat, Nlon]`
+- Handles sliding-window mode via `reinit_every` parameter
+
+**Step 4**: Unconditional evaluation (3 modes)
+- Instantaneous: per-timestep distributional metrics vs CarbonTracker
+- Auto-regressive (full test period): trajectory RMSE vs CarbonTracker, error growth curves
+- Sliding-window (1-month): same metrics, bounded error accumulation
+- Compare all three modes against Phase 18 unconditional model (no transport priors)
+
+### Key Files
+
+| File | Action |
+|------|--------|
+| `carbonbench/.../24_fm_unet_transport_prior/train.py` | **CREATE** — training script |
+| `neural_transport/models/flowmatching.py` | MODIFY — pass static_inputs in inference_forward |
+| `neural_transport/inference/generation.py` | MODIFY — add `generate_autoregressive()` |
+| `carbonbench/.../24_.../eval_instantaneous.py` | **CREATE** — single-step evaluation |
+| `carbonbench/.../24_.../eval_autoregressive.py` | **CREATE** — trajectory evaluation |
+
+### Checklist
+- [ ] Create training script with `forcing_vars=["co2massmix", "u", "v"]`
+- [ ] Train model (same schedule as Phase 18, monitor convergence)
+- [ ] Plumb forcing channels as `static_inputs` in `inference_forward()`
+- [ ] Implement `generate_autoregressive()` with sliding-window support
+- [ ] Evaluate instantaneous mode (single-step distributional metrics)
+- [ ] Evaluate auto-regressive mode (full test period trajectory)
+- [ ] Evaluate sliding-window mode (1-month reinit)
+- [ ] Compare against Phase 18 unconditional model (no transport priors)
+- [ ] Document results: error growth curves, spatial patterns, distributional metrics
+
+---
+
+## Phase 25: Posterior Conditioning with Transport Priors (OSSE)
+
+**Goal**: Use the transport-prior model from Phase 24 for posterior conditioning via FMPS and D-Flow. Run OSSEs at three temporal scales (1-day, 1-month, full test period) to evaluate how transport priors affect posterior quality and whether auto-regressive conditioning degrades or improves over time.
+
+**Motivation**: The Phase 23 ablation showed that FMPS and D-Flow can condition on XCO2 observations, but the underlying FM model had no temporal context. With transport priors (Phase 24), the model already "knows" the previous atmospheric state. This should:
+1. Improve posterior physical consistency (fewer artifacts)
+2. Allow trajectory-level conditioning (assimilate observations over time)
+3. Enable fair comparison with operational DA systems (CarbonTracker uses transport models)
+
+### Experimental Design
+
+Three evaluation scales, each with FMPS and D-Flow:
+
+#### Eval 1: 1-day (instantaneous posterior)
+- Single-step conditioning: condition on XCO2 obs from one timestep
+- Same as Phase 23 ablation but using the transport-prior model
+- **Baseline comparison**: Phase 23f results (instantaneous model + FMPS/D-Flow)
+- Use best hyperparams from Phase 23f Optuna as starting point, fine-tune if needed
+
+#### Eval 2: 1-month auto-regressive posterior
+- Auto-regressive trajectory with XCO2 conditioning at each observed timestep
+- At each step: generate CO2[t] conditioned on CO2[t-1] + wind[t-1] + XCO2 obs[t]
+- Not all timesteps have observations (OCO-2 orbit revisit ~16 days)
+- Steps without obs: unconditional auto-regressive step
+- Steps with obs: FMPS or D-Flow posterior conditioning
+- **Metrics**: trajectory-level RMSE, temporal consistency, obs residuals over time
+
+#### Eval 3: Full test period
+- Same as Eval 2 but over the entire test period
+- Evaluate long-range error accumulation and correction by observations
+- Compare error growth with/without posterior conditioning
+- **Key question**: Does periodic XCO2 conditioning prevent error divergence?
+
+### Implementation Plan
+
+**Step 1**: Adapt posterior samplers for transport-prior model
+- Posterior samplers need `static_inputs` (previous CO2 + wind) in the velocity model
+- `VelocityWrapper(static_inputs=forcing_channels)` already handles this
+- Verify FMPS and D-Flow work with the transport-prior velocity model
+
+**Step 2**: Implement trajectory-level posterior conditioning
+- Extend `generate_autoregressive()` from Phase 24 to support per-step conditioning
+- New parameter: `obs_sequence` — list of (timestep, obs_mask, obs_values, ak, ...) tuples
+- At each step, if observations available: use posterior sampler instead of unconditional ODE
+- If no observations: standard unconditional auto-regressive step
+
+**Step 3**: Run Optuna tuning for transport-prior model
+- Re-tune FMPS and D-Flow hyperparams for the new model (instantaneous mode first)
+- Hyperparams may differ from Phase 23f since the prior is much more informative
+
+**Step 4**: Run three evaluations
+- 1-day: 20 targets × 20 samples, same protocol as Phase 23
+- 1-month: select 4 test months, auto-regressive with OCO-2 orbit obs pattern
+- Full period: 1 trajectory with full test-set obs, evaluate against CarbonTracker analysis
+
+### Key Files
+
+| File | Action |
+|------|--------|
+| `neural_transport/inference/generation.py` | MODIFY — add obs_sequence to auto-regressive loop |
+| `carbonbench/.../25_transport_prior_osse/` | **CREATE** — experiment directory |
+| `carbonbench/.../25_.../run_optuna.py` | **CREATE** — tune FMPS/D-Flow for transport model |
+| `carbonbench/.../25_.../eval_1day.py` | **CREATE** — single-step OSSE |
+| `carbonbench/.../25_.../eval_1month.py` | **CREATE** — 1-month trajectory OSSE |
+| `carbonbench/.../25_.../eval_full.py` | **CREATE** — full test period OSSE |
+
+### Checklist
+- [ ] Verify FMPS and D-Flow work with transport-prior velocity model
+- [ ] Extend `generate_autoregressive()` with per-step posterior conditioning
+- [ ] Tune FMPS hyperparams for transport-prior model (Optuna, 100 trials)
+- [ ] Tune D-Flow hyperparams for transport-prior model (Optuna, 100 trials)
+- [ ] Eval 1: 1-day OSSE (20 targets × 20 samples) with FMPS and D-Flow
+- [ ] Eval 2: 1-month auto-regressive OSSE (4 months) with FMPS and D-Flow
+- [ ] Eval 3: Full test period trajectory with FMPS and D-Flow
+- [ ] Compare against Phase 23f (no transport priors) and Phase 24 (no obs conditioning)
+- [ ] Error growth analysis: plot RMSE vs time with/without conditioning
+- [ ] Document results and identify best configuration for real OCO-2 inversion
+
+---
+
+## Phase 26: E2E Validation — Real OCO-2 Inversion
 
 **Goal**: Run actual inversion using real OCO-2 data via `OCO2DataLoader` + `GenerationPipeline`. Validate the complete real-data pipeline.
 
 **Setup**:
 - Use `OCO2DataLoader` to load real OCO-2 XCO2, averaging kernels, a priori profiles
-- Run best 2-3 methods from Phase 23
+- Run best methods from Phase 23/25 (instantaneous + transport-prior models)
 - Time-series generation over test period
 
 **Evaluation**:
@@ -1206,7 +1455,7 @@ Compare on 20 targets × 10 samples:
 
 ---
 
-## Phase 25: Conjugate Integrators — Few-Step Conditioning
+## Phase 27: Conjugate Integrators — Few-Step Conditioning
 
 *Ref: arXiv 2405.17673*
 
@@ -1220,7 +1469,7 @@ Compare on 20 targets × 10 samples:
 
 ---
 
-## Phase 26: Advanced FM Training (W-CFM, OAT-FM)
+## Phase 28: Advanced FM Training (W-CFM, OAT-FM)
 
 - [ ] Weighted CFM: Gibbs kernel weighting in `training_forward()`
 - [ ] Time-dependent loss weighting: `w(t) = 1/sigma(t)^2` or SNR-based
@@ -1231,7 +1480,7 @@ Compare on 20 targets × 10 samples:
 
 ---
 
-## Phase 27: Conditional Flow Matching (Retraining)
+## Phase 29: Conditional Flow Matching (Retraining)
 
 *Ref: Lipman et al. 2023*
 
@@ -1245,7 +1494,7 @@ Compare on 20 targets × 10 samples:
 
 ---
 
-## Phase 28: Grand Comparison
+## Phase 30: Grand Comparison
 
 - [ ] Aggregate `EvalResult` from all methods
 - [ ] Statistical significance tests (paired t-test on per-timestep metrics)
@@ -1254,7 +1503,7 @@ Compare on 20 targets × 10 samples:
 
 ---
 
-## Phase 29: Real OCO-2 Full Application
+## Phase 31: Real OCO-2 Full Application
 
 - [ ] Apply all top methods to real satellite data via `GenerationPipeline` + `OCO2DataLoader`
 - [ ] Validate vs CarbonTracker posterior, TCCON, ObsPack surface flasks
@@ -1262,7 +1511,7 @@ Compare on 20 targets × 10 samples:
 
 ---
 
-## Phase 30: Multi-step Temporal Conditioning
+## Phase 32: Multi-step Temporal Conditioning
 
 - [ ] Sequential/autoregressive generation
 - [ ] Temporal consistency metrics (autocorrelation, mass conservation)
@@ -1270,7 +1519,7 @@ Compare on 20 targets × 10 samples:
 
 ---
 
-## Phase 31: Advanced Ideas (Brainstorm)
+## Phase 33: Advanced Ideas (Brainstorm)
 
 - [ ] Physics-informed guidance via torchtransport
 - [ ] Latent-space FM with encoder/decoder
@@ -1282,7 +1531,7 @@ Compare on 20 targets × 10 samples:
 
 ---
 
-## Phase 32: Publication (ACP/GMD)
+## Phase 34: Publication (ACP/GMD)
 
 1. Introduction: CO2 inverse modeling, generative approaches
 2. Background: flow matching, OCO-2, CarbonTracker
@@ -1330,9 +1579,12 @@ Phase 23 (Posterior Conditioning Ablation)  ← Optuna tuning + multi-target com
   ├── Phase 23c (Fix Conditioning Quality) ← Soft mask, MCG sampler, NSGA-II tuning ✓ (DPS v1 best, MCG failed)
   ├── Phase 23d (Fix MCG Sampler)          ← OT-interpolant fix, forward shooting, proper tuning
   ├── Phase 23e (Literature Methods)       ← PCFM, FMPS, DiffStateGrad, FGPS
-  └── Phase 24 (Real OCO-2 Inversion)     ← Apply best method to real data
+  ├── Phase 23f (D-Flow)                  ← Source optimization via backprop through ODE
+  ├── Phase 24 (Transport Priors)         ← Train FM with prev CO2 + wind, auto-regressive gen
+  │     └── Phase 25 (Transport OSSE)     ← FMPS/D-Flow with transport model: 1-day, 1-month, full
+  └── Phase 26 (Real OCO-2 Inversion)     ← Apply best method to real data
 
-Phases 25-32: Development & Publication
+Phases 27-34: Development & Publication
 ```
 
 ## Lines of Code Impact (Estimated)

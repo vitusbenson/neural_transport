@@ -96,6 +96,82 @@ def spectral_divergence(
     return float(np.sqrt(np.mean((log_pred - log_gt) ** 2)))
 
 
+def gradient_magnitude(field_2d: np.ndarray) -> float:
+    """Mean absolute gradient magnitude — measures spatial sharpness.
+
+    Higher values indicate sharper, more detailed fields.
+    Lower values indicate smoother, blurrier fields.
+
+    Parameters
+    ----------
+    field_2d : np.ndarray, shape [nlat, nlon]
+
+    Returns
+    -------
+    float — Mean gradient magnitude.
+    """
+    gy, gx = np.gradient(field_2d)
+    return float(np.mean(np.sqrt(gx**2 + gy**2)))
+
+
+def high_freq_power_ratio(
+    power_pred: np.ndarray,
+    power_gt: np.ndarray,
+    frac: float = 1 / 3,
+) -> float:
+    """Ratio of high-frequency power (pred / gt).
+
+    Values < 1 indicate the prediction lacks fine-scale detail.
+    Values > 1 indicate excess high-frequency energy (artifacts).
+
+    Parameters
+    ----------
+    power_pred, power_gt : np.ndarray
+        Power spectra (same length).
+    frac : float
+        Fraction of wavenumber range considered "high frequency" (from the top).
+
+    Returns
+    -------
+    float — High-frequency power ratio.
+    """
+    n = len(power_gt)
+    start = int(n * (1 - frac))
+    hf_gt = power_gt[start:].sum()
+    hf_pred = power_pred[start:].sum()
+    return float(hf_pred / max(hf_gt, 1e-12))
+
+
+def detail_metrics(
+    pred_2d: np.ndarray,
+    gt_2d: np.ndarray,
+    cos_lat_weights: np.ndarray | None = None,
+) -> dict[str, float]:
+    """Compute fine-scale detail metrics comparing a prediction field to GT.
+
+    Returns dict with:
+        spectral_div: log-spectral distance
+        spectral_slope_gt: GT spectral slope
+        spectral_slope_pred: prediction spectral slope
+        grad_mag_gt: GT gradient magnitude
+        grad_mag_pred: prediction gradient magnitude
+        grad_ratio: pred/gt gradient ratio (<1 = smoother than GT)
+        high_freq_power_ratio: high-freq power ratio (<1 = less detail)
+    """
+    wn_gt, ps_gt = power_spectrum_2d(gt_2d, cos_lat_weights)
+    wn_pred, ps_pred = power_spectrum_2d(pred_2d, cos_lat_weights)
+
+    return {
+        "spectral_div": spectral_divergence(ps_pred, ps_gt),
+        "spectral_slope_gt": spectral_slope(wn_gt, ps_gt),
+        "spectral_slope_pred": spectral_slope(wn_pred, ps_pred),
+        "grad_mag_gt": gradient_magnitude(gt_2d),
+        "grad_mag_pred": gradient_magnitude(pred_2d),
+        "grad_ratio": gradient_magnitude(pred_2d) / max(gradient_magnitude(gt_2d), 1e-12),
+        "high_freq_power_ratio": high_freq_power_ratio(ps_pred, ps_gt),
+    }
+
+
 def spectral_slope(wavenumbers: np.ndarray, power: np.ndarray) -> float:
     """Fit spectral slope in log-log space (linear regression).
 

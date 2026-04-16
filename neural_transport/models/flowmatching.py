@@ -59,6 +59,33 @@ _SAMPLER_KWARGS_MAP = {
         "fresh_noise",
         "n_forward_steps",
     ],
+    "pcfm": [
+        "sigma_obs",
+        "spatial_smoothing_sigma",
+        "fresh_noise",
+        "n_forward_steps",
+        "lambda_penalty",
+    ],
+    "fmps": [
+        "sigma_obs",
+        "spatial_smoothing_sigma",
+        "guidance_strength",
+        "r_schedule",
+        "svd_rank",
+        "spectral_k_low",
+        "spectral_k_high",
+        "grad_clip_norm",
+    ],
+    "dflow": [
+        "sigma_obs",
+        "spatial_smoothing_sigma",
+        "n_opt_steps",
+        "lr",
+        "reg_weight",
+        "reg_type",
+        "optimizer",
+        "use_checkpointing",
+    ],
 }
 
 

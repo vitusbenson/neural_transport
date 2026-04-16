@@ -10,10 +10,14 @@ from neural_transport.forward_model import XCO2ForwardModel
 from neural_transport.inference.samplers import (
     SAMPLER_REGISTRY,
     BaseSampler,
+    DFlowSampler,
     FIGSampler,
     FlowDPSSampler,
+    FMPSSampler,
     ICTMSampler,
+    MCGSampler,
     ODESampler,
+    PCFMSampler,
     PosteriorSampler,
     StochasticPosteriorSampler,
     create_sampler,
@@ -198,7 +202,7 @@ class TestODESampler:
 class TestSamplerInterface:
     """Interface tests parametrized over all sampler types."""
 
-    @pytest.fixture(params=["ode", "flowdps", "sde", "fig", "ictm", "mcg"])
+    @pytest.fixture(params=["ode", "flowdps", "sde", "fig", "ictm", "mcg", "pcfm", "fmps", "dflow"])
     def sampler_instance(self, request, mock_velocity_wrapper, sample_masking_config):
         if request.param == "ode":
             return ODESampler(velocity_model=mock_velocity_wrapper, method="euler")
@@ -223,12 +227,29 @@ class TestSamplerInterface:
                 masking_config=sample_masking_config,
             )
         elif request.param == "mcg":
-            from neural_transport.inference.samplers.mcg import MCGSampler
-
             return MCGSampler(
                 velocity_model=mock_velocity_wrapper,
                 masking_config=sample_masking_config,
                 n_forward_steps=1,
+            )
+        elif request.param == "pcfm":
+            return PCFMSampler(
+                velocity_model=mock_velocity_wrapper,
+                masking_config=sample_masking_config,
+                lambda_penalty=0.8,
+            )
+        elif request.param == "fmps":
+            return FMPSSampler(
+                velocity_model=mock_velocity_wrapper,
+                masking_config=sample_masking_config,
+                guidance_strength=1.0,
+            )
+        elif request.param == "dflow":
+            return DFlowSampler(
+                velocity_model=mock_velocity_wrapper,
+                masking_config=sample_masking_config,
+                n_opt_steps=3,
+                lr=1e-2,
             )
 
     @pytest.mark.quick
@@ -343,6 +364,10 @@ class TestCreateSampler:
             ("sde", StochasticPosteriorSampler),
             ("fig", FIGSampler),
             ("ictm", ICTMSampler),
+            ("mcg", MCGSampler),
+            ("pcfm", PCFMSampler),
+            ("fmps", FMPSSampler),
+            ("dflow", DFlowSampler),
         ],
     )
     def test_creates_each_type(self, name, expected_cls, mock_velocity_wrapper, sample_masking_config):
@@ -449,3 +474,315 @@ class TestSDENoiseSchedule:
         assert s.sigma(0.0) == pytest.approx(1.0)
         assert s.sigma(0.5) == pytest.approx(math.cos(math.pi * 0.5 / 2.0))
         assert s.sigma(1.0) == pytest.approx(0.0, abs=1e-7)
+
+
+# ── PCFM-specific tests ──────────────────────────────────────────────
+
+
+class TestPCFMSampler:
+    B, C, H, W = 2, 5, 4, 8
+
+    @pytest.mark.quick
+    def test_lambda_1_hard_projection(self, mock_velocity_wrapper, sample_masking_config):
+        sampler = PCFMSampler(
+            velocity_model=mock_velocity_wrapper,
+            masking_config=sample_masking_config,
+            lambda_penalty=1.0,
+        )
+        x_init = torch.randn(self.B, self.C, self.H, self.W)
+        result = sampler.sample(x_init, torch.linspace(0, 1, 6))
+        assert torch.isfinite(result).all()
+
+    @pytest.mark.quick
+    def test_lambda_fractional_blends(self, mock_velocity_wrapper, sample_masking_config):
+        """lambda < 1 should produce different output than lambda = 1."""
+        torch.manual_seed(42)
+        x_init = torch.randn(self.B, self.C, self.H, self.W)
+        time_grid = torch.linspace(0, 1, 6)
+
+        hard = PCFMSampler(
+            velocity_model=mock_velocity_wrapper,
+            masking_config=sample_masking_config,
+            lambda_penalty=1.0,
+            fresh_noise=False,
+        )
+        soft = PCFMSampler(
+            velocity_model=mock_velocity_wrapper,
+            masking_config=sample_masking_config,
+            lambda_penalty=0.5,
+            fresh_noise=False,
+        )
+
+        torch.manual_seed(0)
+        r_hard = hard.sample(x_init.clone(), time_grid)
+        torch.manual_seed(0)
+        r_soft = soft.sample(x_init.clone(), time_grid)
+
+        assert torch.isfinite(r_hard).all()
+        assert torch.isfinite(r_soft).all()
+        # With the same noise (fresh_noise=False), different lambda should give different results
+        assert not torch.allclose(r_hard, r_soft, atol=1e-4)
+
+    @pytest.mark.quick
+    def test_multi_step_forward_shoot(self, mock_velocity_wrapper, sample_masking_config):
+        sampler = PCFMSampler(
+            velocity_model=mock_velocity_wrapper,
+            masking_config=sample_masking_config,
+            n_forward_steps=3,
+        )
+        x_init = torch.randn(self.B, self.C, self.H, self.W)
+        result = sampler.sample(x_init, torch.linspace(0, 1, 6))
+        assert result.shape == (self.B, self.C, self.H, self.W)
+        assert torch.isfinite(result).all()
+
+
+# ── FMPS-specific tests ──────────────────────────────────────────────
+
+
+class TestFMPSSampler:
+    B, C, H, W = 2, 5, 4, 8
+
+    @pytest.mark.quick
+    def test_basic_finite(self, mock_velocity_wrapper, sample_masking_config):
+        sampler = FMPSSampler(
+            velocity_model=mock_velocity_wrapper,
+            masking_config=sample_masking_config,
+        )
+        x_init = torch.randn(self.B, self.C, self.H, self.W)
+        result = sampler.sample(x_init, torch.linspace(0, 1, 6))
+        assert torch.isfinite(result).all()
+        assert result.shape == (self.B, self.C, self.H, self.W)
+
+    @pytest.mark.quick
+    def test_guidance_strength_affects_output(self, mock_velocity_wrapper, sample_masking_config):
+        """Different guidance strengths should produce different outputs."""
+        torch.manual_seed(42)
+        x_init = torch.randn(self.B, self.C, self.H, self.W)
+        time_grid = torch.linspace(0, 1, 6)
+
+        s0 = FMPSSampler(
+            velocity_model=mock_velocity_wrapper,
+            masking_config=sample_masking_config,
+            guidance_strength=0.0,
+        )
+        s1 = FMPSSampler(
+            velocity_model=mock_velocity_wrapper,
+            masking_config=sample_masking_config,
+            guidance_strength=5.0,
+        )
+
+        r0 = s0.sample(x_init.clone(), time_grid)
+        r1 = s1.sample(x_init.clone(), time_grid)
+
+        assert torch.isfinite(r0).all()
+        assert torch.isfinite(r1).all()
+        # strength=0 means no correction → pure ODE; strength=5 adds correction
+        assert not torch.allclose(r0, r1, atol=1e-4)
+
+    @pytest.mark.quick
+    def test_with_svd_projection(self, mock_velocity_wrapper, sample_masking_config):
+        sampler = FMPSSampler(
+            velocity_model=mock_velocity_wrapper,
+            masking_config=sample_masking_config,
+            svd_rank=1,
+        )
+        x_init = torch.randn(self.B, self.C, self.H, self.W)
+        result = sampler.sample(x_init, torch.linspace(0, 1, 6))
+        assert torch.isfinite(result).all()
+
+    @pytest.mark.quick
+    def test_with_spectral_filter(self, mock_velocity_wrapper, sample_masking_config):
+        sampler = FMPSSampler(
+            velocity_model=mock_velocity_wrapper,
+            masking_config=sample_masking_config,
+            spectral_k_low=1,
+            spectral_k_high=3,
+        )
+        x_init = torch.randn(self.B, self.C, self.H, self.W)
+        result = sampler.sample(x_init, torch.linspace(0, 1, 6))
+        assert torch.isfinite(result).all()
+
+    @pytest.mark.quick
+    @pytest.mark.parametrize("schedule", ["linear", "cosine", "constant"])
+    def test_r_schedules(self, schedule, mock_velocity_wrapper, sample_masking_config):
+        sampler = FMPSSampler(
+            velocity_model=mock_velocity_wrapper,
+            masking_config=sample_masking_config,
+            r_schedule=schedule,
+        )
+        x_init = torch.randn(self.B, self.C, self.H, self.W)
+        result = sampler.sample(x_init, torch.linspace(0, 1, 6))
+        assert torch.isfinite(result).all()
+
+
+# ── FMPS r(t) schedule tests ─────────────────────────────────────────
+
+
+class TestFMPSSchedule:
+    @pytest.fixture
+    def fmps(self, mock_velocity_wrapper, sample_masking_config):
+        def _make(r_schedule="linear", guidance_strength=2.0):
+            return FMPSSampler(
+                velocity_model=mock_velocity_wrapper,
+                masking_config=sample_masking_config,
+                r_schedule=r_schedule,
+                guidance_strength=guidance_strength,
+            )
+
+        return _make
+
+    @pytest.mark.quick
+    def test_linear(self, fmps):
+        s = fmps("linear", guidance_strength=2.0)
+        assert s._r(0.0) == pytest.approx(2.0)
+        assert s._r(0.5) == pytest.approx(1.0)
+        assert s._r(1.0) == pytest.approx(0.0)
+
+    @pytest.mark.quick
+    def test_cosine(self, fmps):
+        s = fmps("cosine", guidance_strength=1.0)
+        assert s._r(0.0) == pytest.approx(1.0)
+        assert s._r(0.5) == pytest.approx(math.cos(math.pi * 0.5 / 2.0))
+        assert s._r(1.0) == pytest.approx(0.0, abs=1e-7)
+
+    @pytest.mark.quick
+    def test_constant(self, fmps):
+        s = fmps("constant", guidance_strength=0.5)
+        assert s._r(0.0) == pytest.approx(0.5)
+        assert s._r(0.5) == pytest.approx(0.5)
+        assert s._r(1.0) == pytest.approx(0.5)
+
+
+# ── DiffStateGrad (SVD projection) tests ─────────────────────────────
+
+
+class TestDiffStateGrad:
+    @pytest.fixture
+    def sampler(self, mock_velocity_wrapper, sample_masking_config):
+        return MockPosteriorSampler(
+            velocity_model=mock_velocity_wrapper,
+            masking_config=sample_masking_config,
+        )
+
+    @pytest.mark.quick
+    def test_output_shape(self, sampler):
+        B, C, H, W = 2, 5, 4, 8
+        grad = torch.randn(B, C, H, W)
+        x_batch = torch.randn(B, C, H, W)
+        result = sampler._project_to_svd_subspace(grad, x_batch, k=1)
+        assert result.shape == (B, C, H, W)
+
+    @pytest.mark.quick
+    def test_rank_1_reduces_dimensionality(self, sampler):
+        B, C, H, W = 3, 2, 3, 4
+        x_batch = torch.randn(B, C, H, W)
+        grad = torch.randn(B, C, H, W)
+        result = sampler._project_to_svd_subspace(grad, x_batch, k=1)
+        # After rank-1 projection, all gradients should be scalar multiples
+        # of the same direction (the top singular vector)
+        r_flat = result.reshape(B, -1)
+        # Check: rank of projected gradients should be 1
+        # Use SVD to verify
+        _, s, _ = torch.linalg.svd(r_flat, full_matrices=False)
+        # Only the first singular value should be significant
+        assert s[1] / (s[0] + 1e-10) < 0.01
+
+    @pytest.mark.quick
+    def test_k_0_returns_input(self, sampler):
+        grad = torch.randn(2, 5, 4, 8)
+        x_batch = torch.randn(2, 5, 4, 8)
+        result = sampler._project_to_svd_subspace(grad, x_batch, k=0)
+        assert torch.allclose(result, grad)
+
+
+# ── Spectral filter (FGPS) tests ─────────────────────────────────────
+
+
+class TestSpectralFilter:
+    @pytest.fixture
+    def sampler(self, mock_velocity_wrapper, sample_masking_config):
+        return MockPosteriorSampler(
+            velocity_model=mock_velocity_wrapper,
+            masking_config=sample_masking_config,
+        )
+
+    @pytest.mark.quick
+    def test_output_shape(self, sampler):
+        B, C, H, W = 2, 5, 4, 8
+        x = torch.randn(B, C, H, W)
+        result = sampler._spectral_filter(x, t=0.5, k_low=1, k_high=4)
+        assert result.shape == (B, C, H, W)
+
+    @pytest.mark.quick
+    def test_low_cutoff_suppresses_high_freq(self, sampler):
+        """Very low cutoff should heavily smooth the field."""
+        B, C, H, W = 1, 1, 16, 16
+        torch.manual_seed(42)
+        x = torch.randn(B, C, H, W)
+
+        # t=0 with k_low=1, k_high=8 → cutoff=1 (very aggressive)
+        filtered = sampler._spectral_filter(x, t=0.0, k_low=1, k_high=8)
+
+        # Filtered should be smoother (lower variance)
+        assert filtered.var() < x.var()
+
+    @pytest.mark.quick
+    def test_finite_output(self, sampler):
+        x = torch.randn(2, 5, 4, 8)
+        result = sampler._spectral_filter(x, t=0.5, k_low=2, k_high=4)
+        assert torch.isfinite(result).all()
+
+
+# ── D-Flow specific tests ──────────────────────────────────────────────
+
+
+class TestDFlowOptimization:
+    """D-Flow-specific tests for source optimization."""
+
+    B, C, H, W = 2, 5, 4, 8
+
+    @pytest.mark.quick
+    @pytest.mark.parametrize("reg_type", ["l2", "norm_diff", "chi_prior"])
+    def test_regularization_types(self, reg_type, mock_velocity_wrapper, sample_masking_config):
+        sampler = DFlowSampler(
+            velocity_model=mock_velocity_wrapper,
+            masking_config=sample_masking_config,
+            n_opt_steps=2,
+            reg_type=reg_type,
+        )
+        torch.manual_seed(0)
+        x_init = torch.randn(self.B, self.C, self.H, self.W)
+        time_grid = torch.linspace(0, 1, 4)
+        result = sampler.sample(x_init, time_grid)
+        assert result.shape == (self.B, self.C, self.H, self.W)
+        assert torch.isfinite(result).all()
+
+    @pytest.mark.quick
+    @pytest.mark.parametrize("optimizer", ["adam", "lbfgs"])
+    def test_optimizer_types(self, optimizer, mock_velocity_wrapper, sample_masking_config):
+        sampler = DFlowSampler(
+            velocity_model=mock_velocity_wrapper,
+            masking_config=sample_masking_config,
+            n_opt_steps=2,
+            optimizer=optimizer,
+        )
+        torch.manual_seed(0)
+        x_init = torch.randn(self.B, self.C, self.H, self.W)
+        time_grid = torch.linspace(0, 1, 4)
+        result = sampler.sample(x_init, time_grid)
+        assert torch.isfinite(result).all()
+
+    @pytest.mark.quick
+    def test_return_intermediates(self, mock_velocity_wrapper, sample_masking_config):
+        n_opt = 3
+        sampler = DFlowSampler(
+            velocity_model=mock_velocity_wrapper,
+            masking_config=sample_masking_config,
+            n_opt_steps=n_opt,
+        )
+        torch.manual_seed(0)
+        x_init = torch.randn(self.B, self.C, self.H, self.W)
+        time_grid = torch.linspace(0, 1, 4)
+        result = sampler.sample(x_init, time_grid, return_intermediates=True)
+        # n_opt snapshots + 1 final
+        assert result.shape == (n_opt + 1, self.B, self.C, self.H, self.W)

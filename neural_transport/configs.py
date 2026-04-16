@@ -24,7 +24,7 @@ DEFAULT_TARGET_PRESSURES = (1013, 843, 441, 73)
 MAX_N_DISTRIBUTIONAL = 200  # distributional_metrics.py:50,79,309,353
 
 # Known sampler names (None = ODE baseline)
-KNOWN_SAMPLERS = {"flowdps", "sde", "fig", "ictm", "mcg"}
+KNOWN_SAMPLERS = {"flowdps", "sde", "fig", "ictm", "mcg", "pcfm", "fmps", "dflow"}
 
 
 # ── Dataclasses ──────────────────────────────────────────────────────────
@@ -60,8 +60,26 @@ class SamplerParams:
     n_inner_steps: int = 1
     inner_lr: float = 0.1
 
-    # MCG (Manifold Constrained Gradient)
+    # MCG (Manifold Constrained Gradient) / PCFM
     n_forward_steps: int = 1  # 1 = single Tweedie, >1 = multi-step Euler forward shooting
+
+    # PCFM (Physics-Constrained Flow Matching)
+    lambda_penalty: float = 1.0  # projection blending (1.0 = hard, 0.0 = none)
+
+    # FMPS (Flow Matching Posterior Sampling)
+    guidance_strength: float = 1.0
+    svd_rank: int = 0  # DiffStateGrad: 0 = disabled, >0 = top-k SVD subspace
+    spectral_k_low: int = 0  # FGPS min frequency cutoff (0 = disabled)
+    spectral_k_high: int = 0  # FGPS max frequency cutoff (0 = disabled)
+    grad_clip_norm: float = 1.0  # gradient norm clipping (0 = no clipping)
+
+    # D-Flow (source optimization through ODE, arXiv 2402.14017)
+    n_opt_steps: int = 50  # number of optimization iterations on x_0
+    lr: float = 1e-2  # optimizer learning rate
+    reg_weight: float = 1.0  # regularization strength lambda
+    reg_type: str = "l2"  # "l2", "norm_diff", "chi_prior"
+    optimizer: str = "adam"  # "adam", "lbfgs"
+    use_checkpointing: bool = False  # gradient checkpointing for memory
 
 
 @dataclass
