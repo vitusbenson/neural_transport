@@ -822,6 +822,99 @@ def iterative_generate_oco2(
     )
 
 
+def generate_autoregressive(
+    model,
+    data_loader,
+    n_steps,
+    target_var="co2massmix",
+    init_idx=0,
+    reinit_every=None,
+    device="cuda",
+    verbose=False,
+):
+    """Auto-regressive rollout for Phase 24 transport-prior FM models.
+
+    At each step k, the model is fed:
+      - previous CO2 (fed back from the last prediction, or from ground truth
+        at the k-th step when `reinit_every` triggers a re-initialisation)
+      - GT wind forcings (u, v) from the dataset at step k
+    and it predicts CO2 at step k+1.
+
+    Parameters
+    ----------
+    model : nn.Module
+        A Phase 24 FlowMatching model wrapper (expects
+        input_vars=["co2massmix_next", "co2massmix", "u", "v"]).
+    data_loader : InferenceDataLoader
+        Loader over the test period (provides per-timestep batches with GT CO2
+        and wind fields).
+    n_steps : int
+        Number of forward steps to generate.
+    target_var : str
+        Target variable name (default "co2massmix").
+    init_idx : int
+        Dataset index used as the initial state and as the starting point of
+        the trajectory.
+    reinit_every : int | None
+        If set, every ``reinit_every`` steps the rolled CO2 state is replaced
+        by GT (sliding-window mode). ``None`` → pure auto-regressive rollout.
+    device : str
+    verbose : bool
+
+    Returns
+    -------
+    xr.Dataset
+        Trajectory with dims ``[time, sample, lat, lon, level]`` and key
+        ``target_var``. Time coord is the dataset's original time axis,
+        aligned to timesteps ``init_idx + 1 ... init_idx + n_steps``.
+    """
+    model.eval()
+    model.to(device)
+
+    init_batch = data_loader.get_batch(init_idx, device=device)
+    current_co2 = init_batch[target_var].clone()  # [1, N, C]
+
+    predictions = []
+    times = []
+
+    iterator = range(n_steps)
+    if verbose:
+        iterator = tqdm(iterator, desc="Auto-regressive rollout")
+
+    with torch.no_grad():
+        for k in iterator:
+            idx = init_idx + k
+            if idx + 1 >= len(data_loader):
+                break
+
+            batch = data_loader.get_batch(idx, device=device)
+
+            # Feed back the rolled CO2 state (or re-init from GT at window edges).
+            if reinit_every is not None and k > 0 and k % reinit_every == 0:
+                current_co2 = batch[target_var].clone()
+
+            batch[target_var] = current_co2
+
+            # The _next slot is overwritten by x_init=noise inside
+            # inference_forward, but its value still seeds the denormalization
+            # targshift_mean in postprocess. Using the current (rolled) state is
+            # a close proxy for the unknown next mean (CO2 evolves slowly).
+            batch[f"{target_var}_next"] = current_co2.clone()
+
+            preds = model(batch, _mode="generate")
+            pred_co2 = preds[target_var]  # [1, N, C]
+            current_co2 = pred_co2.detach()
+
+            predictions.append(pred_co2.cpu())
+            times.append(data_loader.dataset.ds.time.values[idx + 1])
+
+    # Assemble xarray Dataset using the dataset's helper.
+    pred_tensor = torch.cat(predictions, dim=0)  # [T, N, C] (B collapses across steps)
+    ds = xr.Dataset({target_var: data_loader.dataset.tensor_to_xarray(pred_tensor)})
+    ds = ds.rename({"batch": "time"}).assign_coords(time=("time", np.array(times)))
+    return ds
+
+
 def generate_for_distributional_eval(
     model,
     dataset,

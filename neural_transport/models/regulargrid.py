@@ -82,19 +82,24 @@ class RegularGridModel(nn.Module):
                 print(f"WARNING: skipping {v}, missing in batch")
                 continue
 
+            # Allow "{var}_next" entries in input_vars: the target-time
+            # placeholder channel(s) that training_forward overwrites with x_t.
+            # Stats and targshift membership are keyed off the base variable.
+            base = v[:-5] if v.endswith("_next") else v
+
             try:
-                offset = batch[f"{v}_offset"]
-                scale = batch[f"{v}_scale"]
+                offset = batch[f"{base}_offset"]
+                scale = batch[f"{base}_scale"]
             except KeyError as e:
                 raise KeyError(
                     f"Missing offset/scale for input variable '{v}' during normalization: {e}."
-                    f"Expected keys: {v}_offset, {v}_scale. "
+                    f"Expected keys: {base}_offset, {base}_scale. "
                     f"Available keys: {list(batch.keys())}"
                 )
 
             x_in_curr = (batch[v] - offset) / scale
 
-            if self.targshift and (v in self.target_vars):
+            if self.targshift and (base in self.target_vars):
                 batch_normalized[v] = x_in_curr - x_in_curr.mean((1, 2), keepdim=True)
             else:
                 batch_normalized[v] = x_in_curr

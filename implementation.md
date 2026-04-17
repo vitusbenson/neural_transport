@@ -1323,25 +1323,43 @@ Re-initialize from CarbonTracker every N steps, then auto-regress within each wi
 - Sliding-window (1-month): same metrics, bounded error accumulation
 - Compare all three modes against Phase 18 unconditional model (no transport priors)
 
+### Design refinement during implementation
+
+The initial spec called for `input_vars=["co2massmix", "co2massmix", "u", "v"]` — a duplicate target-var entry so that the previous CO2 field survives the `training_forward:469` overwrite with `x_t`. Duplicates collapse in the existing dict-keyed `normalize_batch`, so this would have required a positional-concat refactor.
+
+We adopted a cleaner alternative: use `co2massmix_next` as an explicit placeholder in slot 0 of `input_vars`. The semantics match exactly what `training_forward` does (slot 0 = noised target at t+1), and the previous CO2 channel keeps its natural key. `normalize_batch` was extended to strip a trailing `_next` suffix for offset/scale lookup and targshift-membership. No positional-concat change needed; Phase 11 behaviour is bitwise-unchanged.
+
+Final channel layout the UNet sees (train and inference): `[x_t (10), co2_t (10), u_t (10), v_t (10), time (1)] = 41`.
+
+A subtle pre-existing channel-order mismatch was also fixed: `VelocityWrapper.forward` was concatenating `[x, time, static_inputs]` while `training_forward` ends with `[..., time]`. Reordered the wrapper to `[x, static_inputs, time]` so train/inference channel layouts agree.
+
 ### Key Files
 
 | File | Action |
 |------|--------|
-| `carbonbench/.../24_fm_unet_transport_prior/train.py` | **CREATE** — training script |
-| `neural_transport/models/flowmatching.py` | MODIFY — pass static_inputs in inference_forward |
-| `neural_transport/inference/generation.py` | MODIFY — add `generate_autoregressive()` |
-| `carbonbench/.../24_.../eval_instantaneous.py` | **CREATE** — single-step evaluation |
-| `carbonbench/.../24_.../eval_autoregressive.py` | **CREATE** — trajectory evaluation |
+| `carbonbench/.../24_fm_unet_transport_prior/train.py` | **CREATE** — training script (reuses Phase 11 Optuna hparams) |
+| `carbonbench/.../24_fm_unet_transport_prior/train.slurm` | **CREATE** — sbatch wrapper |
+| `carbonbench/.../24_fm_unet_transport_prior/eval_autoregressive.py` | **CREATE** — auto-regressive + sliding-window eval (single script, `--reinit-every` switch) |
+| `carbonbench/.../24_fm_unet_transport_prior/eval_autoregressive.slurm` | **CREATE** — sbatch wrapper |
+| `neural_transport/models/regulargrid.py` | MODIFY — `normalize_batch` accepts `{var}_next` input_vars |
+| `neural_transport/models/flowmatching.py` | MODIFY — pass `static_inputs` in `inference_forward`, unify channel order in `VelocityWrapper` |
+| `neural_transport/inference/generation.py` | MODIFY — add `generate_autoregressive()` with optional `reinit_every` |
+| `tests/test_regulargrid_next_inputs.py` | **CREATE** — 5 unit tests for `_next` placeholder, targshift, concat order |
+
+Instantaneous eval is covered by running `train.py --only-pred --ckpt best`, since `train_and_eval_singlestep` already performs single-step prediction with whatever `forcing_vars` the experiment is configured with.
 
 ### Checklist
-- [ ] Create training script with `forcing_vars=["co2massmix", "u", "v"]`
-- [ ] Train model (same schedule as Phase 18, monitor convergence)
-- [ ] Plumb forcing channels as `static_inputs` in `inference_forward()`
-- [ ] Implement `generate_autoregressive()` with sliding-window support
-- [ ] Evaluate instantaneous mode (single-step distributional metrics)
+- [x] Create training script with `forcing_vars=["co2massmix", "u", "v"]`
+- [x] Plumb forcing channels as `static_inputs` in `inference_forward()`
+- [x] Implement `generate_autoregressive()` with sliding-window support
+- [x] Extend `normalize_batch` to accept `{var}_next` placeholder entries
+- [x] Fix `VelocityWrapper` channel order to match `training_forward`
+- [x] Unit tests for `_next` placeholder + channel-count + concat ordering
+- [ ] Train model (submitted as SLURM job 6222949, 10k steps, max-steps schedule matches Phase 11)
+- [ ] Evaluate instantaneous mode (`train.py --only-pred`)
 - [ ] Evaluate auto-regressive mode (full test period trajectory)
-- [ ] Evaluate sliding-window mode (1-month reinit)
-- [ ] Compare against Phase 18 unconditional model (no transport priors)
+- [ ] Evaluate sliding-window mode (1-month reinit, `--reinit-every 120`)
+- [ ] Compare against Phase 11/18 unconditional model (no transport priors)
 - [ ] Document results: error growth curves, spatial patterns, distributional metrics
 
 ---

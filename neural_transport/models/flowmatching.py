@@ -110,7 +110,8 @@ class VelocityWrapper(nn.Module):
             t_expanded = t.view(B, 1, 1, 1).expand(B, 1, Nlat, Nlon)
         if self.static_inputs.numel() > 0:
             static_inputs = self.static_inputs.to(x.device)
-            x_in = torch.cat([x, t_expanded, static_inputs], dim=1)  # [B C_total Nlat Nlon]
+            # Order must match training_forward: [x_t, conditioning, time].
+            x_in = torch.cat([x, static_inputs, t_expanded], dim=1)  # [B C_total Nlat Nlon]
         else:
             x_in = torch.cat([x, t_expanded], dim=1)
         out = self.submodel.model(x_in)
@@ -599,12 +600,21 @@ class FlowMatching(RegularGridModel):
             time_grid = self._build_time_grid(steps - 1, x_init.device, spacing)
         masking_config["time_grid"] = time_grid
 
+        # Pass conditioning channels (everything after the target-var slots) as
+        # static_inputs so the UNet sees [x_t, conditioning, time].
+        nlev_target = self.nlev * len(self.target_vars)
+        static_inputs = x_in[:, nlev_target:, :, :] if x_in.shape[1] > nlev_target else None
+
         # Posterior sampler dispatch via registry
         sampler_name = generate_kwargs.get("sampler", None)
         if sampler_name in _SAMPLER_KWARGS_MAP:
             from neural_transport.inference.samplers import create_sampler
 
-            velocity_model = VelocityWrapper(submodel=self.submodel, nlev=self.nlev)
+            velocity_model = VelocityWrapper(
+                submodel=self.submodel,
+                nlev=self.nlev,
+                static_inputs=static_inputs,
+            )
             sampler_kwargs = {k: generate_kwargs[k] for k in _SAMPLER_KWARGS_MAP[sampler_name] if k in generate_kwargs}
             sampler = create_sampler(sampler_name, velocity_model, masking_config, **sampler_kwargs)
             return sampler.sample(x_init, time_grid, self.return_intermediates)
@@ -612,10 +622,9 @@ class FlowMatching(RegularGridModel):
         # UNet expects normalization parameters
         velocity_model = self.return_velocity_wrapper(
             submodel=self.submodel,
-            static_inputs=None,
+            static_inputs=static_inputs,
             masking_config=masking_config,
             generate_kwargs=generate_kwargs,
-            # static_inputs=x_in[:,:self.nlev*len(self.target_vars),:,:],  # [B C Nlat Nlon] (static inputs for conditioning later)
         )
 
         # solve the ODE to get the trajectory
