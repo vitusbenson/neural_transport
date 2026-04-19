@@ -449,8 +449,9 @@ class FlowMatching(RegularGridModel):
         B, _, C = x_1_normalized.shape
         x_1_normalized = x_1_normalized.reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)
 
-        # sample noise  x_0 ~ N(0, I), [B C Nlat Nlon]
-        x_0 = torch.randn_like(x_in, device=x_in.device)
+        # sample noise  x_0 ~ N(0, I), shaped like x_1 (target-only channels,
+        # not full x_in which may include conditioning forcings).
+        x_0 = torch.randn_like(x_1_normalized, device=x_in.device)
 
         # Minibatch OT coupling: reorder x_0 to reduce transport cost
         if self.use_ot_coupling:
