@@ -7,7 +7,7 @@ import xskillscore
 from scipy.stats import linregress
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
-from neural_transport.evaluation.ensemble import crps
+from neural_transport.evaluation.ensemble import crps, crps_ensemble
 from neural_transport.evaluation.pointwise import compute_error_maps, compute_error_scalars
 from neural_transport.tools.conversion import (
     M_C,
@@ -483,3 +483,84 @@ def get_tensorboard_df(runpath):
     df2.columns.name = None
 
     return df2
+
+
+def compute_trajectory_ensemble_metrics(gt, preds, target_var="co2massmix", n_rank_bins=None):
+    """Per-lead-time ensemble metrics for Phase 24 trajectory eval.
+
+    Parameters
+    ----------
+    gt : xr.Dataset
+        Ground truth with ``target_var`` having dims ``[init, lead, lat, lon, level]``
+        (one GT field per (init, lead)).
+    preds : xr.Dataset
+        Ensemble predictions with dims ``[init, sample, lead, lat, lon, level]``.
+    target_var : str
+    n_rank_bins : int | None
+        Rank histogram bins. Defaults to ``n_samples + 1``.
+
+    Returns
+    -------
+    per_lead : pandas.DataFrame indexed by ``lead`` with columns
+        ``rmse_mean``, ``spread``, ``crps``, ``spread_error_ratio``.
+    summary : pandas.Series
+        Time-averaged aggregates.
+    rank_hist : np.ndarray of shape ``(n_leads, n_bins)``.
+    """
+    gt_da = gt[target_var]  # [init, lead, lat, lon, level]
+    pr_da = preds[target_var]  # [init, sample, lead, lat, lon, level]
+    n_samples = pr_da.sizes["sample"]
+    n_leads = pr_da.sizes["lead"]
+    if n_rank_bins is None:
+        n_rank_bins = n_samples + 1
+
+    # Cos-lat weights for spatial averaging.
+    w = np.cos(np.deg2rad(gt_da["lat"]))
+    w = w / w.mean()
+
+    ensemble_mean = pr_da.mean("sample")  # [init, lead, lat, lon, level]
+    ensemble_std = pr_da.std("sample")  # [init, lead, lat, lon, level]
+
+    sq_err = (ensemble_mean - gt_da) ** 2
+    rmse_mean = np.sqrt(sq_err.weighted(w).mean(("lat", "lon", "level", "init"))).values
+    spread = ensemble_std.weighted(w).mean(("lat", "lon", "level", "init")).values
+
+    crps_vals = np.zeros(n_leads, dtype=np.float64)
+    rank_hist = np.zeros((n_leads, n_rank_bins), dtype=np.int64)
+    for li in range(n_leads):
+        gt_slice = gt_da.isel(lead=li).values  # [init, lat, lon, level]
+        pr_slice = pr_da.isel(lead=li).values  # [init, sample, lat, lon, level]
+        n_inits = gt_slice.shape[0]
+        per_init_crps = np.zeros(n_inits, dtype=np.float64)
+        for ii in range(n_inits):
+            # crps_ensemble expects preds [S, lat, lon, (lev)] and gt [lat, lon, (lev)].
+            _, m = crps_ensemble(pr_slice[ii], gt_slice[ii])
+            per_init_crps[ii] = m
+            ranks = (pr_slice[ii] < gt_slice[ii][None]).sum(axis=0)
+            hist, _ = np.histogram(ranks, bins=np.arange(n_rank_bins + 1) - 0.5)
+            rank_hist[li] += hist
+        crps_vals[li] = per_init_crps.mean()
+
+    spread_error_ratio = spread / np.maximum(rmse_mean, 1e-12)
+
+    per_lead = pd.DataFrame(
+        {
+            "rmse_mean": rmse_mean,
+            "spread": spread,
+            "crps": crps_vals,
+            "spread_error_ratio": spread_error_ratio,
+        },
+        index=pd.Index(preds["lead"].values, name="lead"),
+    )
+    summary = pd.Series(
+        {
+            "rmse_mean": rmse_mean.mean(),
+            "spread": spread.mean(),
+            "crps": crps_vals.mean(),
+            "spread_error_ratio": spread_error_ratio.mean(),
+            "n_inits": int(gt_da.sizes["init"]),
+            "n_samples": int(n_samples),
+            "n_leads": int(n_leads),
+        }
+    )
+    return per_lead, summary, rank_hist

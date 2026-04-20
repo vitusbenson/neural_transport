@@ -1351,16 +1351,58 @@ Instantaneous eval is covered by running `train.py --only-pred --ckpt best`, sin
 ### Checklist
 - [x] Create training script with `forcing_vars=["co2massmix", "u", "v"]`
 - [x] Plumb forcing channels as `static_inputs` in `inference_forward()`
-- [x] Implement `generate_autoregressive()` with sliding-window support
 - [x] Extend `normalize_batch` to accept `{var}_next` placeholder entries
 - [x] Fix `VelocityWrapper` channel order to match `training_forward`
 - [x] Unit tests for `_next` placeholder + channel-count + concat ordering
-- [ ] Train model (submitted as SLURM job 6222949, 10k steps, max-steps schedule matches Phase 11)
-- [ ] Evaluate instantaneous mode (`train.py --only-pred`)
-- [ ] Evaluate auto-regressive mode (full test period trajectory)
-- [ ] Evaluate sliding-window mode (1-month reinit, `--reinit-every 120`)
-- [ ] Compare against Phase 11/18 unconditional model (no transport priors)
-- [ ] Document results: error growth curves, spatial patterns, distributional metrics
+- [x] Train model (10k steps, best checkpoint at epoch 23, LossVal=0.0598)
+
+### Phase 24b: Ensemble-based probabilistic evaluation
+
+After the Phase 24 model trained, the existing eval protocols turned out to be
+mismatched for a *probabilistic conditional* model:
+- `run_distributional` replicated `dataset[0]` 200× — all samples pinned to one
+  prior state, coverage collapsed to 0.
+- `generate_autoregressive` produced a single deterministic trajectory — no way
+  to measure spread / CRPS / calibration.
+
+The redesign in Phase 24b:
+
+| File | Action |
+|------|--------|
+| `neural_transport/inference/generation.py` | Replace `generate_autoregressive` with unified `generate_ensemble(init_indices, n_samples, n_steps, reinit_every, seed)` producing `[init, sample, lead, lat, lon, level]`. Hard-swap `run_distributional` to a thin wrapper with `n_ref_timesteps=20, n_gen_per_ref=10` (legacy kwarg aliases kept). |
+| `neural_transport/inference/analyse.py` | Add `compute_trajectory_ensemble_metrics` — per-lead RMSE-of-mean, spread, CRPS, spread/err, rank histogram. |
+| `carbonbench/.../24_fm_unet_transport_prior/eval_autoregressive.py` | Rewrite around `generate_ensemble`. Caps trajectory at 1 year (1460 steps @6h); excludes last `n_steps` from init sampling so every trajectory fits inside the split. |
+| `carbonbench/.../24_fm_unet_transport_prior/eval_instantaneous.py` | **CREATE** — thin wrapper over `run_distributional`. |
+| `carbonbench/.../compare_11_24/eval_compare.py` | **CREATE** — runs `generate_ensemble` on both Phase 11 and Phase 24 with shared seed+init_indices, emits per-lead CSV with a `model` column. |
+| `carbonbench/.../compare_11_24/plot_compare.py` | **CREATE** — error-vs-lead overlay + qualitative GT-vs-ensemble panels. |
+| `tests/test_generation_ensemble.py` | **CREATE** — 5 tests: shape, reproducibility under fixed seed, independent per-sample noise, AR-vs-`reinit_every=1` divergence. |
+
+### Phase 24 Results
+
+Full eval (10 inits × 10 samples × 1460 steps @6h, GPU-A40):
+
+| Protocol | RMSE | spread | CRPS | spread/err |
+|---|---|---|---|---|
+| Phase 24 AR (full year) | 89.12 | 3.12 | 87.82 | 0.057 |
+| Phase 24 sliding-window (reinit every 30d) | **9.53** | 1.83 | 8.01 | 0.229 |
+| Phase 11 one-step distributional | energy_dist=53.2, coverage=0.92 | | | |
+
+Cross-model comparison (20 inits × 10 samples, shared seed):
+
+| Mode | Model | RMSE | CRPS | spread/err |
+|---|---|---|---|---|
+| one-step | Phase 11 | 4.55 | 2.56 | 0.56 |
+| one-step | **Phase 24** | **0.94** | **0.36** | **0.62** |
+| 60-day traj | Phase 11 | 26.9 | 24.9 | 0.17 |
+| 60-day traj | **Phase 24** | **17.2** | **15.9** | 0.16 |
+
+Phase 24 achieves ~5× one-step RMSE reduction via transport-prior conditioning and keeps the advantage throughout the 60-day window. Sliding-window reinit every 30 days cuts pure-AR error ~10× and improves calibration 4× — confirming that short-horizon conditional forecasts compose well but pure AR eventually diverges. Both models are underdispersive (spread/err < 1).
+
+- [x] Evaluate instantaneous mode (`train.py --only-pred` or dedicated `eval_instantaneous.py`)
+- [x] Evaluate auto-regressive mode (full test period trajectory)
+- [x] Evaluate sliding-window mode (1-month reinit, `--reinit-every 120`)
+- [x] Compare against Phase 11 unconditional model (one-step + 60-day trajectory)
+- [x] Document results: error growth curves, qualitative panels
 
 ---
 

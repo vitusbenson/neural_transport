@@ -237,20 +237,35 @@ class GenerationPipeline:
         self,
         out_dir,
         *,
-        n_gt_samples=50,
-        n_gen_samples=200,
+        n_ref_timesteps=20,
+        n_gen_per_ref=10,
         seed=42,
-        batch_size=20,
         generate_kwargs=None,
+        # Legacy aliases (ignored except to map old→new names).
+        n_gt_samples=None,
+        n_gen_samples=None,
+        batch_size=None,
     ) -> tuple:
         """Build GT and generated pools for distributional comparison.
 
+        Ensemble-based protocol: picks ``n_ref_timesteps`` random test-period
+        init points and draws ``n_gen_per_ref`` independent one-step samples
+        per init. GT pool = GT co2_{t+1} at those init points (size
+        ``n_ref_timesteps``); gen pool = all samples flattened (size
+        ``n_ref_timesteps * n_gen_per_ref``).
+
         Returns:
-            gt_ds: xr.Dataset [sample, lat, lon, level] -- GT CO2 fields
-            gen_ds: xr.Dataset [sample, lat, lon, level] -- generated CO2 fields
+            gt_ds, gen_ds: xr.Dataset [sample, lat, lon, level]
         """
+        from neural_transport.data import InferenceDataLoader
+
         if generate_kwargs is None:
             generate_kwargs = {}
+        if n_gt_samples is not None:
+            n_ref_timesteps = n_gt_samples
+        if n_gen_samples is not None:
+            # Distribute legacy total gen pool size across refs.
+            n_gen_per_ref = max(1, n_gen_samples // n_ref_timesteps)
 
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -258,54 +273,67 @@ class GenerationPipeline:
         rng = np.random.RandomState(seed)
         target_var = self.target_vars_3d[0]
 
-        # --- GT pool ---
-        n_gt = min(n_gt_samples, len(self.dataset))
-        gt_indices = rng.choice(len(self.dataset), n_gt, replace=False)
+        # Need a proper InferenceDataLoader for generate_ensemble. If one was
+        # not provided at construction, build one from the dataset.
+        if isinstance(self.dataset, InferenceDataLoader):
+            loader = self.dataset
+        else:
+            loader = InferenceDataLoader.__new__(InferenceDataLoader)
+            loader._dataset = self.dataset
+            from neural_transport.data.inference_loader import GridInfo
+
+            loader._grid_info = GridInfo(
+                nlat=self.nlat,
+                nlon=self.nlon,
+                nlev=self.dataset[0][target_var].shape[-1],
+                lat=np.asarray(self._get_grid_coords()[0]),
+                lon=np.asarray(self._get_grid_coords()[1]),
+                levels=np.arange(self.dataset[0][target_var].shape[-1]),
+            )
+
+        # Restrict to indices that have a valid t+1 target.
+        valid_range = len(loader) - 1
+        n_ref = min(n_ref_timesteps, valid_range)
+        init_indices = sorted(rng.choice(valid_range, n_ref, replace=False).tolist())
+
+        # --- GT pool: co2_{t+1} at each init index ---
         gt_fields = []
-        for idx in gt_indices:
-            batch = self.dataset[idx]
-            field = batch[target_var]  # [T, N, C] or [N, C]
+        for idx in init_indices:
+            sample = loader.dataset[idx]
+            next_key = f"{target_var}_next"
+            if next_key in sample:
+                field = sample[next_key]
+            else:
+                nxt = loader.dataset[idx + 1]
+                field = nxt[target_var]
+            if isinstance(field, torch.Tensor):
+                field = field.numpy()
             if field.ndim == 3:
-                field = field[0]  # first timestep: [N, C]
-            gt_fields.append(field.numpy())
-        gt_fields = np.stack(gt_fields)  # [n_gt, N, C]
-
+                field = field[0]
+            gt_fields.append(field)
+        gt_fields = np.stack(gt_fields)
         nlev = gt_fields.shape[-1]
-        gt_fields = gt_fields.reshape(n_gt, self.nlat, self.nlon, nlev)
+        gt_fields = gt_fields.reshape(len(gt_fields), self.nlat, self.nlon, nlev)
 
-        # --- Gen pool ---
-        model_eval = self.model.eval().to(self.device)
-        model_eval.model.generating = True
-        model_eval.model.generate_kwargs = generate_kwargs
-        model_eval.return_intermediates = False
-        model_eval.model.return_intermediates = False
-
-        gen_fields = []
-        n_remaining = n_gen_samples
-
-        template = {
-            k: v.unsqueeze(0).to(self.device) for k, v in self.dataset[0].items() if isinstance(v, torch.Tensor)
-        }
-
-        while n_remaining > 0:
-            this_batch_size = min(batch_size, n_remaining)
-            batch_in = {k: v.expand(this_batch_size, *v.shape[1:]).clone() for k, v in template.items()}
-
-            with torch.no_grad():
-                preds = model_eval(batch_in)
-
-            if target_var in preds:
-                field = preds[target_var].cpu().numpy()  # [B, T, N, C] or [B, N, C]
-                if field.ndim == 4:
-                    field = field[:, -1]  # Take last timestep: [B, N, C]
-                for i in range(this_batch_size):
-                    if not is_bad_sample(field[i]):
-                        gen_fields.append(field[i])
-
-            n_remaining -= this_batch_size
-
-        gen_fields = np.stack(gen_fields[:n_gen_samples])  # [n_gen, N, C]
-        gen_fields = gen_fields.reshape(len(gen_fields), self.nlat, self.nlon, nlev)
+        # --- Gen pool: generate_ensemble with n_steps=1 ---
+        self.model.model.generate_kwargs = generate_kwargs
+        ens = generate_ensemble(
+            self.model,
+            loader,
+            init_indices=init_indices,
+            n_samples=n_gen_per_ref,
+            n_steps=1,
+            target_var=target_var,
+            device=self.device,
+            seed=seed,
+            verbose=self.verbose,
+        )
+        # [init, sample, 1, lat, lon, level] → flatten to [init*sample, lat, lon, level]
+        gen_np = ens[target_var].values[:, :, 0]  # [init, sample, lat, lon, level]
+        gen_fields = gen_np.reshape(-1, self.nlat, self.nlon, nlev)
+        # Filter NaN/Inf bad samples.
+        good = np.array([not is_bad_sample(s) for s in gen_fields])
+        gen_fields = gen_fields[good]
 
         # Build xarray datasets with proper 1D lat/lon coordinate arrays
         lat_vals, lon_vals = self._get_grid_coords()
@@ -822,96 +850,141 @@ def iterative_generate_oco2(
     )
 
 
-def generate_autoregressive(
+def generate_ensemble(
     model,
     data_loader,
-    n_steps,
-    target_var="co2massmix",
-    init_idx=0,
+    *,
+    init_indices,
+    n_samples,
+    n_steps=1,
     reinit_every=None,
+    target_var="co2massmix",
     device="cuda",
+    seed=42,
     verbose=False,
 ):
-    """Auto-regressive rollout for Phase 24 transport-prior FM models.
+    """Unified ensemble generator for Phase 24 FM transport-prior models.
 
-    At each step k, the model is fed:
-      - previous CO2 (fed back from the last prediction, or from ground truth
-        at the k-th step when `reinit_every` triggers a re-initialisation)
-      - GT wind forcings (u, v) from the dataset at step k
-    and it predicts CO2 at step k+1.
+    For each init index, draws ``n_samples`` independent samples (independent
+    noise, same conditioning) and rolls each sample forward ``n_steps`` steps.
+    Wind forcings come from GT at every step. With ``n_steps=1`` this reduces
+    to the one-step probabilistic eval used by ``run_distributional``.
 
     Parameters
     ----------
-    model : nn.Module
-        A Phase 24 FlowMatching model wrapper (expects
-        input_vars=["co2massmix_next", "co2massmix", "u", "v"]).
+    model : LightningModule
+        A Phase 24 FlowMatching model. Set to eval+generating here.
     data_loader : InferenceDataLoader
-        Loader over the test period (provides per-timestep batches with GT CO2
-        and wind fields).
+    init_indices : list[int]
+        Test-period indices used as starting points.
+    n_samples : int
+        Number of independent samples per init.
     n_steps : int
-        Number of forward steps to generate.
-    target_var : str
-        Target variable name (default "co2massmix").
-    init_idx : int
-        Dataset index used as the initial state and as the starting point of
-        the trajectory.
+        Trajectory length (>=1).
     reinit_every : int | None
         If set, every ``reinit_every`` steps the rolled CO2 state is replaced
-        by GT (sliding-window mode). ``None`` → pure auto-regressive rollout.
+        by GT (sliding-window mode).
+    target_var : str
     device : str
+    seed : int
+        Global seed, applied once so the full ensemble is reproducible.
     verbose : bool
 
     Returns
     -------
     xr.Dataset
-        Trajectory with dims ``[time, sample, lat, lon, level]`` and key
-        ``target_var``. Time coord is the dataset's original time axis,
-        aligned to timesteps ``init_idx + 1 ... init_idx + n_steps``.
+        Dims ``[init, sample, lead, lat, lon, level]`` with variable
+        ``target_var``. ``time`` is a 2-D coord ``[init, lead]`` giving the
+        timestamp of each prediction (``init_indices[i] + lead + 1``).
     """
+    torch.manual_seed(seed)
+    if device.startswith("cuda"):
+        torch.cuda.manual_seed_all(seed)
+
     model.eval()
     model.to(device)
+    # Ensure FlowMatching dispatches to _mode="generate" inside forward.
+    inner = getattr(model, "model", model)
+    prev_generating = getattr(inner, "generating", False)
+    inner.generating = True
 
-    init_batch = data_loader.get_batch(init_idx, device=device)
-    current_co2 = init_batch[target_var].clone()  # [1, N, C]
+    dataset = data_loader.dataset
+    n_inits = len(init_indices)
+    times_axis = dataset.ds.time.values
+    T_total = len(data_loader)
 
-    predictions = []
-    times = []
+    # Lazy-determine grid shape from a dummy pass of the first batch.
+    sample0 = dataset[init_indices[0]][target_var]
+    if sample0.ndim == 3:
+        _, N, C = sample0.shape
+    else:
+        N, C = sample0.shape
+    nlat = data_loader.grid_info.nlat
+    nlon = data_loader.grid_info.nlon
+    assert N == nlat * nlon, f"grid mismatch: N={N}, nlat*nlon={nlat * nlon}"
 
-    iterator = range(n_steps)
+    all_preds = np.full((n_inits, n_samples, n_steps, nlat, nlon, C), np.nan, dtype=np.float32)
+    time_coord = np.empty((n_inits, n_steps), dtype=times_axis.dtype)
+
+    outer = enumerate(init_indices)
     if verbose:
-        iterator = tqdm(iterator, desc="Auto-regressive rollout")
+        outer = tqdm(list(outer), desc="Ensemble rollout")
 
     with torch.no_grad():
-        for k in iterator:
-            idx = init_idx + k
-            if idx + 1 >= len(data_loader):
-                break
+        for i_pos, init_idx in outer:
+            # Initial rolled state: GT at init_idx, broadcast to n_samples.
+            init_batch = data_loader.get_batch(init_idx, device=device)
+            current_co2 = init_batch[target_var].expand(n_samples, *init_batch[target_var].shape[1:]).clone()
 
-            batch = data_loader.get_batch(idx, device=device)
+            for k in range(n_steps):
+                idx = init_idx + k
+                if idx + 1 >= T_total:
+                    logger.warning("Init %d hit end of dataset at lead %d; remaining leads left NaN.", init_idx, k)
+                    break
 
-            # Feed back the rolled CO2 state (or re-init from GT at window edges).
-            if reinit_every is not None and k > 0 and k % reinit_every == 0:
-                current_co2 = batch[target_var].clone()
+                batch_single = data_loader.get_batch(idx, device=device)
+                # Expand forcings to n_samples (wind is shared across samples).
+                batch = {
+                    k_: v.expand(n_samples, *v.shape[1:]).clone() if isinstance(v, torch.Tensor) else v
+                    for k_, v in batch_single.items()
+                }
 
-            batch[target_var] = current_co2
+                if reinit_every is not None and k > 0 and k % reinit_every == 0:
+                    current_co2 = batch[target_var].clone()
 
-            # The _next slot is overwritten by x_init=noise inside
-            # inference_forward, but its value still seeds the denormalization
-            # targshift_mean in postprocess. Using the current (rolled) state is
-            # a close proxy for the unknown next mean (CO2 evolves slowly).
-            batch[f"{target_var}_next"] = current_co2.clone()
+                batch[target_var] = current_co2
+                # Placeholder for _next: same as current rolled state. Its value
+                # is only used for targshift mean in postprocess (close proxy).
+                if f"{target_var}_next" in batch:
+                    batch[f"{target_var}_next"] = current_co2.clone()
 
-            preds = model(batch, _mode="generate")
-            pred_co2 = preds[target_var]  # [1, N, C]
-            current_co2 = pred_co2.detach()
+                preds = model(batch, mode="generate")
+                pred_co2 = preds[target_var]  # [n_samples, N, C]
+                current_co2 = pred_co2.detach()
 
-            predictions.append(pred_co2.cpu())
-            times.append(data_loader.dataset.ds.time.values[idx + 1])
+                pred_np = pred_co2.cpu().numpy().reshape(n_samples, nlat, nlon, C)
+                all_preds[i_pos, :, k] = pred_np
+                time_coord[i_pos, k] = times_axis[idx + 1]
 
-    # Assemble xarray Dataset using the dataset's helper.
-    pred_tensor = torch.cat(predictions, dim=0)  # [T, N, C] (B collapses across steps)
-    ds = xr.Dataset({target_var: data_loader.dataset.tensor_to_xarray(pred_tensor)})
-    ds = ds.rename({"batch": "time"}).assign_coords(time=("time", np.array(times)))
+    inner.generating = prev_generating
+
+    # Build xarray dataset.
+    lat_vals = data_loader.grid_info.lat
+    lon_vals = data_loader.grid_info.lon
+    levels = data_loader.grid_info.levels
+
+    ds = xr.Dataset(
+        {target_var: (("init", "sample", "lead", "lat", "lon", "level"), all_preds)},
+        coords={
+            "init": np.array(init_indices),
+            "sample": np.arange(n_samples),
+            "lead": np.arange(n_steps),
+            "lat": lat_vals,
+            "lon": lon_vals,
+            "level": levels,
+            "time": (("init", "lead"), time_coord),
+        },
+    )
     return ds
 
 
@@ -919,15 +992,22 @@ def generate_for_distributional_eval(
     model,
     dataset,
     outpath,
-    n_gt_samples=50,
-    n_gen_samples=200,
+    n_ref_timesteps=20,
+    n_gen_per_ref=10,
     device="cuda",
     target_vars_3d=None,
     generate_kwargs=None,
     seed=42,
-    batch_size=20,
+    # Legacy aliases.
+    n_gt_samples=None,
+    n_gen_samples=None,
+    batch_size=None,
 ):
     """Backward-compatible wrapper around GenerationPipeline.run_distributional()."""
+    if n_gt_samples is not None:
+        n_ref_timesteps = n_gt_samples
+    if n_gen_samples is not None:
+        n_gen_per_ref = max(1, n_gen_samples // n_ref_timesteps)
     pipeline = GenerationPipeline(
         model,
         dataset,
@@ -936,10 +1016,9 @@ def generate_for_distributional_eval(
     )
     return pipeline.run_distributional(
         outpath,
-        n_gt_samples=n_gt_samples,
-        n_gen_samples=n_gen_samples,
+        n_ref_timesteps=n_ref_timesteps,
+        n_gen_per_ref=n_gen_per_ref,
         seed=seed,
-        batch_size=batch_size,
         generate_kwargs=generate_kwargs,
     )
 
