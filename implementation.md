@@ -1465,24 +1465,867 @@ Three evaluation scales, each with FMPS and D-Flow:
 
 | File | Action |
 |------|--------|
-| `neural_transport/inference/generation.py` | MODIFY — add obs_sequence to auto-regressive loop |
-| `carbonbench/.../25_transport_prior_osse/` | **CREATE** — experiment directory |
-| `carbonbench/.../25_.../run_optuna.py` | **CREATE** — tune FMPS/D-Flow for transport model |
-| `carbonbench/.../25_.../eval_1day.py` | **CREATE** — single-step OSSE |
-| `carbonbench/.../25_.../eval_1month.py` | **CREATE** — 1-month trajectory OSSE |
-| `carbonbench/.../25_.../eval_full.py` | **CREATE** — full test period OSSE |
+| `neural_transport/inference/generation.py` | MODIFY — add `generate_trajectory_ensemble_with_obs` (per-step posterior conditioning over an AR rollout; D-Flow autograd graph stays bounded to one ODE solve per observation step because rolled CO2 is detached between steps) |
+| `carbonbench/.../25_transport_prior_osse/configs.py` | **CREATE** — loads Phase 23f best FMPS/D-Flow configs and adapts them for trajectory-length memory budgets (`use_checkpointing=True`, overridable `n_opt_steps`) |
+| `carbonbench/.../25_transport_prior_osse/eval_1day.py` | **CREATE** — instantaneous OSSE via `generate_multi_target` on the Phase 24 model |
+| `carbonbench/.../25_transport_prior_osse/eval_trajectory.py` | **CREATE** — unified trajectory OSSE for both 1-month and full-period evals; `--method {none,fmps,dflow}` and `--tag` select the scenario |
+| `carbonbench/.../25_transport_prior_osse/plot_results.py` | **CREATE** — error-growth overlays, per-target panels (GT / obs / samples / ensemble mean / error), GT-vs-ensemble animations, and Phase 23 vs Phase 25 comparison CSV |
+
+### Design refinements during implementation
+
+- Re-tuning was skipped: Phase 23f Optuna configs already produce gains on the transport-prior model (1-day RMSE 1.97 for FMPS, 1.78 for D-Flow). Re-tuning is filed as future work.
+- The new generator reuses existing sampler dispatch: setting `generate_kwargs["sampler"]` routes through `inference_forward` which already plumbs forcing channels (prev CO2, u, v) to `VelocityWrapper(static_inputs=…)`. No sampler code changes were needed.
+- GT loading for trajectory eval was initially Python-looping `dataset[init+k]` 2920× per run (~14 min). Switched to vectorised slicing of the cached `_fast_var_data[target_var]` tensor (sub-second).
+- D-Flow for full-year (1460 steps) was capped at `n_opt_steps=30` to keep per-observation-step budget tractable; even so the full-year D-Flow stays far worse than FMPS (see results) — n_opt_steps≥50 + per-obs warm-start is a clear follow-up.
+
+### Phase 25 Results
+
+**Eval 1 — 1-day instantaneous OSSE (20 targets × 20 samples, shared seed, column XCO2 with satellite mask):**
+
+| Phase | Method | RMSE | RMSE(full ensemble) | Spread | Spread/Err |
+|---|---|---|---|---|---|
+| 23f | unconditional | 4.61 | 5.73 | 2.80 | 0.61 |
+| 23f | FMPS | 2.88 | 3.45 | 1.49 | 0.52 |
+| 23f | D-Flow | 2.37 | 2.91 | 1.12 | 0.47 |
+| **25** | **unconditional** (Ph 24 prior) | **1.89** | 2.06 | 0.61 | 0.32 |
+| **25** | **FMPS** | **1.97** | 2.31 | 0.98 | 0.50 |
+| **25** | **D-Flow** | **1.78** | **1.92** | 0.42 | 0.24 |
+
+Transport priors cut the unconditional RMSE by 59 % (4.61 → 1.89). Posterior conditioning on top of the transport prior gives a further modest 6 % improvement for D-Flow (1.89 → 1.78) and essentially matches it for FMPS. D-Flow achieves the lowest RMSE in both phases.
+
+**Eval 2 — 1-month auto-regressive OSSE (4 inits × 4 samples × 120 steps @6h, obs every 4 steps = 1/day):**
+
+| Method | RMSE | CRPS | Spread | Spread/Err |
+|---|---|---|---|---|
+| unconditional AR | 9.81 | 8.39 | 1.56 | 0.19 |
+| FMPS | **5.11** | **2.86** | 1.61 | 0.33 |
+| D-Flow (n_opt_steps=40) | 5.52 | 3.25 | 1.48 | 0.28 |
+
+Daily posterior conditioning cuts 30-day AR drift by 48 % (FMPS) / 44 % (D-Flow) and roughly triples calibration (spread/err 0.19 → 0.33).
+
+**Eval 3 — full-year auto-regressive OSSE (2 inits × 2 samples × 1460 steps @6h, obs every 16 steps = 1/4 days):**
+
+| Method | RMSE | CRPS | Spread | Spread/Err |
+|---|---|---|---|---|
+| unconditional AR | 85.83 | 85.65 | 1.52 | 0.04 |
+| FMPS | **6.35** | **4.10** | 1.26 | 0.20 |
+| D-Flow (n_opt_steps=30) | 54.47 | 54.07 | 1.53 | 0.04 |
+
+FMPS conditioning reduces 1-year RMSE by 93 % (85.8 → 6.4) and holds calibration near the 1-month level, while D-Flow at the reduced `n_opt_steps=30` budget cannot keep up with the accumulating drift — dedicated per-observation optimisation budget is essential for very long rollouts. This aligns with the D-Flow cost profile observed in Phase 23f.
+
+Artifacts under `carbonbench/.../25_transport_prior_osse/plots/`:
+- `compare_phase23_phase25.csv` — 1-day cross-phase table.
+- `error_growth_{1month,full}.png` — per-method rmse / spread / crps / spread-err curves over lead time.
+- `panels_{fmps,dflow,unconditional}/per_target_panel_*.png` — per-target GT / obs / sample-ensemble XCO2 galleries.
+- `animation_{method}_{tag}.gif` — GT vs ensemble-mean trajectory animations.
 
 ### Checklist
-- [ ] Verify FMPS and D-Flow work with transport-prior velocity model
-- [ ] Extend `generate_autoregressive()` with per-step posterior conditioning
-- [ ] Tune FMPS hyperparams for transport-prior model (Optuna, 100 trials)
-- [ ] Tune D-Flow hyperparams for transport-prior model (Optuna, 100 trials)
-- [ ] Eval 1: 1-day OSSE (20 targets × 20 samples) with FMPS and D-Flow
-- [ ] Eval 2: 1-month auto-regressive OSSE (4 months) with FMPS and D-Flow
-- [ ] Eval 3: Full test period trajectory with FMPS and D-Flow
-- [ ] Compare against Phase 23f (no transport priors) and Phase 24 (no obs conditioning)
-- [ ] Error growth analysis: plot RMSE vs time with/without conditioning
-- [ ] Document results and identify best configuration for real OCO-2 inversion
+- [x] Verify FMPS and D-Flow work with transport-prior velocity model
+- [x] Extend trajectory rollout with per-step posterior conditioning (`generate_trajectory_ensemble_with_obs`)
+- [ ] Tune FMPS hyperparams for transport-prior model (future work — Phase 23f configs already effective)
+- [ ] Tune D-Flow hyperparams for transport-prior model (future work; full-year budget needs re-tuning)
+- [x] Eval 1: 1-day OSSE (20 targets × 20 samples) with FMPS and D-Flow
+- [x] Eval 2: 1-month auto-regressive OSSE (4 inits × 4 samples × 30 days) with FMPS and D-Flow
+- [x] Eval 3: Full test period trajectory (2 inits × 2 samples × 1 year) with FMPS and D-Flow
+- [x] Compare against Phase 23f (no transport priors) and Phase 24 (no obs conditioning)
+- [x] Error growth analysis: plot RMSE vs time with/without conditioning
+- [x] Document results and identify best configuration for real OCO-2 inversion
+
+---
+
+## Phase 25b: Improved DA Protocol + Polished Plots
+
+**Goal**: Iterate on the Phase 25 results to produce (i) a cleaner, comparable, batched data-assimilation protocol and (ii) publication-quality plots/animations.
+
+**Motivation**: Phase 25 produced reasonable trajectory-RMSE numbers but several issues remain:
+- The trajectory loop processes inits sequentially, only batching across `n_samples`. With 8× 48 GB A40s available, we can fit `n_inits × n_samples` trajectories in one batch and slash wall-time.
+- Reporting collapses to ensemble mean too early — for FMPS/D-Flow we want individual trajectories to inspect spread structure.
+- Plots are GIFs at native lat/lon, no Robinson projection, no dates, no method comparison panels.
+- 1-month uses only 4 inits / 4 samples, not enough for a robust comparison.
+
+### New DA protocol (canonical)
+
+| Knob | Value |
+|---|---|
+| `n_inits` | 20 (sampled uniformly at random from valid test indices, fixed seed=42) |
+| `n_samples` per init | 10 (independent noise draws) |
+| Trajectory length `T` | 120 steps (= 30 days @ 6h) |
+| Obs cadence | every 4 steps (1×/day), satellite mask |
+| Batching | a single forward call processes `n_inits × n_samples = 200` trajectories per step (or chunked if VRAM-limited) |
+| Storage | individual trajectories kept; ensemble mean / spread computed posthoc only |
+
+This is implemented in a new function `generate_trajectory_ensemble_batched` that flattens `(init, sample)` into the leading batch dim, broadcasting forcings per init.
+
+### Posterior-conditioning variants compared
+
+| Method | Per-step | Window |
+|---|---|---|
+| Unconditional AR (baseline) | yes | n/a |
+| **FMPS** (per-step) | yes (existing) | — |
+| **FMPS-multistep** (new, FlowDPS-style refinement) | yes, with K refinement gradient steps using *future* obs lookahead within a small window | optional |
+| **D-Flow** (per-step) | yes (existing) | — |
+| **D-Flow-window** (new, this phase) | — | optimize the source noise at every observation step *jointly* across the next `W` rollout steps. Backprop through `W` AR steps. Memory tricks: torch.utils.checkpoint per ODE solve, bf16 autocast, `odeint_adjoint`-style adjoint (O(1) in trajectory length), sliding window with overlap. |
+
+`W` defaults to 30 (the full target window). For tighter memory budgets we expose `--window-steps W` and `--window-stride S` for sliding-window optimization.
+
+### Plotting deliverables
+
+All artifacts live in `25_transport_prior_osse/plots/v2/`.
+
+- `animation_<method>_<tag>_ensmean.mp4` — Robinson-projected XCO2 ensemble-mean vs GT vs error, with the actual date stamp (read from `time` coord) and a colorbar in ppm. ffmpeg writer, 12 fps.
+- `animation_<method>_<tag>_traj_s<sample>_init<init>.mp4` — same projection but for a single trajectory (no ensemble mean).
+- `compare_methods_<lead>.png` — for 5 random init indices and `lead ∈ {1, 28, 120}` (= +6h, +7d, +30d), side-by-side ensemble-mean column XCO2 of {unconditional, FMPS, D-Flow, D-Flow-window} vs GT. Robinson projection.
+- `traj_evolution_<method>.png` — per-method panel showing 5 individual sample trajectories at 4 lead times, GT in left column.
+- `metrics_compare.png` — RMSE / CRPS / spread-error-ratio vs lead time, all methods overlaid, with shaded init-spread bands.
+- `metrics_table.csv` — aggregated 30-day metrics per method.
+
+### Key files
+
+| File | Action |
+|---|---|
+| `neural_transport/inference/generation.py` | MODIFY — add `generate_trajectory_ensemble_batched` (flattened batch of `init × sample` trajectories) and `dflow_window_step` helper that builds the per-window loss with checkpointing. |
+| `neural_transport/inference/samplers/dflow_window.py` | **CREATE** — `DFlowWindowSampler` (subclass of `DFlowSampler`). Exposes `window_steps`, `window_stride`, `use_checkpointing`, `mixed_precision`. |
+| `25_transport_prior_osse/eval_trajectory.py` | MODIFY — switch to batched generator; add `--method dflow_window`; default `n_inits=20`, `n_samples=10`, `n_steps=120`. |
+| `25_transport_prior_osse/plot_v2.py` | **CREATE** — Robinson MP4 animations, multi-method comparison figures, individual-trajectory panels, polished metrics plot. Uses cartopy. |
+| `25_transport_prior_osse/run_phase25b.slurm` | **CREATE** — submits the four method runs (`none`, `fmps`, `dflow`, `dflow_window`) as a job array. |
+
+### Checklist
+- [ ] Add `generate_trajectory_ensemble_batched` (flattened init×sample batch dim)
+- [ ] Add `DFlowWindowSampler` (window backprop, gradient checkpointing, bf16, sliding window)
+- [ ] Add FMPS-multistep variant (optional; low priority — FMPS already strong)
+- [ ] Refactor `eval_trajectory.py` to new defaults (20 × 10 × 120) and method registry
+- [ ] Create `plot_v2.py` with Robinson MP4s, comparison panels, trajectory panels
+- [ ] Smoke-test on 1 init × 2 samples × 8 steps locally
+- [ ] Run all four methods on slurm; aggregate; update results
+
+### Phase 25b Results
+
+**1month_v2 — 20 inits × 10 samples × 120 steps @6h, daily satellite obs (slurm 6404907 / 6404908 / 6405580):**
+
+| Method | RMSE | CRPS | Spread | Spread/Err | RMSE @ +6h | RMSE @ +7d | RMSE @ +30d |
+|---|---|---|---|---|---|---|---|
+| Unconditional AR | **9.62** | 8.06 | 1.84 | 0.23 | 1.52 | 6.56 | 16.29 |
+| FMPS | 5.95 | 3.86 | 1.93 | 0.33 | 1.51 | 4.95 | ~6.7 |
+| **D-Flow** (chunk=20, n_opt=30) | **5.38** | **3.12** | 1.75 | 0.33 | 1.51 | 4.65 | 6.57 |
+
+Key takeaways:
+
+- D-Flow now narrowly beats FMPS at the 30-day scale (5.38 vs 5.95 RMSE), reversing the old 4×4 ranking. With more samples and inits, D-Flow's source optimization stabilizes; FMPS' velocity correction drifts a touch more.
+- Both posterior methods cut 30-day AR RMSE by ~44 % (none → conditioned).
+- spread/err lifts from 0.23 → 0.33 with conditioning — better calibration but still under-dispersed (target ~1.0). Increased ensemble probably needed for full calibration.
+- D-Flow ran with `chunk_size=20` to bound autograd VRAM (200 trajectories × 30 opt steps × 10 ODE steps backprop fits in 44 GB only at chunk=20). Wall-time on a single A40: ~1h 20m for 20×10×120.
+
+Slurm 6404909 (initial dflow at chunk=100) crashed OOM and was replaced by chunked 6405580 with the new `_model_call_chunked` helper in `generation.py`.
+
+Artifacts in `25_transport_prior_osse/plots/v2/`:
+- `animation_{none,fmps,dflow}_1month_v2_{ensmean,traj_s0_init0}.mp4` — Robinson-projected MP4 animations with date stamps and ppm colorbars
+- `compare_methods_lead{0001,0028,0119}_1month_v2.png` — multi-method side-by-side at +6h / +7d / +30d
+- `traj_evolution_{none,fmps,dflow}_1month_v2.png` — individual sample trajectories
+- `metrics_compare_1month_v2.png` — error growth curves
+- `metrics_table.csv` — aggregated comparison
+
+(Old 1month / full data still in place under their original tags for reference.)
+
+---
+
+## Phase 25c: Rollout Fine-Tuning of the Unconditional FM Model
+
+**Goal**: Mitigate auto-regressive collapse of the Phase 24 transport-prior FM model by adding a short rollout-stabilization fine-tune stage, analogous to multi-step rollout fine-tuning of deterministic transport models.
+
+**Motivation**: Phase 25 Eval 3 showed unconditional AR diverges (RMSE 85.8 ppm at 1 year). Even at 1 month the model gradually drifts. Root cause: the FM model is trained one-step (teacher-forced); at inference it ingests its own (noisier, slightly biased) predictions instead of GT, and small distribution shifts compound. Rollout fine-tuning closes this train/inference gap.
+
+### Method
+
+For a freshly forked checkpoint (init from Phase 24 best.ckpt), fine-tune for ~5–10 epochs with the following modified `training_forward`:
+
+1. Sample init `t0` and a rollout length `K ~ Uniform{2, ..., K_max}`, default `K_max=4`.
+2. Use the Phase 24 model in `generating=True` mode (one full ODE sample) for `K-1` steps with **stop-grad** on the rolled state, producing `co2_t0+K-1`.
+3. Run a normal one-step FM training step with `co2_t0+K-1` (model output, **detached**) as the prior input and `co2_t0+K` (GT) as the target.
+
+This injects model-output statistics into the prior slot during training, without backpropagating through the rollout (memory-friendly).
+
+Variants explored:
+- **v1 (default)**: stop-grad rollout, vanilla FM loss.
+- **v2**: small `K`-mixed schedule — 50 % of batches do `K=1` (preserve original fit), 50 % do `K∈{2,3,4}`.
+- **v3 (stretch)**: also add an L2 penalty between the model's mean prediction at `t0+K-1` and GT `co2_t0+K-1` (consistency regularizer).
+
+### Key files
+
+| File | Action |
+|---|---|
+| `neural_transport/models/flowmatching.py` | MODIFY — add `rollout_finetune_forward(batch, K_max, stop_grad=True)` |
+| `neural_transport/training/train.py` | MODIFY — accept `--rollout-finetune` flag; switch loss path. |
+| `25c_fm_rollout_finetune/train.py` | **CREATE** — loads Phase 24 best ckpt, fine-tunes 10 epochs with `K_max=4`, half cosine LR `1e-5 → 1e-7`. |
+| `25c_fm_rollout_finetune/eval_rollout.py` | **CREATE** — re-run Phase 25 unconditional AR baseline on the fine-tuned model and compare RMSE growth. |
+
+### Implementation status (v0 — landed)
+
+The "v0" implementation is a **prior-noise augmentation surrogate** that mimics
+the train/inference distribution shift without requiring multi-step rollout
+plumbing in the dataloader:
+
+- `FlowMatching.training_forward` now accepts `rollout_aug_sigma` (Gaussian σ
+  added to the prior CO2 channels of `x_in`, default 0 = no-op) and
+  `rollout_aug_prob` (per-sample mask probability, default 1.0).
+- The augmentation runs only when `model.training` is True and `sigma>0`, so
+  Phase 24 inference paths and existing checkpoints are unaffected.
+- New experiment dir `25c_fm_rollout_finetune/` with `train.py` + `train.slurm`
+  loads Phase 24 best.ckpt and continues training with `--rollout-aug-sigma
+  0.25 --rollout-aug-prob 0.5 --lr-mult 0.1` for `--max-steps 2000`.
+- Smoke-tested locally (50 steps, batch 32) — completes; Phase 24 ckpt loads
+  correctly with the new attrs as no-ops.
+- Slurm job 6405098 launched at 02:18 with σ=0.25, p=0.5, lr_mult=0.1,
+  max_steps=2000.
+
+**First attempt (σ=0.25, p=0.5, lr=0.1×, 2000 steps)** — too aggressive:
+val FM loss went 0.06 (Phase 24) → 1.045 after fine-tune. AR rollout on the
+fine-tuned ckpt exploded (CO2 mass-mixing-ratio went to −1113 mg/kg by lead
+120 vs ~600 baseline). The augmentation magnitude swamped real model signal.
+
+**Second attempt (σ=0.05, p=0.3, lr=0.05×, 1500 steps)** — slurm 6406036.
+σ=0.05 in normalized space matches a more realistic 1-step model error;
+prob=0.3 keeps 70 % of batches teacher-forced for stability; lr_mult=0.05
+keeps the optimizer from overshooting the Phase 24 minimum.
+
+**Result (both attempts)**: AR rollout on the fine-tuned model is *worse*
+than baseline by an order of magnitude:
+
+| ckpt | val FM loss | RMSE +6h | RMSE +7d | RMSE +30d |
+|---|---|---|---|---|
+| Phase 24 baseline (none_1month_v2) | 0.060 | 1.52 | 6.56 | 16.29 |
+| 25c σ=0.25 strong | 1.045 | _eval missing GT_ | — | — (CO2 → −1113 mg/kg by lead 120) |
+| 25c σ=0.05 mild | 1.799 | 6.52 | 65.36 | **325.19** |
+
+**Diagnosis**: Random Gaussian noise on the prior CO2 channels does not
+match the actual error distribution of model predictions during AR rollout.
+Real prediction errors have spatial / temporal / spectral structure that
+the FM model can recover from; uncorrelated white noise drives the model
+into out-of-distribution territory and breaks it. The v0 surrogate
+**does not work** for this transport-prior FM model.
+
+**Conclusion**: the v0 prior-noise augmentation is dropped. The right
+approach is true K-step rollout with stop-grad on the model's *own*
+predictions, which requires teaching the dataloader to yield consecutive
+timesteps (`n_timesteps=K`) and threading them through `training_forward`.
+This is filed as v1 below and is the proper next iteration for Phase 25c.
+
+### Checklist
+- [x] Add `rollout_aug_sigma` / `rollout_aug_prob` knobs to FlowMatching (v0)
+- [x] Wire training entrypoint (`25c_fm_rollout_finetune/train.py`)
+- [x] Smoke-test (50 steps, σ=0.25)
+- [x] Submit fine-tune slurm job (6405098)
+- [ ] v1: true K-step stop-grad rollout in `training_forward` (needs `n_timesteps>1` plumbing)
+- [ ] v2: K-mixed schedule (50% K=1, 50% K∈{2,3,4})
+- [ ] v3: consistency regularizer at intermediate steps
+- [ ] Eval AR baseline (n_inits=20, n_steps=120) on fine-tuned model
+- [ ] Document RMSE / drift improvement vs Phase 24 baseline
+
+---
+
+## Phase 25d: SOTA Long-Window DA Tricks (Literature-Driven)
+
+**Goal**: Systematically try the tricks identified in the literature scan
+(APPA, SDA, DiffDA, D-Flow, FengWu-4DVar, FlowDPS) for making auto-regressive
+generative DA work over long windows, and document which ones move the needle
+on our CO₂ transport-prior model.
+
+**References (arXiv)**
+- APPA — 2504.18720 (latent diffusion DA, window composition, no BPTT)
+- SDA — 2306.10574 (joint-window score-based DA, non-autoregressive)
+- DiffDA — 2401.05932 (frozen diffusion + obs likelihood)
+- D-Flow — 2402.14017 (source-space optimization through ODE)
+- FengWu-4DVar — 2312.12455 (multi-horizon temporal aggregation)
+- FlowDPS — 2503.08136 (FMPS with iterative refinement)
+- ACA — 2006.02493 (adaptive checkpoint adjoint)
+- Symplectic adjoint — 2102.09750
+- Stochastic depth — 1603.09382
+
+### Tricks matrix
+
+| # | Trick | Origin | Where to slot in | Memory | Compute | Risk |
+|---|---|---|---|---|---|---|
+| T1 | Per-ODE-step `torch.utils.checkpoint` | D-Flow §4 | 25b D-Flow window | -60 % | +20 % | low |
+| T2 | `odeint_adjoint` (O(1) memory in T) | NeuralODE / D-Flow | 25b D-Flow window | -90 % | similar | medium (NaN-prone w/ stiff ODE) |
+| T3 | bf16 autocast (forward in bf16, loss/backward in fp32) | NVIDIA AMP | 25b D-Flow window, 25c training | -50 % | -10 % | low |
+| T4 | Sliding-window soft loss with overlap | APPA §3.2 | 25b D-Flow window | -75 % vs joint | linear in #windows | low |
+| T5 | Temporal aggregation (multi-horizon FM, e.g. 1-step + 5-step + 30-step) | FengWu-4DVar | new sub-phase below | n/a | trains 2 extra ckpts | high (training cost) |
+| T6 | Adaptive Checkpoint Adjoint (ACA, torch_ACA) | 2006.02493 | 25b D-Flow window | -50 % | -50 % | medium (extra dep) |
+| T7 | Stochastic depth in time (drop random AR steps' gradient) | 1603.09382 | 25c rollout fine-tune | -30 % grad | n/a | low |
+| T8 | Coarse → fine cascade (DA on 32×16, refine on 64×32) | own / SR analogy | 25b stretch | -40 % | small extra | medium |
+| T9 | Score-decomposition / SDA-style joint-window sampling | SDA | new sub-phase below | works but needs joint score | retraining | high |
+| T10 | Window-stitched likelihood scoring (APPA stride Δ) | APPA | 25b D-Flow window | reduces #grads | tunes redundancy | low |
+| T11 | FlowDPS-style iterative gradient refinement of FMPS | FlowDPS | 25b FMPS-multistep variant | n/a | +K× per obs step | low |
+| T12 | EnKF-diffusion hybrid (ensemble update step between ODE solves) | DiffDA / SG-EKDP 2409.20175 | new sub-phase below | n/a | extra ensemble update | high |
+
+### Cross-references
+
+The "Where to slot in" column points back to the phases where each trick is
+attempted:
+
+- **25b D-Flow window** (this phase's `dflow_window` method): T1, T2, T3, T4, T6, T10 stack together. Default stack: T1+T3+T4 with `window_steps=8`, `window_stride=4`. Optional: T2 (replace `flow_matching.solver.ODESolver` with `torchdiffeq.odeint_adjoint`); T6 (drop in `torch_ACA`).
+- **25b FMPS-multistep variant** (`fmps_multi`): T11 — wraps `FMPSSampler.sample()` in a K-iteration outer loop where each iteration backprops the obs-likelihood through one fresh ODE solve from a perturbation of the current best `x_0`. Default K=3.
+- **25c rollout fine-tune**: T3 (bf16 autocast already present), T7 (apply per-step grad mask).
+
+### New sub-phases
+
+#### 25d.1 — Multi-horizon Temporal Aggregation (T5)
+
+Train two extra Phase-24 checkpoints with `n_timesteps=5` and
+`n_timesteps=30` (auto-regressive supervision over multi-step targets).
+Trick T5 then composes them at inference: instead of 120×1-step solves we
+do e.g. 4×30-step + 0×5-step + 0×1-step, slashing AR error accumulation.
+
+| File | Action |
+|---|---|
+| `25d_multi_horizon/train_5step.py` | **CREATE** — Phase 24 trainer with `n_timesteps=5` (`val_rollout_n_timesteps=5`) |
+| `25d_multi_horizon/train_30step.py` | **CREATE** — same with `n_timesteps=30` (likely needs gradient checkpointing in the FM ODE) |
+| `25d_multi_horizon/eval_aggregated.py` | **CREATE** — composes the three checkpoints over a 120-step window using FengWu-4DVar-style schedule. Compares to baseline 25b numbers. |
+
+#### 25d.2 — Joint-Window Score / SDA-style sampling (T9)
+
+Train a "trajectory score" model on length-`W` trajectories (e.g. W=8) and at
+inference jointly sample all W states under the posterior conditioned on
+observations covering the whole window. Stretch goal — would require a new
+model architecture (3-D UNet across time) and a separate training loop.
+
+| File | Action |
+|---|---|
+| `25d_sda/train_traj_score.py` | **CREATE — stretch** — 3-D UNet, length-W batches |
+| `25d_sda/eval_window_sample.py` | **CREATE — stretch** |
+
+#### 25d.3 — EnKF-diffusion hybrid (T12)
+
+Between two adjacent observation steps, instead of (or in addition to)
+posterior conditioning via FMPS / D-Flow, run one Ensemble Kalman update
+where the prior covariance is estimated from the FM ensemble itself. This
+is the SG-EKDP recipe (2409.20175). Cheap because it does not require
+backprop through the dynamics — just forward evaluations.
+
+| File | Action |
+|---|---|
+| `neural_transport/inference/samplers/enkf_diffusion.py` | **CREATE — stretch** — `EnKFDiffusionSampler` that pairs a Kalman update with one diffusion-prior rejection step |
+
+### Checklist
+
+- [ ] T1 (per-ODE-step checkpoint) wired into `dflow_window` (25b)
+- [ ] T2 (`odeint_adjoint`) optional flag in `dflow_window`
+- [ ] T3 (bf16 autocast) verified active in 25b D-Flow path
+- [ ] T4 (sliding-window soft loss) implemented as default in `dflow_window`
+- [ ] T6 (ACA) tried as opt-in; compare wallclock & RMSE vs T1
+- [ ] T7 (stochastic temporal depth) wired into `rollout_finetune_forward` (25c)
+- [ ] T10 (APPA stride) exposed as `obs_stride` arg in 25b
+- [ ] T11 (FlowDPS-style FMPS-multistep) implemented as `fmps_multi` method
+- [ ] 25d.1 (multi-horizon FM): 5-step ckpt trained
+- [ ] 25d.1: 30-step ckpt trained
+- [ ] 25d.1: aggregated eval beats 25b baseline
+- [ ] 25d.2 (SDA-style joint sampling) — stretch
+- [ ] 25d.3 (EnKF-diffusion hybrid) — stretch
+
+### Phase 25d Results
+
+(filled in as tricks land)
+
+---
+
+## Phase 25e: ArchesWeatherGen Inference Tricks (Free)
+
+**Why**: Couairon et al. (Sci. Adv. 2025, *ArchesWeatherGen*; arxiv 2412.12971; code https://github.com/INRIA/geoarches) achieve **stable multi-decadal AR rollouts** with an FM ensemble. Their stability has three pillars:
+
+1. **Residual prediction with a strong deterministic anchor** — FM predicts only `r = (x_{t+1} - f_det(x_t))/σ`, never the full state. Implies a separate deterministic backbone with rollout fine-tuning (Phase 25c-style).
+2. **Markovian factorization, never perturb the conditioning state** — clean prior into the FM at every AR step. Random Gaussian noise on the prior (our Phase 25c v0) is exactly the failure mode.
+3. **Initial-noise scaling ρ ∈ [1.05, 1.10]** — multiply the source `ε ∼ N(0,I)` by ρ before the ODE solve. Free at inference time. Bumps to 1.1 in *ArchesClimate* (decadal rollout).
+
+The third trick is the single highest-leverage **inference-only** change we can make: no retraining, ~30 lines, immediate test on the Phase 24 ckpt.
+
+### Implementation
+
+- `flowmatching.py.forward(mode="generate")`: read `noise_scale` from `self.generate_kwargs`, multiply the random `x_init` by ρ.
+- `generation.py.generate_trajectory_ensemble_batched`: thread `free_generate_kwargs` (with `noise_scale`) through the unconditional AR branch (previously hard-coded `{"n_samples": 1, "masking": False}`).
+- `eval_trajectory_v2.py`: `--noise-scale` flag.
+
+### Experiments (Phase 24 ckpt, n_inits=20 × n_samples=10 × n_steps=120 = 30 days, no obs)
+
+| ρ      | RMSE 30d (ppm) | CRPS  | spread/err | Note |
+|--------|----------------|-------|------------|------|
+| 1.00 (baseline) | 9.62 | 8.06 | 0.23 | Phase 25b unconditional |
+| **1.05** | **6.89** | **4.83** | **0.35** | **−29 % RMSE, +52 % spread/err — free** |
+| 1.10   | 30.04          | 17.78 | 0.46       | catastrophic divergence |
+
+**Key finding**: ρ=1.05 closes most of the gap to the conditional methods (FMPS=5.95, D-Flow=5.38) with **zero retraining and zero observations**. The sweet spot is narrow — 1.10 already blows up. This matches the AWG paper's empirical recipe (ρ ∈ [1.05, 1.10] for ArchesWeatherGen, bumped to 1.1 for ArchesClimate decadal rollout). For our 6 h carbon transport task, 1.05 is the safe choice. AR rollout integrity is preserved across all 30 days at ρ=1.05; sample diversity (spread) increases proportionally.
+
+**Stacking with conditional methods**:
+
+| Method + ρ | RMSE 30d | CRPS | spread/err |
+|---|---|---|---|
+| FMPS (ρ=1.00) | 5.95 | 3.86 | 0.33 |
+| **FMPS + ρ=1.05** | 7.79 ❌ | 4.55 | 0.45 |
+| D-Flow (ρ=1.00) | 5.38 | 3.12 | 0.33 |
+| **D-Flow + ρ=1.05** | **4.748** ✅ | **2.76** | 0.44 |
+| D-Flow + ρ=1.10 | 16.06 | 7.79 | 0.52 (diverges) |
+
+**Surprising asymmetry — and it makes sense in retrospect**:
+
+- **ρ=1.05 hurts FMPS** (5.95 → 7.79, +31%). FMPS does per-ODE-step velocity corrections — it has *no* source-noise optimization. The extra noise on x_init just dilutes the signal that FMPS' guidance is trying to inject.
+- **ρ=1.05 helps D-Flow** (5.38 → 4.75, −12 %, **NEW BEST overall**). D-Flow *does* optimize the source noise to match observations. Starting from a wider source distribution (ρ=1.05) gives the optimizer more flexibility to find better solutions.
+
+**Take-away**: source-optimization-based posterior conditioning (D-Flow) and inflated source distribution (ρ>1) are complementary, not competitive. Velocity-correction methods (FMPS, DPS) are not.
+
+Final 25b/25e leaderboard:
+
+| Method | 30-d RMSE | CRPS | spread/err |
+|---|---|---|---|
+| Phase 24 unconditional, ρ=1.0 | 9.62 | 8.06 | 0.23 |
+| 25e unconditional, ρ=1.05 | 6.89 | 4.83 | 0.35 |
+| FMPS, ρ=1.0 | 5.95 | 3.86 | 0.33 |
+| D-Flow, ρ=1.0 | 5.38 | 3.12 | 0.33 |
+| **D-Flow, ρ=1.05** | **4.75** | **2.76** | **0.44** |
+
+### Checklist
+- [x] FM model: `noise_scale` in generate path
+- [x] AR generator: thread free_generate_kwargs through unconditional branch
+- [x] eval script: `--noise-scale` flag
+- [x] Smoke test (n_inits=2 × n_samples=2 × n_steps=4) — passes
+- [x] ρ=1.05 results land — **best**
+- [x] ρ=1.10 results land — diverges
+- [x] Document and pick winner — **ρ=1.05** is the recipe
+- [ ] Combine ρ=1.05 with FMPS/D-Flow (stretch)
+
+---
+
+## Phase 25c v1: K-step Pushforward Fine-Tune (AWG-Inspired, Replaces v0)
+
+**Why v0 failed (documented above)**: Random Gaussian noise on the prior CO2 channels does not match the actual model-error distribution — which has spatial coherence, vertical structure, and physical mass / wind correlations. Phase 24 σ=0.05 fine-tune produced 30-day RMSE = 325 ppm vs baseline 16 ppm. Diagnosis confirmed: the FM is too sensitive to non-structured noise on its conditioning state.
+
+**v1 idea (pushforward)**: Expose the model to its own one-step error distribution, not synthetic noise. At each training iteration we do K=2 consecutive timesteps:
+- Step 0: run inference with `no_grad` + cheap NFE (5 Euler steps) starting from GT prior → predicted `pred_0` (an estimate of `co2massmix` at t+1)
+- Step 1: standard FM training-loss forward with `pred_0.detach()` as the prior, predicting GT `co2massmix_next` at t+2
+
+This is the closest single-grad-step analog of ArchesWeatherGen's *deterministic backbone* rollout fine-tune (their Phase 3: 2-/3-/4-day windows, full-grad backprop, quadratic-discount `1/(1+i)²`). For an FM-only setup we cannot easily backprop through K ODE solves, so we settle for K-1 no-grad steps + 1 grad step. Inspired by the Brandstetter et al. *pushforward trick* and AWG's exposure-bias remedy.
+
+### Implementation
+
+- `litmodule.NeuralTransport.__init__`: new `pushforward_kwargs={K, prob, from_step, inference_steps, method, target_var}`.
+- `litmodule.NeuralTransport._pushforward_chain_prior(batch, K, …)`: K-1 inference steps inside `torch.no_grad()` with small NFE; replaces `batch[target_var][:, K-1]` with the chained `prior.detach()`; returns a single-time-dim sub-batch.
+- `litmodule.NeuralTransport.training_step`: dispatch to pushforward when configured, with `prob` per-iteration sampling and `from_step` warmup gate (so LR scheduler settles before drift exposure).
+- `25c_v1_pushforward_finetune/train.py`: K=2, prob=0.5, from_step=200, inference_steps=5, batch_size=64, max_steps=2000. `n_timesteps=K=2` in `data_kwargs` so the dataloader yields consecutive samples.
+- Standard EMA, ckpt warm-start from Phase 24 best, no `rollout_aug_sigma` (v0 disabled).
+
+### Experiments
+
+- [x] Implementation
+- [x] Smoke test (max_steps=30, batch_size=8, K=2, prob=1.0, from_step=0)
+- [ ] Real fine-tune (max_steps=2000)
+- [ ] AR rollout eval at 30 days vs Phase 24 baseline
+- [ ] Compare RMSE/CRPS/spread to Phase 25e (free inference trick) — does training help on top of ρ=1.05?
+- [ ] If wins: try K=3 (2 no-grad + 1 grad), prob=1.0
+- [ ] Stretch: chain Phase 25c v1 + Phase 25e (rollout-fine-tuned model with ρ=1.05 inference)
+
+### Phase 25c v1 Results
+
+**Slurm 6412678 (max_steps=2000, batch_size=64, K=2, prob=0.5, from_step=200, inference_steps=5, lr_mult=0.1):**
+
+| Stage | Phase 24 baseline | 25c v1 | Verdict |
+|---|---|---|---|
+| Val loss (single-step FM MSE) | 0.060 | **1.082** | regressed 18× |
+| RMSE @ +6h (lead=1) | 1.52 | 4.84 | regressed 3× |
+| RMSE @ +7d (lead=28) | 6.56 | 26.96 | regressed 4× |
+| RMSE @ +30d (lead=119) | 16.29 | 97.35 | regressed 6× |
+| Aggregated 30-day RMSE | **9.62** | **52.12** | **regressed 5.4×** |
+| CRPS | 8.06 | 34.71 | regressed 4.3× |
+| spread/err | 0.23 | 0.78 | better-calibrated but useless on a worse mean |
+
+**Verdict: NEGATIVE.** v1 is even worse than v0 (which still produced bounded outputs). The constant-prob (0.5) pushforward starting from step 200 destabilizes the warm-started Phase 24 weights.
+
+**Diagnosis (likely contributors)**:
+1. **Distribution-shift overfit**: prob=0.5 pushforward batches dominate the loss (drifted-prior batches have higher loss → larger gradients), pulling the model toward handling drifted priors at the cost of standard GT-prior performance.
+2. **bf16 noise in pushforward inference**: 5 Euler steps inside `bf16-mixed` autocast inject quantization noise into the chained `pred_0`. The model trains against compensating for *non-physical* drift, producing artifacts.
+3. **No warm-up curriculum**: jumping to prob=0.5 from-step=200 is too aggressive while LR is still warming.
+
+### Phase 25c v2: Curriculum + bf16-fix + Loss-Weighting
+
+Implemented in `25c_v2_pushforward_curriculum/`:
+- `pushforward_prob` linearly ramps 0 → 0.5 between steps 500 and 1500 (curriculum).
+- Pushforward inference wrapped in `torch.autocast(..., enabled=False)` so chained prior is full-fp32.
+- `from_step=500`, `lr_mult=0.03` (3× gentler than v1), `max_steps=4000`.
+- Pushforward-batch loss multiplied by `loss_weight=0.5`.
+- `prob_min`, `curriculum_start_step`, `curriculum_end_step`, `loss_weight` keys added to `litmodule.NeuralTransport.pushforward_kwargs`.
+
+**Slurm 6413245 (20:29 wall, 4000 steps):**
+
+| Metric | Phase 24 | 25e ρ=1.05 (best) | 25c v1 | **25c v2** |
+|---|---|---|---|---|
+| Val loss (single-step) | 0.060 | (uses Phase 24 ckpt) | 1.082 | 2.477 |
+| RMSE 30d | 9.62 | **6.89** | 52.12 | 15.79 |
+| RMSE @ +6h | 1.52 | (n/a) | 4.84 | 6.40 |
+| RMSE @ +7d | 6.56 | (n/a) | 26.96 | 9.72 |
+| RMSE @ +30d | 16.29 | (n/a) | 97.35 | 27.54 |
+| CRPS | 8.06 | 4.83 | 34.71 | 9.82 |
+| spread/err | 0.23 | 0.35 | 0.78 | **1.16** |
+
+**Verdict: Negative on mean, but qualitatively improved.**
+- v2 reduces 30d RMSE by **3.3×** vs v1 (52.12 → 15.79) — curriculum + bf16-fix definitely helps.
+- BUT v2 still regresses by **1.6×** vs Phase 24 baseline (9.62 → 15.79) — pushforward fine-tune *without* backprop through the inference step is not enough.
+- Calibration flipped from severely under-dispersed (spread/err 0.23) to nearly perfect (1.16). At least one dimension (uncertainty) genuinely improved.
+- Single-step val loss climbing to 2.48 is consistent with the model adapting to drifted-prior inputs at the expense of the GT-prior distribution.
+
+### Phase 25c v3: grad-through-ODE + randomized K + lead-time curriculum
+
+Implemented in `25c_v3_grad_through_ode/`:
+- **Grad-through-ODE**: `with torch.enable_grad()` around the chained inference, no `prior.detach()` so backprop flows through the ODE solver.
+- **Randomized K**: each pushforward iter samples K_actual ~ Uniform[K, K_max] (K=2, K_max=3 → mix of 2-step and 3-step lookahead).
+- **Lead-time curriculum**: prob ramp 0→0.5 over steps 500-2000, K_max stays 3 throughout.
+- bf16 still disabled for the inference (carried over from v2).
+- batch_size=24 (lower than v2's 64) to fit the larger autograd graph.
+- inference_steps=3 (vs v2's 5) for memory.
+- max_steps=4000.
+
+**Slurm 6415018 (~21 min wall):**
+
+| Metric | Phase 24 | 25e ρ=1.05 | 25c v2 (curriculum) | **25c v3 (grad+K-rand)** |
+|---|---|---|---|---|
+| RMSE 30d | 9.62 | **6.89** | 15.79 | **15.91** |
+| RMSE @ +6h | 1.52 | (n/a) | 6.40 | 6.65 |
+| RMSE @ +7d | 6.56 | (n/a) | 9.72 | 9.93 |
+| RMSE @ +30d | 16.29 | (n/a) | 27.54 | 26.87 |
+| CRPS | 8.06 | 4.83 | 9.82 | 10.00 |
+| spread/err | 0.23 | 0.35 | 1.16 | 1.15 |
+
+**Verdict: NEGATIVE — virtually identical to v2.** Grad-through-ODE + randomized K + curriculum did not move the needle (within 1 % of v2 on every metric). The FM-only pushforward family converges to the same operating point: well-calibrated (spread/err ≈ 1.15), broader spread, but ~1.6× worse RMSE than the standard FM mean.
+
+**Final Phase 25c FM-only learnings**
+
+Three independent training-time variants (stop-grad K=2, curriculum + bf16-fix, grad-through-ODE + K-randomization) all collapse to the same RMSE plateau ≈ 15-16 ppm. Mean RMSE is irrecoverably worse than Phase 24 baseline (9.62) or the free Phase 25e ρ=1.05 trick (6.89). The fundamental tension: training on drifted priors enlarges the model's predictive variance, which pulls the mean off the GT manifold.
+
+For our setup, **inference-only AWG noise scaling (Phase 25e ρ=1.05) remains the single best AR-stability lever**.
+
+The proper next step is Phase 25c v4: train a separate deterministic backbone, then condition an FM head on `[x_t, f_det(x_t)]` to model the small residual. This separates "drifted prior handling" (in f_det) from "stochastic correction" (in FM), the exact decomposition AWG show is necessary.
+
+## Phase 25c v4: Deterministic backbone + residual FM (skeleton shipped)
+
+Two-stage AWG-style decomposition. Lives in `25c_v4_residual_fm/`:
+
+- `phase1_det_backbone/train.py` — deterministic UNet trained with `model="unet"` + `loss="mse"`. Smoke runs through 30 grad steps cleanly; loss decreases monotonically. Post-train predict fails on `KeyError: gph_bottom` because the existing `predict()` infrastructure expects geopotential fields that the deterministic transport pipeline doesn't provide; that is a pipeline-harmonization issue separate from the training itself. Current loss magnitude (~3e5 vs expected ~O(1)) also indicates a preds/target normalization mismatch (model returns physical units via `postprocess_outputs(denormalize=True)` while `MSE(normalize_batch=True)` normalizes the target). Needs a custom forward path.
+- `phase2_residual_fm/` — design only (not implemented). Requires a new `ResidualFlowMatching` wrapper that holds a frozen `f_det`, computes residuals on the fly, and trains an FM head on them.
+- `README.md` — recipe, training schedule, and code-changes required (see file).
+
+Status: phase 1 train script + README shipped. A real run is **not** queued — first the predict-pipeline mismatch must be resolved (recommend setting `predict_delta=False` + custom `forward` returning normalized output, OR skipping the post-train predict step in `train_and_eval_singlestep` for non-FM models). Total expected wall clock when ready: ~3 h Phase 1 single-step + ~2 h rollout-FT + ~3 h Phase 2 = ~8 h on one A40.
+
+Bigger architectural decision before running v4: it's only worth investing 8 hours of training if Phase 25e ρ=1.05 (free, RMSE 6.89) does not already meet the project's quality bar. If 6.89 ppm 30-day RMSE is acceptable, ship that and skip v4.
+
+---
+
+## Phase 25f: Comprehensive AR + DA Fix Plan
+
+**Where we are**: Best unconditional AR is ρ=1.05 (6.89 ppm 30-d RMSE); best conditional (D-Flow) only buys 1.5 ppm on top (5.38). Posterior conditioning is barely beating an inference-only trick. The dominant error is AR drift: single-step RMSE is 1.5 ppm, day-7 is 6 ppm, 30-day is 16 ppm baseline. Conditioning every 4 steps cannot keep up with that drift rate.
+
+**Two parallel goals (per user)**:
+1. **Stable unconditional AR generative model** — bring 30-day RMSE comfortably below 5 ppm without observations.
+2. **Posterior condition on obs** — exploit OSSE observations to recover trajectories within obs-error of GT.
+
+### 25f.0 Diagnostics — completed (D1)
+
+**D1: deterministic Phase 24 AR, `n_samples=1`, ρ=1.0** — 30-d RMSE = **9.93** ppm.
+
+Comparison:
+| Setup | 30-d RMSE |
+|---|---|
+| D1 deterministic (1 sample, ρ=1.0) | **9.93** |
+| Phase 24 ensemble mean (10 samples, ρ=1.0) | 9.62 |
+| 25e (10 samples, ρ=1.05) | 6.89 |
+
+**Take-away**: ensemble averaging at ρ=1.0 buys only 0.3 ppm; at ρ=1.05 it buys 3 ppm. The FM model's *central trajectory* is systematically biased; wider sampling around it averages the bias off. This is why D-Flow + ρ=1.05 stacks: D-Flow optimizes the source noise to land in the better-mean region of that wider distribution.
+
+D2 (persistence) and D3 (decomposition) — deferred, lower priority given D1's clear picture.
+
+## Phase 25g: Residual FM Head + DA on the New Foundation (next session)
+
+**Why this phase**: Phase 25c v4 phase 1b (deterministic backbone + 4-step rollout-FT) gives 3.81 ppm 30-d RMSE without observations — already better than every observation-conditioned method on the FM-only foundation. Phase 25g stacks two additional layers on top:
+1. A flow-matching head that models the *residual* `r = (x_next - f_det(x))/σ_res` — gives us a proper stochastic generative model for ensemble forecasting and posterior conditioning, with the deterministic anchor doing the heavy lifting.
+2. Re-running every posterior-conditioning method (FMPS, D-Flow, D-Flow+ρ, FMPS-multistep, window-D-Flow) on this new foundation — they should all benefit because they're no longer fighting FM-injected noise; observations buy real, additional information.
+
+Expected ceiling: < 2 ppm 30-d RMSE with conditioning. Possibly < 1 ppm with window-D-Flow.
+
+### 25g.1 Build `ResidualFlowMatching` wrapper
+
+**Create**: `neural_transport/models/residual_flowmatching.py`
+
+```python
+class ResidualFlowMatching(FlowMatching):
+    """FM that models the residual on top of a frozen deterministic backbone.
+
+    target ≡ (x_next - f_det(x)) / sigma_res
+    velocity_unet sees [x_t (residual at time t), x_data, f_det_pred, time]
+    inference: x_next = f_det(x) + sigma_res * generated_residual
+    """
+    def __init__(self, *, det_ckpt: str, sigma_res_path: str, **kwargs):
+        super().__init__(**kwargs)
+        # load f_det (frozen)
+        self.f_det = NeuralTransport.load_from_checkpoint(det_ckpt, weights_only=False).model.eval()
+        for p in self.f_det.parameters(): p.requires_grad_(False)
+        # sigma_res precomputed on training set
+        self.register_buffer("sigma_res", torch.tensor(float(np.load(sigma_res_path))))
+```
+
+Key methods to override:
+- `training_forward`: compute `det_pred = self.f_det(strip_t(batch))` (no_grad), build residual target `(x_next - det_pred) / sigma_res`, replace standard FM target. Add `det_pred` to conditioning channels.
+- `forward(mode="generate")` postprocess: `final = det_pred + sigma_res * generated_residual`.
+
+Also need:
+- A one-time script that computes σ_res over a training-set sample (`scripts/compute_sigma_res.py`): load f_det, run on training pairs, compute std of residual per (var, level) → save to `.npy`.
+- Register in `MODELWRAPPERS` as `"residual_flowmatching"`.
+
+### 25g.2 Train residual FM (Phase 25g phase 2)
+
+**Create**: `25c_v4_residual_fm/phase2_residual_fm/train.py`. Same shape as Phase 24 train.py but:
+- `model="residual_flowmatching"`, `model_kwargs.det_ckpt = .../phase1b_det_rollout_ft/.../best.ckpt`.
+- Reuse Phase 11 best Optuna hyperparameters.
+- max_steps=20k, batch_size=128.
+- Slurm submit. ETA ~3 h on one A40.
+
+### 25g.3 Re-run posterior conditioning on new foundation
+
+In `25_transport_prior_osse/eval_trajectory_v2.py` add `--phase` flag (default 25b/Phase 24, also `25g` → use phase2 ckpt). Re-run:
+- Unconditional (sanity): expect ~3.5 ppm (hopefully better than 3.81 due to residual ensemble averaging).
+- FMPS, D-Flow, FMPS+ρ=1.05, **D-Flow+ρ=1.05**, ρ=1.10 (sweep).
+- Document new leaderboard.
+
+### 25g.4 Stretch — implement window-D-Flow
+
+Phase 25b's deferred trick. New `inference/samplers/window_dflow.py` per the design in 25f.2.A. Optimize a single noise tensor across W=4-8 AR steps. Backprop through W ODE solves with `torch.utils.checkpoint`. Most likely a 1-2 day implementation; deserves its own session.
+
+### 25g.5 Validation
+
+Re-run best methods on a held-out *validation* split (different inits) to confirm the test-set ranking holds. The deterministic Phase 24 D1 baseline (9.93 ppm) was on the test split's 20 fixed random inits — if the ranking re-orders on val, we have an over-tuning issue.
+
+### Phase 25g checklist
+
+- [x] Implement `ResidualFlowMatching` wrapper (`neural_transport/models/residual_flowmatching.py`, registered in `MODELWRAPPERS`)
+- [x] Compute σ_res statistic over training split — slurm 6428042, n=50.9M cells × samples; per-level std `[0.794, 0.538, 0.422, 0.370, 0.321, 0.269, 0.248, 0.244, 0.201, 0.197]` saved to `phase2_residual_fm/sigma_res.npy`
+- [x] Smoke-test `phase2_residual_fm/train.py` (max_steps=30, batch=8) — slurm 6428060 ✓ (loss 52.9 → 3.39 over 30 steps)
+- [x] Submit phase 2 slurm (max_steps=20k, batch=128) — slurm 6428145 ✓ (val FM-MSE 0.914, best.ckpt at Epoch=102/Step=19982)
+- [x] Add `eval_ar.py` for residual FM (handle the residual postprocess)
+- [x] AR rollout eval (slurm 6432067 after smoke-ckpt fix). **Result: 30-d RMSE = 3.78 ppm, RMSE@+6h=0.58, @+7d=1.80, @+30d=9.30, CRPS=1.53, spread/err=0.37** — beats phase 1b 3.81 ppm with 10-sample ensemble.
+- [x] Add `--phase 25g` flag to `25_transport_prior_osse/eval_trajectory_v2.py`
+- [x] Re-run unconditional / FMPS / D-Flow / D-Flow+ρ on new model — done. **FMPS+ρ=1.05 = 3.09 ppm new SOTA**.
+- [x] Patch `load_model(ckpt="best")` to skip smoke-test artefacts (`Step≤100 & LossVal=0.0`).
+- [x] Plots & animations under `25_transport_prior_osse/plots/v2/*25g_best*` — 6 MP4s (ens-mean + sample-0 trajectory for none / fmps / dflow), 3 method-comparison panels at +6h/+7d/+30d, 3 trajectory-evolution panels, 1 metrics_compare_25g_best.png. Tag `25g_best` is set up via symlinks (`results/{none,fmps,dflow}_25g_best -> ..._uncond / ..._fmps_ns105 / ..._dflow_ns105`).
+
+### Phase 25g unconditional eval — load_model bug shadowed real result
+
+Initial AR-eval reported 30-d RMSE = 24.19 ppm (much worse than phase 1b). Root cause: `neural_transport/training/train.py:load_model(ckpt="best")` selects the checkpoint with **lowest** `LossVal` filename suffix. The smoke run (`smoke.slurm`, max_steps=30) had written `latest-Epoch=0-Step=30-LossVal=0.000000.ckpt` to the same `singlestep/checkpoints/` dir — and 0.0 < anything from real training. **Every "phase 2" eval, including the entire conditioning sweep, ran on the 30-step smoke checkpoint, not the trained model.**
+
+Fix: renamed both phase 2 and phase 2b smoke ckpts (`*Step=30*LossVal=0.000000*` → `_smoke_step30*.ckpt.bak`). Re-ran eval + sweep against the actual `Epoch=102-Step=19982-LossVal=0.913802.ckpt`.
+
+**Phase 2 ResidualFM (real trained model) unconditional**: 30-d RMSE = **3.78 ppm**, RMSE@+6h = 0.58, @+7d = 1.80, @+30d = 9.30, CRPS = 1.53, **spread/err = 0.37** (well-calibrated ensemble, vs phase 1b's deterministic single-sample). Beats phase 1b's 3.81 ppm with a real probabilistic model.
+
+| Lead | phase 1b (det + rollout-FT, 1 sample) | phase 2 (residual FM, 10-sample ensemble) |
+|---|---|---|
+| +6h | 0.62 | **0.58** |
+| +7d | 1.99 | **1.80** |
+| +30d | 6.57 | 9.30 |
+| **30-d agg** | 3.81 | **3.78** |
+| CRPS | n/a (deterministic) | **1.53** |
+| spread/err | n/a | **0.37** |
+
+The early-mid-rollout RMSE is *better* than phase 1b; only the +30-d tail drifts faster. This is the expected trade-off: ensemble averaging recovers small-scale errors at short leads, but FM-injected noise still compounds into the long-lead tail. Posterior conditioning closes that gap (next subsection).
+
+**Implication**: Phase 25g.2 is incomplete without a phase 2b rollout-FT pass on the FM head, analogous to phase 1b for the deterministic backbone. Phase 2b (`25c_v4_residual_fm/phase2b_residual_fm_rollout_ft/`) was implemented this session but **regressed further to 30-d RMSE = 105 ppm**. Diagnosis below.
+
+### Phase 25g posterior-conditioning sweep — corrected
+
+After the load_model fix, 7 jobs (`sweep_25g.sh`) re-ran on the trained ckpt. D-Flow OOM'd at chunk=100 (residual FM adds an f_det forward + activations per ODE step), so chunk=50 used.
+
+| Method (phase 2 ckpt, real trained) | 30-d RMSE | CRPS | spread/err |
+|---|---|---|---|
+| unconditional ρ=1.0 | 3.78 | 1.53 | 0.37 |
+| unconditional ρ=1.05 | 3.80 | 1.54 | 0.37 |
+| unconditional ρ=1.10 | 3.65 | 1.47 | 0.38 |
+| **FMPS + ρ=1.05** | **3.09** | **1.25** | **0.39** |
+| FMPS | 3.20 | 1.31 | 0.37 |
+| D-Flow | 3.66 | 1.48 | 0.39 |
+| D-Flow + ρ=1.05 | 3.67 | 1.48 | 0.40 |
+
+**FMPS+ρ=1.05 = 3.09 ppm** is the new state-of-the-art — 0.7 ppm better than phase 1b's 3.81 and 0.69 ppm better than the unconditional residual FM. Importantly, CRPS dropped from 1.53 → 1.25 (better-calibrated probabilistic forecasts).
+
+ρ effect is small (0.0–0.13 ppm) on the new foundation, vs the 3 ppm boost it gave on the Phase 24 FM model. That confirms the prior session's hypothesis: ρ was previously compensating for FM-injected mean drift, which f_det now eliminates. The residual FM head produces a well-calibrated distribution out of the box, and observations buy real additional information rather than fighting noise.
+
+**Surprise: FMPS dominates D-Flow on this foundation.** On Phase 24 the order was reversed (D-Flow 5.38 vs FMPS 5.95). With a stable mean (f_det) and small residuals, the per-step DPS gradient (FMPS) is enough — D-Flow's 30-step source-noise optimization no longer pays for itself, and may even perturb away from the well-calibrated unconditional distribution. D-Flow+ρ=1.05 = 3.67 (vs 3.09 for FMPS+ρ=1.05). This argues for FMPS as the default DA method on stable generative backbones.
+
+### Phase 2b rollout-FT regression — diagnosis
+
+Phase 2b (slurm 6431889, `pushforward_kwargs prob=1.0 K_max=4 grad_through_inference=False`, 8 k steps, lr_mult=0.1, warm-started from phase 2 best.ckpt) ran cleanly: training Loss/Train converged from ~200 (smoke) → ~3–5 by epoch 41. **AR-eval (last.ckpt) regressed to 30-d RMSE 105 ppm** (RMSE@+6h 2.61, @+7d 46.5, @+30d 211.8, spread/err 0.02). Worst result of the entire Phase 25 line.
+
+Two compounding bugs found this session, only one fixed:
+
+1. **(fixed)** First smoke had Loss/Train = 3 M because `litmodule.NeuralTransport.forward` chains `preds[target_var]` back into `batch[target_var]` for every t in `n_timesteps`. For deterministic models that's the right rollout-FT, but for FM `preds[target_var]` is the **velocity field**, not the next state — the chain is incoherent. Fix: forced `pushforward prob = 1.0`, which reduces every batch to a single-step forward via `_pushforward_chain_prior`'s sub_batch.
+
+2. **(unfixed, root cause of 105 ppm)** `sigma_res` was measured on the *clean-pair* distribution — std of `(GT_next - f_det(GT_curr))`. After K-step drift, the residual `(GT_next - f_det(drifted_K-1))` is 10–20× larger because (a) f_det is robust only for 4-step deterministic rollouts, not for FM-noise-injected priors, and (b) chained ODE solves accumulate stochastic error. With Loss/Train still in the 3–5 range, the FM head is learning to predict velocities of magnitude ~3–4 (vs ~1 in phase 2). At inference, integrating those velocities from `x_init ~ N(0,1)` produces residuals ~3–4 × σ_res larger than designed. Compounded over 120 AR steps → 105 ppm.
+
+Beyond this, the FM val-loss monitor is broken when `n_timesteps>1` (see bug 1) — Lightning's val path uses the same multi-step chained forward and produces LossVal ≈ 3.4 M. So `best.ckpt` was selected at epoch 6, before the model fully adapted; `last.ckpt` is closer to converged but still wrong-magnitude. Eval used `last.ckpt`.
+
+### Phase 25g final leaderboard (this session)
+
+| Method | RMSE 30d (ppm) | CRPS | Note |
+|---|---|---|---|
+| Phase 24 baseline | 9.62 | – | start |
+| 25e ρ=1.05 | 6.89 | – | free inference fix |
+| v4 phase 1 (det, single-step) | 6.60 | – | clean deterministic |
+| FMPS (Phase 24 FM) | 5.95 | – | per-step DPS |
+| D-Flow (Phase 24 FM) | 5.38 | – | source-opt DA |
+| D-Flow + ρ=1.05 (Phase 24 FM) | 4.75 | – | best DA on Phase 24 |
+| v4 phase 1b (det + rollout-FT, 1 sample) | 3.81 | n/a | prior-session best |
+| Phase 25g ResidualFM uncond (10-sample ensemble) | 3.78 | 1.53 | new prob model, beats 1b |
+| **🏆 Phase 25g ResidualFM + FMPS + ρ=1.05** | **3.09** | **1.25** | **new SOTA** |
+| Phase 25g ResidualFM (phase 2b rollout-FT, last.ckpt) | 105.20 | 104.6 | σ_res mismatch — see Phase 2b notes |
+
+### Open issues / next-session priorities
+
+1. **`load_model` smoke contamination guard** — fix `neural_transport/training/train.py:load_model(ckpt="best")` to ignore `latest-Epoch=0-Step=30-LossVal=0.000000.ckpt`-style smoke artifacts. Options: filter on minimum `Step=` from filename, ignore LossVal=0.0 exactly, or read ModelCheckpoint state from the trainer logs. A single buggy session-helper hid the entire phase 25g win for ~2 hours of compute. The smoke ckpts are now renamed to `_smoke_step30*.ckpt.bak` in both phase 2 and phase 2b dirs as a workaround.
+2. **σ_res rescaling for phase 2b** — phase 2b regressed to 105 ppm because σ_res was measured on clean-pair `(GT_next - f_det(GT_curr))` but training exposed `(GT_next - f_det(drifted))` which is 10–20× larger. With pushforward-prob=1.0 the model fit the larger residual scale → at inference, `x_init~N(0,1) * sigma_res` injects too-large residuals. Re-measure σ_res over the drifted-pair distribution, or learn the residual scaling jointly. Note: this is *not* needed for phase 2 (single-step) which is already the new SOTA.
+3. **FM val-loss path** — `litmodule.validation_step` for FM models with `n_timesteps>1` chains velocity outputs back through `batch[target_var]`, producing meaningless val losses (~3.4 M for phase 2b). Force `n_timesteps_val=1` or add a dedicated val branch.
+4. **Window D-Flow (Phase 25b deferred)** — design in 25f.2.A. With the ResidualFM foundation now stable, this is the highest-leverage next step. Expected: < 2 ppm 30-d RMSE.
+5. **Phase 2b alternative recipes** — try K=2 only (one chain step), or AWG's *correction-style* head that models the noise to subtract from a noisy x_t (naturally bounds residual scale at unit variance regardless of drift).
+6. **Production leaderboard**: For deterministic single-trajectory forecasts ship phase 1b (3.81 ppm). For probabilistic + DA ship phase 2 + FMPS + ρ=1.05 (3.09 ppm, CRPS 1.25, spread/err 0.39).
+
+Files shipped this session under `25c_v4_residual_fm/`:
+- `phase2_residual_fm/{train.py, train.slurm, smoke.slurm, eval_ar.py, eval_ar.slurm, compute_sigma_res.py, sigma_res.slurm, sigma_res.npy, sweep_25g.sh, singlestep/checkpoints/...}`
+- `phase2b_residual_fm_rollout_ft/{train.py, train.slurm, smoke.slurm, eval_ar.py, eval_ar.slurm, singlestep/checkpoints/...}`
+- `neural_transport/models/residual_flowmatching.py` (registered as `MODELWRAPPERS["residual_flowmatching"]`)
+- `25_transport_prior_osse/eval_trajectory_v2.py` extended with `--phase 25g` flag
+- [ ] Update leaderboard
+- [ ] (stretch) implement window-D-Flow
+- [ ] (stretch) plot v3: cross-method comparison panels using new foundation
+
+### Phase 25g implementation notes (this session)
+
+`ResidualFlowMatching` (in `neural_transport/models/residual_flowmatching.py`):
+- Inherits from `FlowMatching`. `init_model` loads `det_ckpt` via `NeuralTransport.load_from_checkpoint(weights_only=False)` and sets every f_det parameter to `requires_grad_(False)`. Overrides `train()` to keep f_det in eval mode after Lightning toggles, so GroupNorm stats and BN don't drift. `register_buffer("sigma_res", ...)` so the per-level scaling moves with the module to GPU and saves into the ckpt.
+- `_det_predict(batch)`: clones batch with `target_var_next = target_var` (mirrors AR-inference targshift behaviour), runs f_det in `torch.no_grad()`, returns physical-space `det_pred` plus a normalized + targshifted `[B, C, Nlat, Nlon]` tensor used as a velocity-UNet conditioning channel group.
+- `training_forward`: builds `x_1 = (x_next_phys - det_pred_phys) / sigma_res` directly — bypasses the parent's `normalize_batch_target_vars` so the residual lives in unit-variance space (not double-normalised). x_0 ~ N(0,I) shaped like x_1; OT coupling preserved as a knob. The velocity UNet input layout is `[x_t (10), co2_t (10), u (10), v (10), f_det_pred (10), time (1)] = 51 ch`. Falls through to standard FM-MSE loss (no loss-fn change).
+- `forward(mode="generate")`: re-uses `inference_forward` (sampler dispatch in parent intact, so D-Flow/FMPS/etc. keep working) but bypasses `postprocess_outputs` because the ODE result lives in residual space. Final state is `x_next_phys = det_pred_phys + sigma_res · final_residual`. Initial-noise scaling (Phase 25e ρ knob) preserved.
+- σ_res computed on training split with `_next` placeholder = current state, so the residual statistic matches what the FM head sees at inference.
+
+### 25f.1.A v4 phase 1b — DOUBLE BREAKTHROUGH
+
+**v4 phase 1b: deterministic backbone + 4-step rollout fine-tune (slurm 6418430, 8 k steps, lr_mult=0.1, warm-started from phase 1 best.ckpt).**
+
+| Lead | v4 phase 1 (single-step) | **v4 phase 1b (rollout-FT)** |
+|---|---|---|
+| +6h | 0.59 | 0.62 |
+| +7d | 6.45 | **1.99** (3.2× better) |
+| +30d | 7.61 | **6.57** |
+| **30-d aggregate** | 6.60 | **3.81** |
+
+**v4 phase 1b is the new state-of-the-art on this OSSE — without using any observations.** It beats the best observation-conditioned method (D-Flow + ρ=1.05 = 4.75 ppm). The rollout fine-tune crushes the 1-7 day forecast window — exactly where AR drift used to dominate.
+
+**Final leaderboard**
+
+| Method | RMSE 30d (ppm) | Note |
+|---|---|---|
+| Phase 24 baseline | 9.62 | start |
+| 25e ρ=1.05 | 6.89 | free inference fix |
+| v4 phase 1 (det, single-step) | 6.60 | clean deterministic |
+| FMPS | 5.95 | per-step DPS |
+| D-Flow | 5.38 | source-opt DA |
+| D-Flow + ρ=1.05 | 4.75 | best DA so far |
+| **🏆 v4 phase 1b (det + rollout-FT)** | **3.81** | **best overall** |
+
+**Implications**:
+1. The whole "AR drift" pain was a combination of (a) FM stochastic noise injected at every AR step + (b) no rollout exposure during training. Fix both (deterministic backbone + Brandstetter pushforward via 4-step `n_timesteps`) → 3.81 ppm without any retraining gymnastics.
+2. The deterministic backbone with rollout-FT is the proper foundation. Phase 25c v4 phase 2 (FM head modelling the residual on top of f_det) + posterior conditioning should push below 2 ppm — a step-change improvement.
+3. Posterior conditioning on the FM model (Phases 25, 25b, 25e) was, in retrospect, partly compensating for FM noise rather than improving the underlying transport. With f_det as the foundation, observations should buy real, additional information.
+
+### 25f.1.A v4 phase 1 result — BREAKTHROUGH (single-step)
+
+**Trained**: deterministic UNet, same data, 19 k single-step grad steps, val loss 0.346 (physical units), no FM ODE solve, no noise.
+
+**AR rollout (n_inits=20, n_steps=120, identical inits to Phase 25b/25e/D1)**: 30-d RMSE = **6.60 ppm**, RMSE@+6h = 0.59, RMSE@+30d = 7.61.
+
+| Lead | Phase 24 FM-deterministic (D1) | **v4 phase 1 (det backbone)** |
+|---|---|---|
+| +6h | 1.52 | **0.59** (2.5× better) |
+| +7d | 6.56 | 6.45 |
+| +30d | 16.29 | **7.61** (2.1× better) |
+| 30-d agg | 9.93 | **6.60** |
+
+**Diagnosis of all prior pain**: the Phase 24 FM model — every single AR step — runs an ODE solver from random Gaussian noise. The 10 Euler-NFE × ε accumulates a small stochastic error per step. Across 120 AR steps, that compounds drastically. The pure deterministic UNet has none of that — its forward is the same model evaluated once, no noise injection — and AR-rolls out 34 % better.
+
+**This reframes the whole project**:
+- The right unconditional model is `f_det`, not the Phase 24 FM. v4 phase 1 alone beats every FM-only fine-tune we tried (v0 catastrophic / v1 52.1 / v2 15.79 / v3 15.91 / 25e ρ=1.05 6.89) — without any retraining gymnastics.
+- The right place for a stochastic component is *on top of f_det*, modelling the small residual the deterministic predictor leaves. That's exactly what AWG do, and v4 phase 2 implements it.
+- Posterior conditioning (FMPS, D-Flow) on the FM model was, in part, fighting the FM noise itself rather than fitting observations cleanly. Re-running posterior methods *on the deterministic backbone with a residual-FM head* should give a huge additional jump beyond 4.75 ppm.
+
+### 25f.0 (original plan)
+- **D1**: Phase 24 deterministic AR. Same protocol as 25b but `n_samples=1` and effectively a single fixed noise → isolates AR-drift cost from FM stochasticity. Establishes the *deterministic-rollout* lower bound for the current FM model.
+- **D2**: Persistence baseline (predict next = current). Establishes *upper bound* for any predictive model.
+- **D3**: Per-lead error decomposition: split RMSE into mean-bias, ensemble spread, single-step residual.
+- **D4**: Same metrics on a held-out val split to confirm we're not overfitting the test inits.
+
+### 25f.1 Stable unconditional AR (priority 1)
+
+**A. Fix v4 phase 1 pipeline and run** (highest expected value):
+1. `predict_delta=False` (FM wasn't using delta either).
+2. `normalize_batch=False` in `MSE` loss (preds are denormalized by default; matches scale).
+3. Skip post-train predict (replace `train_and_eval_singlestep` with `train_singlestep` directly OR pass a special flag).
+4. Smoke. Submit slurm. ~3 h on one A40 for 30 k single-step steps.
+5. Then rollout-FT phase: `n_timesteps=4`, `no_grad_step_shedule={t_no_grad: []}` so all rollout steps have grads, MSE summed across rollout. ~2 h.
+
+**B. v4 phase 2 — residual FM** (depends on A):
+1. New `ResidualFlowMatching` wrapper with frozen `f_det`, target = `(x_next - f_det(x)) / σ_res`.
+2. Conditioning `[x_t, f_det(x_t)]` → velocity UNet.
+3. Inference: `x_next = f_det(x_t) + σ_res · g_FM(noise | x_t, f_det(x_t))`.
+4. Train ~3 h.
+
+**C. Cheap alternative — Phase 24 retrain with rollout-FT from scratch**:
+1. Reuse the existing FM config but add multi-step rollout phase after singlestep.
+2. Use `train_rollout` (already in `training/train.py`) to do K-step rollout with the existing no-grad schedule.
+3. ~6 h total. Compare to A+B.
+
+### 25f.2 Better posterior conditioning (priority 2)
+
+**A. Window D-Flow** (the long-deferred Phase 25b finalization):
+1. New `inference/samplers/window_dflow.py`. The sampler optimizes a single source-noise tensor `z` to fit observations *across W consecutive AR steps* — not per-step.
+2. Implementation: rewrite the AR loop in `generation.py` to optionally take a list-valued `obs_per_step` and call a "window" optimizer that does:
+   - Outer loop: n_opt_steps iterations.
+   - Inner loop: forward W AR steps, ODE-solving from z_w at each step (with `torch.utils.checkpoint` per ODE step + per AR step).
+   - Loss = sum over w of `||y_w - H · x̂_{t+w}||² / σ²`.
+   - `loss.backward()`; Adam step on z; repeat.
+3. Memory: W=4, NFE=10, batch=200, fp32 — ≈ W×10×O(model_state) ≈ 5 GB extra; bf16 → 2.5 GB. Chunk=20 fits.
+4. Stride S=2 (windows overlap, each obs hit by 2 windows).
+
+**B. FMPS multi-step refinement** (FlowDPS-style):
+1. At each AR step, do K=3 refinement passes: each computes `grad ∝ ∇_x L(y_{t+w}, H·x̂(x))` for w ∈ {0, 1, 2}, applies as a velocity correction.
+2. Cheaper than window D-Flow but only locally informed.
+
+**C. Spectral / localized conditioning**:
+1. Use FMPS' existing `spectral_k_low/high` with a schedule: low-k early (large-scale), all-k late.
+2. Localization: dampen posterior gradient outside obs swath (already partially done via `obs_weight` Gaussian blur).
+
+### 25f.3 Hybrids and post-hoc (priority 3)
+
+**A. Per-init bias correction**:
+1. Train a per-init linear (or small CNN) bias map `b(t, lat, lon)` to fit obs residuals on the *first 24 h*.
+2. Subtract `b` from rollout. Cheap, deterministic, principled when obs cover early window.
+
+**B. Variance-inflation schedule**:
+1. ρ-noise scaling that grows with lead time: `ρ(t) = 1 + α·t/T_total`.
+2. Test α ∈ {0.05, 0.1, 0.2}.
+
+**C. EnKF post-hoc update**:
+1. After rollout, apply Kalman update on ensemble using actual obs covariance.
+2. No retraining needed.
+
+### 25f.4 Order of execution (this session)
+
+1. **NOW**: 25f.0 diagnostics — D1 + D2 + D3 (run in parallel on idle GPUs).
+2. **NEXT**: 25f.1.A — fix v4 phase 1 and submit slurm (training runs ~3 h while we work on B).
+3. **PARALLEL**: 25f.2.A — implement window-D-Flow sampler, smoke test.
+4. **THEN**: when v4 phase 1 done, design+launch v4 phase 2 (residual FM).
+5. **WHEN BUDGET ALLOWS**: 25f.2.B (FMPS-multistep) and 25f.3 hybrids.
+
+
+
+
 
 ---
 

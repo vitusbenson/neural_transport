@@ -988,6 +988,487 @@ def generate_ensemble(
     return ds
 
 
+def generate_trajectory_ensemble_with_obs(
+    model,
+    data_loader,
+    *,
+    init_indices,
+    n_samples,
+    n_steps,
+    sampler_generate_kwargs,
+    free_generate_kwargs=None,
+    obs_every=1,
+    obs_offset=0,
+    reinit_every=None,
+    target_var="co2massmix",
+    device="cuda",
+    seed=42,
+    verbose=False,
+):
+    """Auto-regressive ensemble rollout with per-step posterior conditioning.
+
+    Extends ``generate_ensemble`` to apply a posterior sampler (e.g. FMPS or
+    D-Flow) at observation steps, and free unconditional ODE sampling elsewhere.
+
+    At every lead ``k``:
+      1. Assemble AR batch with the rolled CO2 state and GT winds.
+      2. If ``k % obs_every == obs_offset``: build a synthetic XCO2 column
+         observation via ``create_column_mask`` and run the velocity model
+         with ``sampler_generate_kwargs`` (must contain a posterior ``sampler``
+         key). The rolled state is fed as ``static_inputs`` — the sampler
+         only differentiates through one ODE solve, so the trajectory length
+         does not grow the autograd graph.
+      3. Else: run a standard unconditional ODE solve with ``free_generate_kwargs``.
+
+    Parameters
+    ----------
+    model : LightningModule
+        Phase 24 transport-prior flow matching model.
+    data_loader : InferenceDataLoader
+        Must have ``target_vars`` including ``p_bottom`` and ``p_top`` so the
+        column observation operator can compute XCO2 at each step.
+    init_indices : list[int]
+    n_samples : int
+        Ensemble members per init.
+    n_steps : int
+        Trajectory length.
+    sampler_generate_kwargs : dict
+        ``generate_kwargs`` applied at observation steps — must include a
+        ``sampler`` key (e.g. ``"fmps"`` or ``"dflow"``) and the masking config
+        (``obs_fraction``, ``mask_pattern`` etc).
+    free_generate_kwargs : dict | None
+        ``generate_kwargs`` for unconditional steps. Defaults to sampler kwargs
+        with masking disabled and ``sampler`` removed.
+    obs_every : int
+        Observation cadence in steps (6h per step at freq=6h).
+    obs_offset : int
+        Apply observations at ``k`` such that ``(k - obs_offset) % obs_every == 0``.
+    reinit_every : int | None
+        Sliding window re-init to GT.
+    target_var : str
+    device : str
+    seed : int
+    verbose : bool
+
+    Returns
+    -------
+    xr.Dataset
+        Dims ``[init, sample, lead, lat, lon, level]`` with ``target_var`` and
+        an ``obs_present`` bool array ``[lead]``.
+    """
+    import numpy as np
+
+    torch.manual_seed(seed)
+    if device.startswith("cuda"):
+        torch.cuda.manual_seed_all(seed)
+
+    model.eval()
+    model.to(device)
+    inner = getattr(model, "model", model)
+    prev_generating = getattr(inner, "generating", False)
+    inner.generating = True
+
+    if free_generate_kwargs is None:
+        free_generate_kwargs = {
+            k: v for k, v in sampler_generate_kwargs.items() if k not in ("sampler", "sampler_params", "masking")
+        }
+        # drop conditioning sub-dict entries that imply masking
+        free_generate_kwargs["masking"] = False
+
+    # Full generate_kwargs always need the non-sampler plumbing keys present.
+    for k, v in sampler_generate_kwargs.items():
+        if k not in free_generate_kwargs and k not in (
+            "sampler",
+            "masking",
+            "mask_source",
+            "mask_pattern",
+            "obs_fraction",
+        ):
+            free_generate_kwargs.setdefault(k, v)
+
+    dataset = data_loader.dataset
+    n_inits = len(init_indices)
+    times_axis = dataset.ds.time.values
+    T_total = len(data_loader)
+
+    sample0 = dataset[init_indices[0]][target_var]
+    if sample0.ndim == 3:
+        _, N, C = sample0.shape
+    else:
+        N, C = sample0.shape
+    nlat = data_loader.grid_info.nlat
+    nlon = data_loader.grid_info.nlon
+    assert N == nlat * nlon, f"grid mismatch: N={N}, nlat*nlon={nlat * nlon}"
+
+    all_preds = np.full((n_inits, n_samples, n_steps, nlat, nlon, C), np.nan, dtype=np.float32)
+    time_coord = np.empty((n_inits, n_steps), dtype=times_axis.dtype)
+    obs_present = np.zeros(n_steps, dtype=bool)
+    for k in range(n_steps):
+        obs_present[k] = ((k - obs_offset) >= 0) and ((k - obs_offset) % obs_every == 0)
+
+    mask_pattern = sampler_generate_kwargs.get("mask_pattern", "satellite")
+    obs_fraction = sampler_generate_kwargs.get("obs_fraction", 0.3)
+    ak_10 = sampler_generate_kwargs.get("ak_10", None)
+    soft_boundary_sigma = sampler_generate_kwargs.get("soft_boundary_sigma", 0.0)
+
+    outer = enumerate(init_indices)
+    if verbose:
+        outer = tqdm(list(outer), desc="Trajectory+obs rollout")
+
+    for i_pos, init_idx in outer:
+        init_batch = data_loader.get_batch(init_idx, device=device)
+        current_co2 = init_batch[target_var].expand(n_samples, *init_batch[target_var].shape[1:]).clone()
+
+        for k in range(n_steps):
+            idx = init_idx + k
+            if idx + 1 >= T_total:
+                logger.warning("Init %d hit end of dataset at lead %d; remaining leads left NaN.", init_idx, k)
+                break
+
+            batch_single = data_loader.get_batch(idx, device=device)
+            batch = {
+                k_: v.expand(n_samples, *v.shape[1:]).clone() if isinstance(v, torch.Tensor) else v
+                for k_, v in batch_single.items()
+            }
+
+            if reinit_every is not None and k > 0 and k % reinit_every == 0:
+                current_co2 = batch[target_var].clone()
+
+            batch[target_var] = current_co2
+            if f"{target_var}_next" in batch:
+                batch[f"{target_var}_next"] = current_co2.clone()
+
+            use_obs = bool(obs_present[k])
+
+            if use_obs:
+                # Build synthetic XCO2 column mask from GT next field. For OSSE
+                # we use the GT target (dataset[idx+1]) to generate observations.
+                gt_next_batch = data_loader.get_batch(idx + 1, device=device)
+                obs_batch = {k_: v for k_, v in batch.items()}
+                obs_batch[target_var] = (
+                    gt_next_batch[target_var].expand(n_samples, *gt_next_batch[target_var].shape[1:]).clone()
+                )
+                # p_bottom / p_top come from obs_batch (current step; approx OK).
+                om, ov = create_column_mask(
+                    obs_batch,
+                    target_var=target_var,
+                    obs_fraction=obs_fraction,
+                    mask_pattern=mask_pattern,
+                    nlat=nlat,
+                    nlon=nlon,
+                    ak_10=ak_10,
+                    soft_boundary_sigma=soft_boundary_sigma,
+                )
+                obs_batch["obs_mask"] = om
+                ov_normed = inner.normalize_observations(ov, obs_batch, target_var=target_var, targshift=False)
+                obs_batch["obs_values"] = torch.nan_to_num(ov_normed, nan=0.0)
+                # Put conditioning keys onto the AR batch (not obs_batch, which
+                # had GT swapped in).
+                for key in (
+                    "obs_mask",
+                    "obs_values",
+                    "obs_weight",
+                    "xco2_averaging_kernel",
+                    "xco2_apriori",
+                    "co2_profile_apriori",
+                    "pressure_weight",
+                ):
+                    if key in obs_batch:
+                        batch[key] = obs_batch[key]
+
+                inner.generate_kwargs = sampler_generate_kwargs
+                # Sampler needs grads (D-Flow). FMPS is wrapped in no_grad inside
+                # its own sample(). Either way, let autograd decide.
+                preds = model(batch, mode="generate")
+            else:
+                inner.generate_kwargs = free_generate_kwargs
+                with torch.no_grad():
+                    preds = model(batch, mode="generate")
+
+            pred_co2 = preds[target_var]
+            current_co2 = pred_co2.detach()
+            pred_np = current_co2.cpu().numpy().reshape(n_samples, nlat, nlon, C)
+            all_preds[i_pos, :, k] = pred_np
+            time_coord[i_pos, k] = times_axis[idx + 1]
+
+    inner.generating = prev_generating
+
+    lat_vals = data_loader.grid_info.lat
+    lon_vals = data_loader.grid_info.lon
+    levels = data_loader.grid_info.levels
+
+    ds = xr.Dataset(
+        {
+            target_var: (("init", "sample", "lead", "lat", "lon", "level"), all_preds),
+            "obs_present": (("lead",), obs_present),
+        },
+        coords={
+            "init": np.array(init_indices),
+            "sample": np.arange(n_samples),
+            "lead": np.arange(n_steps),
+            "lat": lat_vals,
+            "lon": lon_vals,
+            "level": levels,
+            "time": (("init", "lead"), time_coord),
+        },
+    )
+    return ds
+
+
+def _model_call_chunked(model, batch, chunk_size, total, no_grad=True):
+    """Call ``model(batch, mode="generate")`` in batch-dim chunks of size
+    ``chunk_size``, concatenating predictions back to the original batch dim.
+
+    For D-Flow this caps peak VRAM at chunk_size × ODE-graph (instead of
+    BATCH × graph). When chunk_size >= total, falls back to a single call.
+    """
+    if chunk_size >= total:
+        if no_grad:
+            with torch.no_grad():
+                return model(batch, mode="generate")
+        return model(batch, mode="generate")
+
+    chunks_out = []
+    for s in range(0, total, chunk_size):
+        e = min(s + chunk_size, total)
+        sub = {}
+        for k, v in batch.items():
+            if isinstance(v, torch.Tensor) and v.shape[0] == total:
+                sub[k] = v[s:e]
+            else:
+                sub[k] = v
+        if no_grad:
+            with torch.no_grad():
+                sub_out = model(sub, mode="generate")
+        else:
+            sub_out = model(sub, mode="generate")
+        chunks_out.append({k: v.detach() if isinstance(v, torch.Tensor) else v for k, v in sub_out.items()})
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    # concat tensors along batch dim
+    out = {}
+    keys = chunks_out[0].keys()
+    for k in keys:
+        v0 = chunks_out[0][k]
+        if isinstance(v0, torch.Tensor) and v0.shape[0] == (
+            chunks_out[0][k].shape[0] if hasattr(chunks_out[0][k], 'shape') else None
+        ):
+            out[k] = torch.cat([c[k] for c in chunks_out], dim=0)
+        else:
+            out[k] = v0
+    return out
+
+
+def generate_trajectory_ensemble_batched(
+    model,
+    data_loader,
+    *,
+    init_indices,
+    n_samples,
+    n_steps,
+    sampler_generate_kwargs=None,
+    free_generate_kwargs=None,
+    obs_every=1,
+    obs_offset=0,
+    reinit_every=None,
+    target_var="co2massmix",
+    device="cuda",
+    seed=42,
+    chunk_size=None,
+    verbose=False,
+):
+    """Batched (init × sample) auto-regressive ensemble rollout with optional
+    per-step posterior conditioning.
+
+    This is the canonical Phase 25b generator. Improvements over
+    ``generate_trajectory_ensemble_with_obs``:
+      * **Flat batching**: all `n_inits × n_samples` trajectories are
+        propagated in a single forward call per step (or `chunk_size`
+        sub-batches if VRAM-limited). Wallclock scales sub-linearly in
+        `n_inits` rather than linearly.
+      * **Per-trajectory storage**: individual sample trajectories are kept;
+        ensemble mean / spread are computed posthoc.
+      * **No early collapse** to ensemble mean: the rolled state stays
+        per-sample throughout.
+
+    `sampler_generate_kwargs` is None ⟺ unconditional AR baseline.
+    """
+    import numpy as _np
+
+    torch.manual_seed(seed)
+    if device.startswith("cuda"):
+        torch.cuda.manual_seed_all(seed)
+
+    model.eval()
+    model.to(device)
+    inner = getattr(model, "model", model)
+    prev_generating = getattr(inner, "generating", False)
+    inner.generating = True
+
+    has_obs = sampler_generate_kwargs is not None
+
+    if has_obs and free_generate_kwargs is None:
+        free_generate_kwargs = {
+            k: v for k, v in sampler_generate_kwargs.items() if k not in ("sampler", "sampler_params", "masking")
+        }
+        free_generate_kwargs["masking"] = False
+
+    dataset = data_loader.dataset
+    n_inits = len(init_indices)
+    times_axis = dataset.ds.time.values
+    T_total = len(data_loader)
+    nlat = data_loader.grid_info.nlat
+    nlon = data_loader.grid_info.nlon
+
+    sample0 = dataset[init_indices[0]][target_var]
+    if sample0.ndim == 3:
+        _, N, C = sample0.shape
+    else:
+        N, C = sample0.shape
+    assert N == nlat * nlon
+
+    BATCH = n_inits * n_samples
+    if chunk_size is None or chunk_size >= BATCH:
+        chunk_size = BATCH
+
+    # Build initial rolled state [BATCH, ...] from per-init init batch
+    init_batches = [data_loader.get_batch(i, device=device) for i in init_indices]
+    co2_shape = init_batches[0][target_var].shape[1:]  # without batch dim
+    current_co2 = torch.empty(BATCH, *co2_shape, device=device, dtype=init_batches[0][target_var].dtype)
+    for i, ib in enumerate(init_batches):
+        current_co2[i * n_samples : (i + 1) * n_samples] = ib[target_var]
+
+    obs_present = _np.zeros(n_steps, dtype=bool)
+    for k in range(n_steps):
+        obs_present[k] = has_obs and ((k - obs_offset) >= 0) and ((k - obs_offset) % obs_every == 0)
+
+    if has_obs:
+        mask_pattern = sampler_generate_kwargs.get("mask_pattern", "satellite")
+        obs_fraction = sampler_generate_kwargs.get("obs_fraction", 0.3)
+        ak_10 = sampler_generate_kwargs.get("ak_10", None)
+        soft_boundary_sigma = sampler_generate_kwargs.get("soft_boundary_sigma", 0.0)
+
+    all_preds = _np.full((n_inits, n_samples, n_steps, nlat, nlon, C), _np.nan, dtype=_np.float32)
+    time_coord = _np.empty((n_inits, n_steps), dtype=times_axis.dtype)
+
+    iters = range(n_steps)
+    if verbose:
+        iters = tqdm(iters, desc="Batched AR rollout", total=n_steps)
+
+    for k in iters:
+        # Build per-init batches at lead k, then expand to BATCH dim
+        batches_per_init = []
+        for i_pos, init_idx in enumerate(init_indices):
+            idx = init_idx + k
+            if idx + 1 >= T_total:
+                logger.warning("Init %d hit end at lead %d", init_idx, k)
+                batches_per_init.append(None)
+                continue
+            b = data_loader.get_batch(idx, device=device)
+            batches_per_init.append(b)
+            time_coord[i_pos, k] = times_axis[idx + 1]
+
+        if any(b is None for b in batches_per_init):
+            break
+
+        # Stack & expand each tensor field across n_samples
+        batch = {}
+        for key, v in batches_per_init[0].items():
+            if isinstance(v, torch.Tensor):
+                stacked = torch.cat(
+                    [bb[key].expand(n_samples, *bb[key].shape[1:]) for bb in batches_per_init],
+                    dim=0,
+                )
+                batch[key] = stacked
+            else:
+                batch[key] = v
+
+        if reinit_every is not None and k > 0 and k % reinit_every == 0:
+            current_co2 = batch[target_var].clone()
+
+        batch[target_var] = current_co2
+        if f"{target_var}_next" in batch:
+            batch[f"{target_var}_next"] = current_co2.clone()
+
+        use_obs = bool(obs_present[k])
+
+        if use_obs:
+            # Build synthetic XCO2 mask from GT next field
+            gt_next_per_init = [data_loader.get_batch(init_indices[i] + k + 1, device=device) for i in range(n_inits)]
+            gt_next_stacked = torch.cat(
+                [b[target_var].expand(n_samples, *b[target_var].shape[1:]) for b in gt_next_per_init],
+                dim=0,
+            )
+            obs_batch = {kk: vv for kk, vv in batch.items()}
+            obs_batch[target_var] = gt_next_stacked
+            om, ov = create_column_mask(
+                obs_batch,
+                target_var=target_var,
+                obs_fraction=obs_fraction,
+                mask_pattern=mask_pattern,
+                nlat=nlat,
+                nlon=nlon,
+                ak_10=ak_10,
+                soft_boundary_sigma=soft_boundary_sigma,
+            )
+            obs_batch["obs_mask"] = om
+            obs_batch["obs_values"] = ov
+            ov_normed = inner.normalize_observations(ov, obs_batch, target_var=target_var, targshift=False)
+            obs_batch["obs_values"] = torch.nan_to_num(ov_normed, nan=0.0)
+            for key in (
+                "obs_mask",
+                "obs_values",
+                "obs_weight",
+                "xco2_averaging_kernel",
+                "xco2_apriori",
+                "co2_profile_apriori",
+                "pressure_weight",
+            ):
+                if key in obs_batch:
+                    batch[key] = obs_batch[key]
+
+            inner.generate_kwargs = sampler_generate_kwargs
+            preds = _model_call_chunked(model, batch, chunk_size, BATCH, no_grad=False)
+        else:
+            if has_obs:
+                inner.generate_kwargs = free_generate_kwargs
+            else:
+                # Unconditional: merge user-passed free_kwargs (e.g. noise_scale)
+                # over the minimal default.
+                base_uncond = {"n_samples": 1, "masking": False}
+                if free_generate_kwargs:
+                    base_uncond = {**base_uncond, **free_generate_kwargs}
+                inner.generate_kwargs = base_uncond
+            preds = _model_call_chunked(model, batch, chunk_size, BATCH, no_grad=True)
+
+        pred_co2 = preds[target_var]
+        current_co2 = pred_co2.detach()
+        pred_np = current_co2.cpu().numpy().reshape(n_inits, n_samples, nlat, nlon, C)
+        all_preds[:, :, k] = pred_np
+
+    inner.generating = prev_generating
+
+    lat_vals = data_loader.grid_info.lat
+    lon_vals = data_loader.grid_info.lon
+    levels = data_loader.grid_info.levels
+    ds = xr.Dataset(
+        {
+            target_var: (("init", "sample", "lead", "lat", "lon", "level"), all_preds),
+            "obs_present": (("lead",), obs_present),
+        },
+        coords={
+            "init": _np.array(init_indices),
+            "sample": _np.arange(n_samples),
+            "lead": _np.arange(n_steps),
+            "lat": lat_vals,
+            "lon": lon_vals,
+            "level": levels,
+            "time": (("init", "lead"), time_coord),
+        },
+    )
+    return ds
+
+
 def generate_for_distributional_eval(
     model,
     dataset,

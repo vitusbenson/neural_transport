@@ -32,9 +32,14 @@ class NeuralTransport(pl.LightningModule):
             max_workers=32,
         ),
         pretrained_ckptpath=None,
+        pushforward_kwargs=None,
     ):
         super().__init__()
         self.save_hyperparameters()
+        # Phase 25c v1: K-step pushforward (ArchesWeatherGen-style; for FM: K-1
+        # no-grad inference steps that chain the prior, followed by a single
+        # FM training-loss step on the drifted prior).
+        self.pushforward_kwargs = pushforward_kwargs or {}
         if model in MODELS:
             self.model = MODELS[model](**model_kwargs)
         elif model in MODELWRAPPERS:
@@ -42,7 +47,7 @@ class NeuralTransport(pl.LightningModule):
         else:
             self.model = model
         if pretrained_ckptpath is not None:
-            ckpt = torch.load(pretrained_ckptpath, map_location="cpu")
+            ckpt = torch.load(pretrained_ckptpath, map_location="cpu", weights_only=False)
             model_state_dict = {
                 k.replace("model.", ""): v for k, v in ckpt["state_dict"].items() if k.startswith("model.")
             }
@@ -108,8 +113,147 @@ class NeuralTransport(pl.LightningModule):
 
         return loss, losses, preds
 
+    def _pushforward_chain_prior(self, batch, K, target_var, inference_steps, method, grad_through_inference=False):
+        """Run K-1 no-grad inference steps to obtain a drifted prior at step K-1.
+
+        Returns a single-timestep `sub_batch` ready for the standard training
+        forward. The chained prior replaces `batch[target_var][:, K-1]`, and
+        all other tensors keep their step-(K-1) slice. Tensors with time-dim 1
+        broadcast unchanged.
+        """
+        is_fm = isinstance(self.model, MODELWRAPPERS["flowmatching"])
+        if not is_fm:
+            return batch  # only FM supports the inference chain
+
+        T_dim = batch[target_var].shape[1]
+        K = min(K, T_dim)
+        if K < 2:
+            return batch
+
+        inner = self.model
+        prev_kwargs = getattr(inner, "generate_kwargs", {}) or {}
+        cheap_kwargs = {
+            "steps": int(inference_steps),
+            "method": method,
+            "n_samples": 1,
+            "masking": False,
+        }
+
+        def slice_t(d, t):
+            out = {}
+            for v, val in d.items():
+                if isinstance(val, torch.Tensor) and val.ndim >= 3:
+                    # Mimic NeuralTransport.forward: slice [:, t] when time dim
+                    # equals T_dim, else [:, 0] (broadcasts the stationary stat).
+                    if val.shape[1] == T_dim:
+                        out[v] = val[:, t]
+                    elif val.shape[1] == 1:
+                        out[v] = val[:, 0]
+                    else:
+                        out[v] = val
+                else:
+                    out[v] = val
+            return out
+
+        prior = batch[target_var][:, 0]
+        # Phase 25c v2/v3: disable bf16 autocast for the chaining inference;
+        # v3 enables grad through the ODE solve (AWG-style backprop).
+        grad_ctx = torch.enable_grad() if grad_through_inference else torch.no_grad()
+        with grad_ctx, torch.autocast(device_type="cuda" if prior.is_cuda else "cpu", enabled=False):
+            inner.generate_kwargs = cheap_kwargs
+            try:
+                for t in range(K - 1):
+                    sub = slice_t(batch, t)
+                    sub[target_var] = prior
+                    next_key = f"{target_var}_next"
+                    if next_key in sub:
+                        sub[next_key] = prior.clone()
+                    pred = inner(sub, mode="generate")
+                    prior = pred[target_var]
+                    if not grad_through_inference:
+                        prior = prior.detach()
+            finally:
+                inner.generate_kwargs = prev_kwargs
+
+        # Build sub_batch at step K-1 with the drifted prior, but keep a leading
+        # time-dim of 1 so the litmodule forward loop runs T=1.
+        sub_batch = {}
+        for v, val in batch.items():
+            if isinstance(val, torch.Tensor) and val.ndim >= 3:
+                if val.shape[1] == T_dim:
+                    sub_batch[v] = val[:, K - 1 : K]
+                else:
+                    sub_batch[v] = val
+            else:
+                sub_batch[v] = val
+        sub_batch[target_var] = prior.unsqueeze(1)
+        return sub_batch
+
     def training_step(self, batch, batch_idx):
+        applied_pushforward = False
+        if self.pushforward_kwargs:
+            K = int(self.pushforward_kwargs.get("K", 2))
+            K_max = int(self.pushforward_kwargs.get("K_max", K))
+            from_step = int(self.pushforward_kwargs.get("from_step", 0))
+            target_var = self.pushforward_kwargs.get("target_var", "co2massmix")
+            inference_steps = int(self.pushforward_kwargs.get("inference_steps", 5))
+            method = self.pushforward_kwargs.get("method", "euler")
+            grad_through_inf = bool(self.pushforward_kwargs.get("grad_through_inference", False))
+
+            # Phase 25c v2: linear curriculum on prob between
+            # `curriculum_start_step` and `curriculum_end_step`. If both unset,
+            # falls back to the constant `prob` from v1.
+            curr_start = self.pushforward_kwargs.get("curriculum_start_step")
+            curr_end = self.pushforward_kwargs.get("curriculum_end_step")
+            prob_max = float(self.pushforward_kwargs.get("prob", 0.5))
+            prob_min = float(self.pushforward_kwargs.get("prob_min", 0.0))
+            if curr_start is not None and curr_end is not None and curr_end > curr_start:
+                gs = self.global_step
+                if gs <= curr_start:
+                    prob = prob_min
+                elif gs >= curr_end:
+                    prob = prob_max
+                else:
+                    frac = (gs - curr_start) / (curr_end - curr_start)
+                    prob = prob_min + frac * (prob_max - prob_min)
+            else:
+                prob = prob_max
+
+            self.log("Pushforward/prob", prob, prog_bar=False)
+
+            apply = (
+                target_var in batch
+                and self.global_step >= from_step
+                and (torch.rand(()).item() < prob)
+                and batch[target_var].ndim >= 3
+                and batch[target_var].shape[1] >= 2
+            )
+            if apply:
+                # Randomize K (lead time) per iteration in [K, K_max].
+                if K_max > K:
+                    T_dim = batch[target_var].shape[1]
+                    K_actual = int(torch.randint(K, min(K_max, T_dim) + 1, (1,)).item())
+                else:
+                    K_actual = K
+                self.log("Pushforward/K", float(K_actual), prog_bar=False)
+                batch = self._pushforward_chain_prior(
+                    batch,
+                    K_actual,
+                    target_var,
+                    inference_steps,
+                    method,
+                    grad_through_inference=grad_through_inf,
+                )
+                applied_pushforward = True
+
         loss, losses, preds = self.common_step(batch)
+
+        # Phase 25c v2: down-weight pushforward-batch loss so standard FM
+        # batches dominate gradients (default 1.0 keeps v1 behaviour).
+        if applied_pushforward and self.pushforward_kwargs:
+            lw = float(self.pushforward_kwargs.get("loss_weight", 1.0))
+            if lw != 1.0:
+                loss = loss * lw
 
         self.log("Loss/Train", loss, prog_bar=True)
         self.log_dict(losses)

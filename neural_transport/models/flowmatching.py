@@ -301,7 +301,12 @@ class FlowMatching(RegularGridModel):
         time_sampling='uniform',
         time_sampling_kwargs=None,
         time_loss_weight=None,
+        rollout_aug_sigma=0.0,
+        rollout_aug_prob=1.0,
     ):
+        # Phase 25c rollout-augmentation knobs (no-op when sigma==0).
+        self.rollout_aug_sigma = float(rollout_aug_sigma or 0.0)
+        self.rollout_aug_prob = float(rollout_aug_prob)
         self.submodel = MODELS[submodel](**model_kwargs)
         self.return_intermediates = return_intermediates
         self.generating = generating
@@ -358,6 +363,11 @@ class FlowMatching(RegularGridModel):
                 x_init = noise.reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)  # [B C Nlat Nlon]
             else:
                 x_init = torch.randn_like(all_levels, device=x_in.device)
+                # Phase 25e: AWG-style initial-noise scaling (rho>1 widens
+                # source distribution; counters AR-time underdispersion).
+                noise_scale = float(self.generate_kwargs.get("noise_scale", 1.0))
+                if noise_scale != 1.0:
+                    x_init = x_init * noise_scale
                 B, C = x_init.shape[0], x_init.shape[1]
             if "obs_mask" in batch and "obs_values" in batch:
                 obs_var = self.generate_kwargs.get("obs_var", "co2massmix")
@@ -443,6 +453,38 @@ class FlowMatching(RegularGridModel):
     def training_forward(self, batch):
         # sample data [B C Nlat Nlon]
         x_in = self.preprocess_inputs(batch)
+
+        # Optional rollout-augmentation (Phase 25c v0): perturb the prior CO2
+        # channels with Gaussian noise to mimic the inference-time distribution
+        # shift between GT prior (training) and model-predicted prior (AR
+        # rollout). If `rollout_aug_sigma` is None or 0, this is a no-op.
+        # If `rollout_aug_prob` < 1, perturb only that fraction of the batch.
+        sigma = getattr(self, "rollout_aug_sigma", 0.0) or 0.0
+        if sigma > 0.0 and self.training:
+            prob = getattr(self, "rollout_aug_prob", 1.0)
+            n_target_chans = self.nlev * len(self.target_vars)
+            # Slot 0..n_target_chans-1 is the target-time placeholder
+            # (`co2massmix_next`), overwritten later by x_t. The genuine prior
+            # `co2massmix` lives at channels n_target_chans..2*n_target_chans-1.
+            prior_start = n_target_chans
+            prior_end = prior_start + n_target_chans
+            if prior_end <= x_in.shape[1]:
+                B = x_in.shape[0]
+                noise = (
+                    torch.randn(
+                        B,
+                        prior_end - prior_start,
+                        *x_in.shape[2:],
+                        device=x_in.device,
+                        dtype=x_in.dtype,
+                    )
+                    * sigma
+                )
+                if prob < 1.0:
+                    keep = (torch.rand(B, 1, 1, 1, device=x_in.device) < prob).to(x_in.dtype)
+                    noise = noise * keep
+                x_in = x_in.clone()
+                x_in[:, prior_start:prior_end] = x_in[:, prior_start:prior_end] + noise
         # extract target_vars to get x_1 [B C Nlat Nlon] and normalize
         batch_normalized = self.normalize_batch_target_vars(batch)
         x_1_normalized = batch_normalized[f"{self.target_vars[0]}_next"]

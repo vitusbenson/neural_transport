@@ -48,8 +48,24 @@ def load_model(exp_dir, ckpt="best", device="cuda"):
     ckptdir = exp_dir / "singlestep" / "checkpoints"
 
     if ckpt == "best":
-        # Find checkpoint with lowest val loss
-        val_ckpts = [p for p in ckptdir.glob("*.ckpt") if "LossVal" in p.name]
+        # Find checkpoint with lowest val loss. Filter out smoke-test artifacts:
+        # ckpts with Step=<smoke_threshold> typically have LossVal=0.0 from a
+        # sanity check that ran before any training updates and would otherwise
+        # be selected as "best" — silently breaking eval.
+        SMOKE_STEP_MAX = 100
+
+        def _is_smoke(p):
+            try:
+                step = int(p.name.split("Step=")[1].split("-")[0])
+            except (IndexError, ValueError):
+                return False
+            try:
+                lv = float(p.name.split("LossVal=")[1].split(".c")[0].split("-v")[0])
+            except (IndexError, ValueError):
+                return False
+            return step <= SMOKE_STEP_MAX and lv == 0.0
+
+        val_ckpts = [p for p in ckptdir.glob("*.ckpt") if "LossVal" in p.name and not _is_smoke(p)]
         if not val_ckpts:
             # Fallback to best.ckpt symlink
             ckptpath = ckptdir / "best.ckpt"
