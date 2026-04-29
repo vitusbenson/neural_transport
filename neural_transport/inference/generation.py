@@ -25,6 +25,7 @@ from neural_transport.inference.masking import (
     create_oco2_mask_test,
 )
 from neural_transport.inference.noise import noise
+from neural_transport.tools.spatial import gaussian_smooth_2d
 
 # ── Utility functions ────────────────────────────────────────────────────
 
@@ -1443,6 +1444,775 @@ def generate_trajectory_ensemble_batched(
 
         pred_co2 = preds[target_var]
         current_co2 = pred_co2.detach()
+        pred_np = current_co2.cpu().numpy().reshape(n_inits, n_samples, nlat, nlon, C)
+        all_preds[:, :, k] = pred_np
+
+    inner.generating = prev_generating
+
+    lat_vals = data_loader.grid_info.lat
+    lon_vals = data_loader.grid_info.lon
+    levels = data_loader.grid_info.levels
+    ds = xr.Dataset(
+        {
+            target_var: (("init", "sample", "lead", "lat", "lon", "level"), all_preds),
+            "obs_present": (("lead",), obs_present),
+        },
+        coords={
+            "init": _np.array(init_indices),
+            "sample": _np.arange(n_samples),
+            "lead": _np.arange(n_steps),
+            "lat": lat_vals,
+            "lon": lon_vals,
+            "level": levels,
+            "time": (("init", "lead"), time_coord),
+        },
+    )
+    return ds
+
+
+def generate_trajectory_window_dflow(
+    model,
+    data_loader,
+    *,
+    init_indices,
+    n_samples,
+    n_steps,
+    obs_kwargs,
+    free_kwargs=None,
+    obs_every=1,
+    obs_offset=0,
+    window_size=4,
+    window_stride=None,
+    n_opt_steps=20,
+    lr=1e-2,
+    sigma_obs=0.1,
+    reg_weight=0.0,
+    target_var="co2massmix",
+    chunk_size=None,
+    device="cuda",
+    seed=42,
+    use_checkpointing=True,
+    verbose=False,
+):
+    """Window D-Flow auto-regressive sampler (Phase 25h).
+
+    For each window of ``window_size`` AR steps, optimize a per-window noise
+    tensor ``z[W,BATCH,N,C]`` to fit observations across all W steps jointly.
+    Backprops through the full chain residual_FM(z[w]) -> f_det(state_{w-1})
+    -> ... at every AR step within the window.
+
+    The optimizer steps ``n_opt_steps`` Adam iterations; gradient checkpointing
+    on each per-step forward keeps memory near a single forward.
+
+    Notes
+    -----
+    * Designed for ``ResidualFlowMatching``: requires ``model.model.f_det`` so
+      gradient can chain across AR steps. The wrapper sets
+      ``inner.enable_det_grad`` during the optimization phase.
+    * obs_kwargs is the standard generate_kwargs dict (mask_pattern, obs_fraction,
+      ak_10, soft_boundary_sigma); same key set as for the existing samplers.
+    * Loss is computed in *normalized* observation space using the model's own
+      forward_model (XCO2 column average). Equivalent to the dflow sampler's
+      likelihood term but evaluated on the post-residual state, not the
+      residual itself.
+    * Stride: ``window_stride`` (default = window_size, non-overlapping). With
+      stride < window_size, windows overlap and earlier steps get refined
+      again from the next window.
+    """
+    import numpy as _np
+    from torch.utils.checkpoint import checkpoint as _ckpt
+
+    from neural_transport.forward_model import XCO2ForwardModel
+
+    if window_stride is None:
+        window_stride = window_size
+    assert 1 <= window_stride <= window_size
+
+    torch.manual_seed(seed)
+    if device.startswith("cuda"):
+        torch.cuda.manual_seed_all(seed)
+
+    model.eval()
+    model.to(device)
+    inner = getattr(model, "model", model)
+    prev_generating = getattr(inner, "generating", False)
+    prev_det_grad = getattr(inner, "enable_det_grad", False)
+    inner.generating = True
+
+    if not hasattr(inner, "f_det"):
+        raise RuntimeError(
+            "window_dflow requires a ResidualFlowMatching model (need f_det for gradient chaining across AR steps)."
+        )
+
+    dataset = data_loader.dataset
+    n_inits = len(init_indices)
+    times_axis = dataset.ds.time.values
+    T_total = len(data_loader)
+    nlat = data_loader.grid_info.nlat
+    nlon = data_loader.grid_info.nlon
+
+    sample0 = dataset[init_indices[0]][target_var]
+    if sample0.ndim == 3:
+        _, N, C = sample0.shape
+    else:
+        N, C = sample0.shape
+    assert N == nlat * nlon
+
+    BATCH = n_inits * n_samples
+    if chunk_size is None or chunk_size >= BATCH:
+        chunk_size = BATCH
+
+    init_batches = [data_loader.get_batch(i, device=device) for i in init_indices]
+    co2_shape = init_batches[0][target_var].shape[1:]
+    current_co2 = torch.empty(BATCH, *co2_shape, device=device, dtype=init_batches[0][target_var].dtype)
+    for i, ib in enumerate(init_batches):
+        current_co2[i * n_samples : (i + 1) * n_samples] = ib[target_var]
+
+    obs_present = _np.zeros(n_steps, dtype=bool)
+    for k in range(n_steps):
+        obs_present[k] = ((k - obs_offset) >= 0) and ((k - obs_offset) % obs_every == 0)
+
+    mask_pattern = obs_kwargs.get("mask_pattern", "satellite")
+    obs_fraction = obs_kwargs.get("obs_fraction", 0.3)
+    ak_10 = obs_kwargs.get("ak_10", None)
+    soft_boundary_sigma = obs_kwargs.get("soft_boundary_sigma", 0.0)
+    noise_scale = float(obs_kwargs.get("noise_scale", 1.0))
+
+    # Free generate_kwargs used for the inner model.forward calls during opt
+    # — we want unconditional generation per step (no internal posterior
+    # conditioning); window-D-Flow handles obs externally.
+    if free_kwargs is None:
+        free_kwargs = {
+            k: v
+            for k, v in obs_kwargs.items()
+            if k
+            not in (
+                "sampler",
+                "sampler_params",
+                "masking",
+                "obs_mask",
+                "obs_values",
+                "obs_weight",
+                "obs_fraction",
+                "mask_source",
+                "mask_pattern",
+                "ak_10",
+                "soft_boundary_sigma",
+            )
+        }
+    free_kwargs = {**free_kwargs, "masking": False}
+
+    all_preds = _np.full((n_inits, n_samples, n_steps, nlat, nlon, C), _np.nan, dtype=_np.float32)
+    time_coord = _np.empty((n_inits, n_steps), dtype=times_axis.dtype)
+
+    def _step_batch(k):
+        """Build the same per-step batch dict that ``_batched`` uses, with
+        ``current_co2`` inserted as target_var. Returns dict with all fields
+        replicated over n_samples but WITHOUT the rolled state injected — caller
+        should set ``out[target_var] = state``.
+        """
+        batches_per_init = []
+        for i_pos, init_idx in enumerate(init_indices):
+            idx = init_idx + k
+            if idx + 1 >= T_total:
+                return None, None
+            b = data_loader.get_batch(idx, device=device)
+            batches_per_init.append(b)
+            time_coord[i_pos, k] = times_axis[idx + 1]
+        batch = {}
+        for key, v in batches_per_init[0].items():
+            if isinstance(v, torch.Tensor):
+                batch[key] = torch.cat(
+                    [bb[key].expand(n_samples, *bb[key].shape[1:]) for bb in batches_per_init],
+                    dim=0,
+                )
+            else:
+                batch[key] = v
+        # gt[t+1] for the obs ground truth
+        gt_next_per_init = [data_loader.get_batch(init_indices[i] + k + 1, device=device) for i in range(n_inits)]
+        gt_next = torch.cat(
+            [b[target_var].expand(n_samples, *b[target_var].shape[1:]) for b in gt_next_per_init],
+            dim=0,
+        )
+        return batch, gt_next
+
+    def _build_obs(batch, gt_next):
+        """Build forward_model + obs_values_norm + obs_weight_or_mask for this step."""
+        obs_batch = {kk: vv for kk, vv in batch.items()}
+        obs_batch[target_var] = gt_next
+        om, ov = create_column_mask(
+            obs_batch,
+            target_var=target_var,
+            obs_fraction=obs_fraction,
+            mask_pattern=mask_pattern,
+            nlat=nlat,
+            nlon=nlon,
+            ak_10=ak_10,
+            soft_boundary_sigma=soft_boundary_sigma,
+        )
+        obs_batch["obs_mask"] = om
+        obs_batch["obs_values"] = ov
+        ov_norm = inner.normalize_observations(ov, obs_batch, target_var=target_var, targshift=False)
+        ov_norm = torch.nan_to_num(ov_norm, nan=0.0)
+        # Build a masking_config compatible with XCO2ForwardModel, mirroring
+        # FlowMatching.prepare_masking_config().
+        B_ = ov_norm.shape[0]
+        if "xco2_averaging_kernel" in obs_batch:
+            obs_mask = om.reshape(B_, nlat, nlon, 1).permute(0, 3, 1, 2)
+            obs_values = ov_norm.reshape(B_, nlat, nlon, 1).permute(0, 3, 1, 2)
+            ak = obs_batch["xco2_averaging_kernel"].reshape(B_, nlat, nlon, C).permute(0, 3, 1, 2)
+            xco2_prior = obs_batch["xco2_apriori"].reshape(B_, nlat, nlon, 1).permute(0, 3, 1, 2)
+            co2_profile_prior = obs_batch["co2_profile_apriori"].reshape(B_, nlat, nlon, C).permute(0, 3, 1, 2)
+            pressure_weights = (
+                obs_batch["pressure_weight"].reshape(B_, nlat, nlon, C).permute(0, 3, 1, 2)
+                if "pressure_weight" in obs_batch
+                else None
+            )
+        else:
+            obs_mask = om.reshape(B_, nlat, nlon, C).permute(0, 3, 1, 2)
+            obs_values = ov_norm.reshape(B_, nlat, nlon, C).permute(0, 3, 1, 2)
+            ak = xco2_prior = co2_profile_prior = pressure_weights = None
+        obs_weight = None
+        if "obs_weight" in obs_batch:
+            ow = obs_batch["obs_weight"]
+            if "xco2_averaging_kernel" in obs_batch:
+                obs_weight = ow.reshape(B_, nlat, nlon, 1).permute(0, 3, 1, 2)
+            else:
+                obs_weight = ow.reshape(B_, nlat, nlon, C).permute(0, 3, 1, 2)
+        target_mean = batch[f"{target_var}_offset"].reshape(B_, 1, 1, 1)
+        target_std = batch[f"{target_var}_scale"].reshape(B_, 1, 1, 1)
+        obs_mean = target_mean
+        obs_std = target_std
+        # We pass targshift=False to normalize_observations above, so the H
+        # operator must NOT subtract targshift either — set to None.
+        targshift_mean = None
+        masking_config = dict(
+            obs_mask=obs_mask,
+            obs_values=obs_values,
+            obs_mean=obs_mean,
+            obs_std=obs_std,
+            target_mean=target_mean,
+            target_std=target_std,
+            ak=ak,
+            xco2_prior=xco2_prior,
+            co2_profile_prior=co2_profile_prior,
+            pressure_weights=pressure_weights,
+            obs_weight=obs_weight,
+            targshift_mean=targshift_mean,
+        )
+        fm = XCO2ForwardModel.from_masking_config(masking_config)
+        return fm, obs_values, obs_mask, obs_weight, target_mean, target_std
+
+    def _state_to_grid_norm(state_phys, target_mean, target_std):
+        """[B, T=1, N, C] or [B, N, C] phys -> [B, C, Nlat, Nlon] normalized
+        (no targshift; H operator handles it via masking_config.targshift_mean).
+        """
+        if state_phys.dim() == 4:
+            state_phys = state_phys.squeeze(1)
+        B_, N_, C_ = state_phys.shape
+        x = (state_phys - target_mean.view(B_, 1, 1)) / target_std.view(B_, 1, 1)
+        return x.reshape(B_, nlat, nlon, C_).permute(0, 3, 1, 2)
+
+    def _step_forward(batch, state, z_w, *, with_grad=False):
+        """One AR step with grad. state and z_w: [B, T=1, N, C].
+        Returns next_state [B, T=1, N, C].
+
+        We call ``inner`` (the FM/ResidualFM module) directly instead of the
+        Lightning wrapper because the wrapper writes preds via in-place
+        ``preds[v][:, t] = ...`` into a freshly-allocated empty tensor, which
+        breaks the gradient chain (no grad_fn on the destination).
+        """
+        # Strip T dim for the inner module (which expects [B, N, C]).
+        curr = {}
+        T_dim = 1
+        for k_, v_ in batch.items():
+            if isinstance(v_, torch.Tensor) and v_.ndim >= 2 and v_.shape[1] == T_dim:
+                curr[k_] = v_[:, 0]
+            else:
+                curr[k_] = v_
+        curr[target_var] = state[:, 0] if state.dim() >= 4 else state
+        if f"{target_var}_next" in curr:
+            curr[f"{target_var}_next"] = curr[target_var]
+        curr["noise"] = z_w[:, 0] if z_w.dim() >= 4 else z_w
+        inner.generate_kwargs = {**free_kwargs, "enable_grad": True} if with_grad else free_kwargs
+        out = inner(curr, mode="generate")
+        # Re-add T dim to keep state shape consistent with current_co2 [B, T, N, C].
+        nxt = out[target_var]
+        if nxt.dim() == 3:
+            nxt = nxt.unsqueeze(1)
+        return nxt
+
+    def _checkpointed_step(batch, state, z_w):
+        if not use_checkpointing:
+            return _step_forward(batch, state, z_w, with_grad=True)
+
+        # Wrap so checkpoint sees Tensor inputs only; capture batch by closure.
+        def _fn(state_, z_):
+            return _step_forward(batch, state_, z_, with_grad=True)
+
+        return _ckpt(_fn, state, z_w, use_reentrant=False)
+
+    iters = range(0, n_steps, window_stride)
+    if verbose:
+        iters = tqdm(iters, desc="Window-DFlow rollout", total=(n_steps + window_stride - 1) // window_stride)
+
+    for k0 in iters:
+        W_eff = min(window_size, n_steps - k0)
+        if W_eff <= 0:
+            break
+
+        # Pre-build per-step batches and obs (no grad needed for these).
+        step_batches = []
+        step_gt = []
+        step_obs = []  # (forward_model, obs_values_norm, obs_mask, obs_weight, target_mean, target_std) or None
+        valid_W = 0
+        for w in range(W_eff):
+            k = k0 + w
+            with torch.no_grad():
+                bw, gtw = _step_batch(k)
+            if bw is None:
+                break
+            valid_W += 1
+            step_batches.append(bw)
+            step_gt.append(gtw)
+            if obs_present[k]:
+                with torch.no_grad():
+                    step_obs.append(_build_obs(bw, gtw))
+            else:
+                step_obs.append(None)
+
+        if valid_W == 0:
+            break
+        W_eff = valid_W
+
+        # Process the BATCH dimension in chunks; init / sample axes are
+        # independent so per-chunk Adam optimization is exact (not an
+        # approximation). Within a chunk, z is shared across W AR steps.
+        any_obs = any(o is not None for o in step_obs)
+        carry_state = torch.empty_like(current_co2)
+        commit_w = min(window_stride, W_eff) - 1  # 0-indexed step whose state we carry
+
+        for s_ in range(0, BATCH, chunk_size):
+            e_ = min(s_ + chunk_size, BATCH)
+            chunk_B = e_ - s_
+
+            def _slice_batch(b):
+                out = {}
+                for kk, vv in b.items():
+                    if isinstance(vv, torch.Tensor) and vv.shape[0] == BATCH:
+                        out[kk] = vv[s_:e_]
+                    else:
+                        out[kk] = vv
+                return out
+
+            chunk_step_batches = [_slice_batch(b) for b in step_batches]
+            chunk_step_obs = []
+            for o in step_obs:
+                if o is None:
+                    chunk_step_obs.append(None)
+                    continue
+                fm, ov_norm, om_grid, ow_grid, tm, ts = o
+                fm_chunk = XCO2ForwardModel(
+                    pressure_weights=fm.pressure_weights[s_:e_] if fm.pressure_weights is not None else None,
+                    ak=fm.ak[s_:e_] if fm.ak is not None else None,
+                    xco2_prior=fm.xco2_prior[s_:e_] if fm.xco2_prior is not None else None,
+                    co2_profile_prior=fm.co2_profile_prior[s_:e_] if fm.co2_profile_prior is not None else None,
+                    obs_mean=fm.obs_mean[s_:e_]
+                    if fm.obs_mean is not None and fm.obs_mean.shape[0] == BATCH
+                    else fm.obs_mean,
+                    obs_std=fm.obs_std[s_:e_]
+                    if fm.obs_std is not None and fm.obs_std.shape[0] == BATCH
+                    else fm.obs_std,
+                    target_mean=fm.target_mean[s_:e_]
+                    if fm.target_mean is not None and fm.target_mean.shape[0] == BATCH
+                    else fm.target_mean,
+                    target_std=fm.target_std[s_:e_]
+                    if fm.target_std is not None and fm.target_std.shape[0] == BATCH
+                    else fm.target_std,
+                    targshift_mean=fm.targshift_mean[s_:e_]
+                    if fm.targshift_mean is not None and fm.targshift_mean.shape[0] == BATCH
+                    else fm.targshift_mean,
+                )
+                chunk_step_obs.append(
+                    (
+                        fm_chunk,
+                        ov_norm[s_:e_],
+                        om_grid[s_:e_],
+                        ow_grid[s_:e_] if ow_grid is not None else None,
+                        tm[s_:e_],
+                        ts[s_:e_],
+                    )
+                )
+
+            gen = torch.Generator(device=device).manual_seed(seed + 1000 * k0 + s_)
+            # Match data_loader's [B, T=1, N, C] layout — litmodule slices [:, t].
+            z_param = torch.randn(W_eff, chunk_B, 1, N, C, device=device, generator=gen) * noise_scale
+            z_param = z_param.contiguous().requires_grad_(True)
+            opt = torch.optim.Adam([z_param], lr=lr)
+
+            chunk_init_state = current_co2[s_:e_]
+
+            if any_obs and n_opt_steps > 0:
+                inner.enable_det_grad = True
+                with torch.enable_grad():
+                    for _ in range(n_opt_steps):
+                        opt.zero_grad()
+                        loss_total = z_param.new_zeros(())
+                        state = chunk_init_state
+                        for w in range(W_eff):
+                            state = _checkpointed_step(chunk_step_batches[w], state, z_param[w])
+                            if chunk_step_obs[w] is not None:
+                                fm_, ov_, om_, ow_, _tm, _ts = chunk_step_obs[w]
+                                x_grid = _state_to_grid_norm(state, _tm, _ts)
+                                xco2_pred = fm_.forward(x_grid)
+                                if ow_ is not None:
+                                    resid = ow_ * (xco2_pred - ov_)
+                                else:
+                                    resid = torch.where(
+                                        om_.bool(),
+                                        xco2_pred - ov_,
+                                        torch.zeros_like(xco2_pred),
+                                    )
+                                loss_total = loss_total + resid.pow(2).sum() / (2.0 * sigma_obs**2 * chunk_B)
+                        if reg_weight > 0:
+                            loss_total = loss_total + reg_weight * z_param.pow(2).sum() / (
+                                chunk_B * z_param[0, 0].numel()
+                            )
+                        loss_total.backward()
+                        opt.step()
+                inner.enable_det_grad = prev_det_grad
+
+            # Final no-grad forward; record per-step states for this chunk.
+            inner.enable_det_grad = False
+            z_final = z_param.detach()
+            with torch.no_grad():
+                state = chunk_init_state
+                for w in range(W_eff):
+                    state = _step_forward(chunk_step_batches[w], state, z_final[w])
+                    state_flat = state if state.dim() == 3 else state.squeeze(1)
+                    pred_np = state_flat.detach().cpu().numpy()
+                    chunk_pred = pred_np.reshape(chunk_B, nlat, nlon, C)
+                    # Map BATCH index back to (init, sample): BATCH = init * n_samples + sample
+                    for bi in range(chunk_B):
+                        global_b = s_ + bi
+                        i_idx = global_b // n_samples
+                        s_idx = global_b % n_samples
+                        all_preds[i_idx, s_idx, k0 + w] = chunk_pred[bi]
+                    if w == commit_w:
+                        carry_state[s_:e_] = state.detach()
+                # Last-window safeguard: if we never hit commit_w (W_eff < stride),
+                # take final state.
+                if commit_w >= W_eff:
+                    carry_state[s_:e_] = state.detach()
+            del z_param, z_final, opt
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        current_co2 = carry_state
+
+    inner.generating = prev_generating
+    inner.enable_det_grad = prev_det_grad
+
+    lat_vals = data_loader.grid_info.lat
+    lon_vals = data_loader.grid_info.lon
+    levels = data_loader.grid_info.levels
+    ds = xr.Dataset(
+        {
+            target_var: (("init", "sample", "lead", "lat", "lon", "level"), all_preds),
+            "obs_present": (("lead",), obs_present),
+        },
+        coords={
+            "init": _np.array(init_indices),
+            "sample": _np.arange(n_samples),
+            "lead": _np.arange(n_steps),
+            "lat": lat_vals,
+            "lon": lon_vals,
+            "level": levels,
+            "time": (("init", "lead"), time_coord),
+        },
+    )
+    return ds
+
+
+def generate_trajectory_enkf(
+    model,
+    data_loader,
+    *,
+    init_indices,
+    n_samples,
+    n_steps,
+    obs_kwargs,
+    free_kwargs=None,
+    sampler_kwargs=None,
+    obs_every=1,
+    obs_offset=0,
+    sigma_obs=0.1,
+    inflation=1.0,
+    prior_inflation=1.0,
+    loc_sigma=0.0,
+    loc_min_presence=0.05,
+    target_var="co2massmix",
+    device="cuda",
+    seed=42,
+    chunk_size=None,
+    verbose=False,
+):
+    """Phase 25i: Free-running ensemble + per-cell vertical EnKF post-hoc update.
+
+    At each AR step, run the unconditional model to obtain a predicted ensemble.
+    At observation steps, apply a stochastic (perturbed-obs) Ensemble Kalman
+    update on every observed grid cell, using only that cell's column ensemble.
+
+    The XCO2 forward operator is linear: y = sum_l(h_l * a_l * x_l). Per-cell
+    update keeps the algorithm O(M * C^2) and avoids the global rank-deficiency
+    problem of N_samp << N_grid sample covariances. No horizontal info is shared
+    directly; obs information propagates spatially through the model dynamics.
+
+    Args
+    ----
+    sigma_obs : float
+        Observation error std in physical XCO2 units (kg/kg → ppm scale on
+        co2massmix). Acts as a regularizer; pure-OSSE perfect obs only need
+        small sigma_obs > 0 for stable Kalman gain.
+    inflation : float
+        Multiplicative inflation factor applied to ensemble anomalies right
+        after every EnKF update to counter ensemble shrinkage.
+    obs_kwargs : dict
+        Sampler kwargs from configs (used for mask_pattern / obs_fraction /
+        ak_10 / soft_boundary_sigma / noise_scale).
+    free_kwargs : dict | None
+        Unconditional generate_kwargs.
+    """
+    import numpy as _np
+
+    torch.manual_seed(seed)
+    if device.startswith("cuda"):
+        torch.cuda.manual_seed_all(seed)
+
+    model.eval()
+    model.to(device)
+    inner = getattr(model, "model", model)
+    prev_generating = getattr(inner, "generating", False)
+    inner.generating = True
+
+    if free_kwargs is None:
+        free_kwargs = {"n_samples": 1, "masking": False}
+
+    dataset = data_loader.dataset
+    n_inits = len(init_indices)
+    times_axis = dataset.ds.time.values
+    T_total = len(data_loader)
+    nlat = data_loader.grid_info.nlat
+    nlon = data_loader.grid_info.nlon
+
+    sample0 = dataset[init_indices[0]][target_var]
+    if sample0.ndim == 3:
+        _, N, C = sample0.shape
+    else:
+        N, C = sample0.shape
+    assert N == nlat * nlon
+
+    BATCH = n_inits * n_samples
+    if chunk_size is None or chunk_size >= BATCH:
+        chunk_size = BATCH
+
+    init_batches = [data_loader.get_batch(i, device=device) for i in init_indices]
+    co2_shape = init_batches[0][target_var].shape[1:]
+    current_co2 = torch.empty(BATCH, *co2_shape, device=device, dtype=init_batches[0][target_var].dtype)
+    for i, ib in enumerate(init_batches):
+        current_co2[i * n_samples : (i + 1) * n_samples] = ib[target_var]
+
+    obs_present = _np.zeros(n_steps, dtype=bool)
+    for k in range(n_steps):
+        obs_present[k] = ((k - obs_offset) >= 0) and ((k - obs_offset) % obs_every == 0)
+
+    mask_pattern = obs_kwargs.get("mask_pattern", "satellite")
+    obs_fraction = obs_kwargs.get("obs_fraction", 0.3)
+    ak_10 = obs_kwargs.get("ak_10", None)
+    soft_boundary_sigma = obs_kwargs.get("soft_boundary_sigma", 0.0)
+
+    all_preds = _np.full((n_inits, n_samples, n_steps, nlat, nlon, C), _np.nan, dtype=_np.float32)
+    time_coord = _np.empty((n_inits, n_steps), dtype=times_axis.dtype)
+
+    iters = range(n_steps)
+    if verbose:
+        iters = tqdm(iters, desc="EnKF trajectory", total=n_steps)
+
+    enkf_rng = torch.Generator(device=device).manual_seed(seed + 1)
+
+    for k in iters:
+        batches_per_init = []
+        for i_pos, init_idx in enumerate(init_indices):
+            idx = init_idx + k
+            if idx + 1 >= T_total:
+                logger.warning("Init %d hit end at lead %d", init_idx, k)
+                batches_per_init.append(None)
+                continue
+            b = data_loader.get_batch(idx, device=device)
+            batches_per_init.append(b)
+            time_coord[i_pos, k] = times_axis[idx + 1]
+
+        if any(b is None for b in batches_per_init):
+            break
+
+        batch = {}
+        for key, v in batches_per_init[0].items():
+            if isinstance(v, torch.Tensor):
+                batch[key] = torch.cat(
+                    [bb[key].expand(n_samples, *bb[key].shape[1:]) for bb in batches_per_init],
+                    dim=0,
+                )
+            else:
+                batch[key] = v
+
+        batch[target_var] = current_co2
+        if f"{target_var}_next" in batch:
+            batch[f"{target_var}_next"] = current_co2.clone()
+
+        # If hybrid (FMPS prior + EnKF post), build obs BEFORE the model call
+        # so the sampler can use them. Otherwise build them after the free
+        # forward — needed only for the EnKF update.
+        obs_built = False
+        if obs_present[k] and sampler_kwargs is not None:
+            gt_next = [data_loader.get_batch(init_indices[i] + k + 1, device=device) for i in range(n_inits)]
+            gt_stacked = torch.cat(
+                [b[target_var].expand(n_samples, *b[target_var].shape[1:]) for b in gt_next],
+                dim=0,
+            )
+            obs_batch = {kk: vv for kk, vv in batch.items()}
+            obs_batch[target_var] = gt_stacked
+            om, ov = create_column_mask(
+                obs_batch,
+                target_var=target_var,
+                obs_fraction=obs_fraction,
+                mask_pattern=mask_pattern,
+                nlat=nlat,
+                nlon=nlon,
+                ak_10=ak_10,
+                soft_boundary_sigma=soft_boundary_sigma,
+            )
+            obs_batch["obs_mask"] = om
+            ov_normed = inner.normalize_observations(ov, obs_batch, target_var=target_var, targshift=False)
+            obs_batch["obs_values"] = torch.nan_to_num(ov_normed, nan=0.0)
+            for key in (
+                "obs_mask",
+                "obs_values",
+                "obs_weight",
+                "xco2_averaging_kernel",
+                "xco2_apriori",
+                "co2_profile_apriori",
+                "pressure_weight",
+            ):
+                if key in obs_batch:
+                    batch[key] = obs_batch[key]
+            inner.generate_kwargs = sampler_kwargs
+            obs_built = True
+        else:
+            inner.generate_kwargs = free_kwargs
+
+        preds = _model_call_chunked(model, batch, chunk_size, BATCH, no_grad=True)
+        pred_co2 = preds[target_var].detach()  # [BATCH, N, C]
+
+        if obs_present[k]:
+            # Optional prior inflation: widen ensemble around its mean BEFORE
+            # the EnKF update (Anderson 2007). Standard fix for ensemble
+            # collapse over chained DA cycles. Applied per-init so each init's
+            # ensemble inflates around its own mean.
+            if prior_inflation != 1.0:
+                pred_grid_pre = pred_co2.view(n_inits, n_samples, N, C)
+                m_pre = pred_grid_pre.mean(dim=1, keepdim=True)
+                pred_grid_pre = m_pre + prior_inflation * (pred_grid_pre - m_pre)
+                pred_co2 = pred_grid_pre.view(*pred_co2.shape)
+            if not obs_built:
+                # Build GT obs and pressure_weight / averaging kernel for EnKF.
+                gt_next = [data_loader.get_batch(init_indices[i] + k + 1, device=device) for i in range(n_inits)]
+                gt_stacked = torch.cat(
+                    [b[target_var].expand(n_samples, *b[target_var].shape[1:]) for b in gt_next],
+                    dim=0,
+                )
+                obs_batch = {kk: vv for kk, vv in batch.items()}
+                obs_batch[target_var] = gt_stacked
+                om, ov = create_column_mask(
+                    obs_batch,
+                    target_var=target_var,
+                    obs_fraction=obs_fraction,
+                    mask_pattern=mask_pattern,
+                    nlat=nlat,
+                    nlon=nlon,
+                    ak_10=ak_10,
+                    soft_boundary_sigma=soft_boundary_sigma,
+                )
+            # om: [BATCH, T=1, N, 1] bool ; ov: [BATCH, T=1, N, 1] physical XCO2
+            # pressure_weight & ak attached to obs_batch (and thus batch via shared dict)
+            hak = (obs_batch["pressure_weight"] * obs_batch["xco2_averaging_kernel"]).squeeze(1)  # [BATCH, N, C]
+
+            # Per-init slice: ensemble is consecutive n_samples. Mask & y_obs are
+            # identical across the n_samples axis (built from GT, expanded), so
+            # slice [0] for each init.
+            mask_full = om.squeeze(-1).squeeze(1)  # [BATCH, N] bool
+            y_full = ov.squeeze(-1).squeeze(1)  # [BATCH, N] physical XCO2 (NaN at unobserved)
+
+            x_grid = pred_co2.view(n_inits, n_samples, N, C)
+            for i in range(n_inits):
+                mask_i = mask_full[i * n_samples]  # [N]
+                y_i = y_full[i * n_samples]  # [N]
+                hak_i = hak[i * n_samples]  # [N, C]
+                obs_idx = mask_i.nonzero(as_tuple=True)[0]
+                if obs_idx.numel() == 0:
+                    continue
+                col = x_grid[i, :, obs_idx, :]  # [n_samples, M, C]
+                hak_obs = hak_i[obs_idx]  # [M, C]
+                y_obs = y_i[obs_idx]  # [M]
+
+                y_pred = (col * hak_obs.unsqueeze(0)).sum(dim=-1)  # [n_samples, M]
+                y_mean = y_pred.mean(dim=0, keepdim=True)  # [1, M]
+                y_anom = y_pred - y_mean  # [n_samples, M]
+                x_mean = col.mean(dim=0, keepdim=True)  # [1, M, C]
+                x_anom = col - x_mean  # [n_samples, M, C]
+
+                denom = max(n_samples - 1, 1)
+                Cov_xy = (x_anom * y_anom.unsqueeze(-1)).sum(dim=0) / denom  # [M, C]
+                Var_y = (y_anom**2).sum(dim=0) / denom  # [M]
+                K = Cov_xy / (Var_y.unsqueeze(-1) + sigma_obs**2)  # [M, C]
+
+                eps = sigma_obs * torch.randn(n_samples, obs_idx.numel(), device=device, generator=enkf_rng)
+                innovation = (y_obs.unsqueeze(0) + eps) - y_pred  # [n_samples, M]
+                delta = K.unsqueeze(0) * innovation.unsqueeze(-1)  # [n_samples, M, C] — increment at obs cells
+
+                if loc_sigma > 0.0:
+                    # Horizontal localization: scatter increment onto full grid,
+                    # Gaussian-smooth, normalize by smoothed obs-presence mask.
+                    # This spreads each obs cell's increment to its neighbours
+                    # so unobserved cells also get updated (FMPS does this
+                    # implicitly via spatial_smoothing_sigma).
+                    inc_grid = torch.zeros(n_samples, C, N, device=device, dtype=delta.dtype)
+                    inc_grid[:, :, obs_idx] = delta.permute(0, 2, 1)  # [n_samples, C, M]
+                    pres = torch.zeros(1, 1, N, device=device, dtype=delta.dtype)
+                    pres[:, :, obs_idx] = 1.0
+                    inc_grid = inc_grid.view(n_samples, C, nlat, nlon)
+                    pres = pres.view(1, 1, nlat, nlon)
+                    inc_smooth = gaussian_smooth_2d(inc_grid, loc_sigma)
+                    pres_smooth = gaussian_smooth_2d(pres, loc_sigma)
+                    inc_norm = inc_smooth / (pres_smooth + 1e-6)
+                    if loc_min_presence > 0:
+                        inc_norm = inc_norm * (pres_smooth > loc_min_presence).to(inc_norm.dtype)
+                    inc_flat = inc_norm.view(n_samples, C, N).permute(0, 2, 1)  # [n_samples, N, C]
+                    x_slab = x_grid[i] + inc_flat
+                    if inflation != 1.0:
+                        m = x_slab.mean(dim=0, keepdim=True)
+                        x_slab = m + inflation * (x_slab - m)
+                    x_grid[i] = x_slab
+                else:
+                    col_new = col + delta
+                    if inflation != 1.0:
+                        new_mean = col_new.mean(dim=0, keepdim=True)
+                        col_new = new_mean + inflation * (col_new - new_mean)
+                    x_grid[i, :, obs_idx, :] = col_new
+
+            current_co2 = x_grid.view(*pred_co2.shape)
+        else:
+            current_co2 = pred_co2
+
         pred_np = current_co2.cpu().numpy().reshape(n_inits, n_samples, nlat, nlon, C)
         all_preds[:, :, k] = pred_np
 

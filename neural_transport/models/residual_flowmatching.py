@@ -73,16 +73,30 @@ class ResidualFlowMatching(FlowMatching):
     def _det_predict(self, batch):
         """Run f_det in inference mode (with `_next` placeholder = current state).
 
+        When ``self.enable_det_grad`` is True (set by window-D-Flow sampler),
+        gradient flows from f_det's output back to its inputs — needed to
+        chain gradients across AR steps when the input state is a function
+        of upstream optimizable noise. f_det parameters stay frozen either way
+        (set in init_model via requires_grad_(False)).
+
         Returns (det_pred_phys [B, N, C], det_pred_norm_grid [B, C, Nlat, Nlon]).
         """
         target_var = self.target_vars[0]
         batch_for_det = dict(batch)
         if f"{target_var}_next" in batch_for_det:
-            batch_for_det[f"{target_var}_next"] = batch_for_det[target_var].detach().clone()
+            placeholder = batch_for_det[target_var]
+            # Detach only when grad is disabled so that we don't anchor the
+            # placeholder to a stale graph during optimisation.
+            if not getattr(self, "enable_det_grad", False):
+                placeholder = placeholder.detach()
+            batch_for_det[f"{target_var}_next"] = placeholder.clone()
         prev_train = self.f_det.training
         self.f_det.eval()
-        with torch.no_grad():
+        if getattr(self, "enable_det_grad", False):
             det_preds = self.f_det(batch_for_det)
+        else:
+            with torch.no_grad():
+                det_preds = self.f_det(batch_for_det)
         if prev_train and not getattr(self, "_det_freeze", True):
             self.f_det.train(True)
         det_pred_phys = det_preds[target_var]  # [B, N, C]

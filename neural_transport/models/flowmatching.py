@@ -680,6 +680,7 @@ class FlowMatching(RegularGridModel):
             return_intermediates=self.return_intermediates,
             atol=generate_kwargs.get("atol", self.atol),
             rtol=generate_kwargs.get("rtol", self.rtol),
+            enable_grad=generate_kwargs.get("enable_grad", False),
         )
         trajectory = solver.sample(**solver_kwargs)  # [T B C Nlat Nlon]
         return trajectory
