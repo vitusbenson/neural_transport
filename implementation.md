@@ -2589,6 +2589,97 @@ To eliminate sampling-noise from the 20-init benchmark, top three configs were r
 
 ---
 
+## Phase 25n: Ensemble Kalman Smoother (EnKS) — negative result
+
+**Goal**: Use future obs within a fixed-lag window to retroactively correct past states, expected to break the 2.5 ppm wall.
+
+**Implementation** (`generate_trajectory_enks`, ~250 LOC):
+- Mirrors `generate_trajectory_enkf` (per-cell + horizontal Gaussian localization).
+- Maintains a rolling history of the last `lag` ensemble states.
+- At each obs step `k`: applies normal EnKF to current state PLUS a smoother update on every history slot using `Cov(x_{k-l}, y_k) / (Var_y_k + σ²)`.
+- States flushed to output once they leave the lag window.
+- CLI knobs: `--enks-lag`, `--enks-damping`.
+
+### 25n.1 Lag sweep (n_inits=20, n_samples=10, loc=4, σ=0.1)
+
+| lag | RMSE | vs EnKF (2.57) |
+|---:|---:|---:|
+| 0 (EnKF) | 2.57 | — |
+| 4 | **2.688** | +0.12 |
+| 12 | 2.978 | +0.41 |
+| 24 | 3.318 | +0.75 |
+| 48 | 3.851 | +1.28 |
+| 119 | (TBC) | — |
+
+**Result**: monotonic *degradation* with lag. EnKS is destructive in this regime.
+
+### 25n.2 Diagnosis
+
+The smoother gain `K_past = Cov(x_past, y_now) / (Var_y_now + σ²)` is rank ≤ n_samples (=10) but applied to ~600 obs cells × 10 levels per init. With small ensemble size the past cross-covariance is dominated by sample noise — every spurious correlation propagates an unrelated past state correction, accumulating destructively over the lag.
+
+EnKF works because cross-cov is at the *same time* (signal:noise much higher); EnKS across time decorrelates rapidly through the chaotic-like ODE dynamics. To recover EnKS in this setup we'd need either much larger ensembles (n_samples ≥ 100, prohibitive) or strong regularization of the past gain.
+
+### 25n.3 Damping sweep (in flight)
+
+`--enks-damping α` scales the past-state Kalman gain by α ∈ {0.25, 0.5, 0.75} at lag=4, plus a lag=2 full-gain probe. Hypothesis: a small damped smoother might shave a fraction of a ppm without diverging. Prediction: best case ≈ EnKF (damping → 0 = filter), no breakthrough.
+
+### 25n.4 Damping sweep (n_inits=20)
+
+| config | RMSE |
+|---|---|
+| EnKF SOTA | 2.570 |
+| lag=2 d=1.0 | 2.619 |
+| lag=4 d=0.25 | **2.583** ≈ EnKF |
+| lag=4 d=0.50 | 2.612 |
+| lag=4 d=0.75 | 2.648 |
+| lag=4 d=1.00 | 2.688 |
+
+Damping → 0 recovers EnKF; no past-state info is useful.
+
+### 25n.5 Conclusion
+
+EnKS as implemented does not beat EnKF given our ensemble budget. **EnKF loc=4 σ=0.1 = 2.589 ppm at n=100 remains SOTA.** The structural ~2.5 ppm wall comes from the residual-FM model's bias drift (≈0.029 ppm/step linear), which is a *backbone* property — not a DA-side problem.
+
+---
+
+## Phase 25o: Backbone-side cheap fixes — all fail
+
+**Goal**: try inference-time tricks against the 2.5 ppm wall before resorting to retraining.
+
+| variant | RMSE | vs SOTA |
+|---|---|---|
+| EnKF SOTA (n=20) | 2.570 | — |
+| EnKF + global mean-snap | 2.596 | +0.03 |
+| EnKF σ=0.02 | 2.597 | +0.03 |
+| EnKF σ=0.05 | 2.671 | +0.10 |
+| Free + rollout-FT ckpt | 18.5 | catastrophic |
+
+### 25o.1 Global mean-snap (`--enkf-global-bias-correct`)
+
+After per-cell EnKF, add a uniform CO2 shift δx = δy̅ / sum(h·a)̅ per init to snap ensemble-mean global XCO2 to obs mean. Hypothesis: residual-FM has documented 0.029 ppm/step linear drift; per-cell EnKF only updates obs cells, so global drift might leak through.
+
+**Result: no improvement (2.596 vs 2.570).** EnKF with ~600 obs cells per step (full satellite mask) absorbs global drift implicitly through localization smear. Drift hypothesis is wrong — the residual-FM bias is *spatial*, not a uniform offset.
+
+### 25o.2 Tighter σ_obs
+
+σ=0.02 ties SOTA (2.597); σ=0.05 worse. σ=0.1 sweet spot reconfirmed. The Kalman gain is already obs-trusting enough; further tightening just amplifies obs-noise into the analysis.
+
+### 25o.3 Phase 2b rollout-FT residual-FM checkpoint
+
+Loaded the `phase2b_residual_fm_rollout_ft` checkpoint (8000 steps multi-step rollout fine-tune). **Free RMSE = 18.5 ppm** — completely diverges. Training loss recorded in raw mass-mixing-ratio units (3.45e6) vs base in normalized units (0.91), suggesting the FT run never converged or was running with a misconfigured loss scaling. Unusable as-is; would need retraining with a corrected setup.
+
+### 25o.4 Conclusion + next steps
+
+All cheap inference-time fixes fail. The 2.589 ppm SOTA is a hard ceiling for this model. To break it we need either:
+1. **Retrain f_det with multi-step pushforward loss** (and a corrected loss scaling). Existing phase2b infra exists but the checkpoint is broken — needs re-training run with fixed loss normalization. ~6 GPU-hours.
+2. **Architecturally larger model** — current backbone may be capacity-limited.
+3. **More training data** — 1 year of CarbonTracker may not capture seasonal variability.
+4. **Additional conditioning forcings** (e.g., NEE flux, MERRA winds at higher resolution).
+
+These are session-scope-exceeding work items deferred to Phase 26+.
+
+---
+
 ## Phase 26: E2E Validation — Real OCO-2 Inversion
 
 **Goal**: Run actual inversion using real OCO-2 data via `OCO2DataLoader` + `GenerationPipeline`. Validate the complete real-data pipeline.

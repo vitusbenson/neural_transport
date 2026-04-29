@@ -1951,6 +1951,7 @@ def generate_trajectory_enkf(
     prior_inflation=1.0,
     loc_sigma=0.0,
     loc_min_presence=0.05,
+    global_bias_correct=False,
     target_var="co2massmix",
     device="cuda",
     seed=42,
@@ -2210,11 +2211,319 @@ def generate_trajectory_enkf(
                     x_grid[i, :, obs_idx, :] = col_new
 
             current_co2 = x_grid.view(*pred_co2.shape)
+
+            if global_bias_correct:
+                # Global drift correction: at each obs step, snap the
+                # ensemble-mean global XCO2 mean to match observed XCO2 mean
+                # (over obs cells). The residual-FM model has documented
+                # ~0.029 ppm/step linear drift; per-cell EnKF only touches
+                # obs cells, so global drift survives. We add a uniform
+                # CO2 shift in mass-mixing-ratio units, computed per-init.
+                x_grid_post = current_co2.view(n_inits, n_samples, N, C)
+                hak = (obs_batch["pressure_weight"] * obs_batch["xco2_averaging_kernel"]).squeeze(1)
+                hak_grid = hak.view(n_inits, n_samples, N, C)
+                for i in range(n_inits):
+                    mask_i = mask_full[i * n_samples]
+                    obs_idx = mask_i.nonzero(as_tuple=True)[0]
+                    if obs_idx.numel() == 0:
+                        continue
+                    # Predicted XCO2 over obs cells, ensemble-mean.
+                    col = x_grid_post[i, :, obs_idx, :]  # [n_samples,M,C]
+                    hak_obs = hak_grid[i, :, obs_idx, :]  # [n_samples,M,C]
+                    y_pred_post = (col * hak_obs).sum(dim=-1).mean(dim=0)  # [M]
+                    y_obs_post = y_full[i * n_samples][obs_idx]  # [M]
+                    delta_y = (y_obs_post - y_pred_post).mean()  # scalar
+                    sum_hak_mean = hak_obs.mean(dim=(0, 1)).sum()  # scalar
+                    if sum_hak_mean.abs() > 1e-9:
+                        delta_x = delta_y / sum_hak_mean
+                        x_grid_post[i] = x_grid_post[i] + delta_x
+                current_co2 = x_grid_post.view(*pred_co2.shape)
         else:
             current_co2 = pred_co2
 
         pred_np = current_co2.cpu().numpy().reshape(n_inits, n_samples, nlat, nlon, C)
         all_preds[:, :, k] = pred_np
+
+    inner.generating = prev_generating
+
+    lat_vals = data_loader.grid_info.lat
+    lon_vals = data_loader.grid_info.lon
+    levels = data_loader.grid_info.levels
+    ds = xr.Dataset(
+        {
+            target_var: (("init", "sample", "lead", "lat", "lon", "level"), all_preds),
+            "obs_present": (("lead",), obs_present),
+        },
+        coords={
+            "init": _np.array(init_indices),
+            "sample": _np.arange(n_samples),
+            "lead": _np.arange(n_steps),
+            "lat": lat_vals,
+            "lon": lon_vals,
+            "level": levels,
+            "time": (("init", "lead"), time_coord),
+        },
+    )
+    return ds
+
+
+def generate_trajectory_enks(
+    model,
+    data_loader,
+    *,
+    init_indices,
+    n_samples,
+    n_steps,
+    obs_kwargs,
+    free_kwargs=None,
+    obs_every=1,
+    obs_offset=0,
+    sigma_obs=0.1,
+    inflation=1.0,
+    prior_inflation=1.0,
+    loc_sigma=0.0,
+    loc_min_presence=0.05,
+    lag=24,
+    damping=1.0,
+    target_var="co2massmix",
+    device="cuda",
+    seed=42,
+    chunk_size=None,
+    verbose=False,
+):
+    """Phase 25n: Free-running ensemble + fixed-lag Ensemble Kalman Smoother.
+
+    Same forward pass as ``generate_trajectory_enkf``: at every step the
+    unconditional model produces a predicted ensemble. At obs step ``k`` we
+    apply a per-cell vertical EnKF update to the *current* state AND propagate
+    that increment backward through the last ``lag`` steps using the sample
+    cross-covariance ``Cov(x_{k-l}, y_k)``. Each past state is smoothed by
+    every observation that falls within ``lag`` steps after it.
+
+    Memory: ``lag`` × BATCH × N × C float32 — ~2 GB for lag=120, BATCH=200.
+
+    Per-cell + horizontal Gaussian localization mirror the EnKF. Forward
+    propagation uses the EnKF-updated current state (so the dynamics see the
+    latest information), while past states are corrected post-hoc only.
+    """
+    import numpy as _np
+
+    torch.manual_seed(seed)
+    if device.startswith("cuda"):
+        torch.cuda.manual_seed_all(seed)
+
+    model.eval()
+    model.to(device)
+    inner = getattr(model, "model", model)
+    prev_generating = getattr(inner, "generating", False)
+    inner.generating = True
+
+    if free_kwargs is None:
+        free_kwargs = {"n_samples": 1, "masking": False}
+    inner.generate_kwargs = free_kwargs
+
+    dataset = data_loader.dataset
+    n_inits = len(init_indices)
+    times_axis = dataset.ds.time.values
+    T_total = len(data_loader)
+    nlat = data_loader.grid_info.nlat
+    nlon = data_loader.grid_info.nlon
+
+    sample0 = dataset[init_indices[0]][target_var]
+    if sample0.ndim == 3:
+        _, N, C = sample0.shape
+    else:
+        N, C = sample0.shape
+    assert N == nlat * nlon
+
+    BATCH = n_inits * n_samples
+    if chunk_size is None or chunk_size >= BATCH:
+        chunk_size = BATCH
+
+    init_batches = [data_loader.get_batch(i, device=device) for i in init_indices]
+    co2_shape = init_batches[0][target_var].shape[1:]
+    current_co2 = torch.empty(BATCH, *co2_shape, device=device, dtype=init_batches[0][target_var].dtype)
+    for i, ib in enumerate(init_batches):
+        current_co2[i * n_samples : (i + 1) * n_samples] = ib[target_var]
+
+    obs_present = _np.zeros(n_steps, dtype=bool)
+    for k in range(n_steps):
+        obs_present[k] = ((k - obs_offset) >= 0) and ((k - obs_offset) % obs_every == 0)
+
+    mask_pattern = obs_kwargs.get("mask_pattern", "satellite")
+    obs_fraction = obs_kwargs.get("obs_fraction", 0.3)
+    ak_10 = obs_kwargs.get("ak_10", None)
+    soft_boundary_sigma = obs_kwargs.get("soft_boundary_sigma", 0.0)
+
+    all_preds = _np.full((n_inits, n_samples, n_steps, nlat, nlon, C), _np.nan, dtype=_np.float32)
+    time_coord = _np.empty((n_inits, n_steps), dtype=times_axis.dtype)
+
+    # Rolling history of past ensemble states. Each entry is a [BATCH, N, C]
+    # tensor on device representing the (possibly already-smoothed) state at
+    # AR step k_step. We push at every step and update in place when later
+    # obs arrive. A state is moved to ``all_preds`` once it's older than lag.
+    history: list[tuple[int, torch.Tensor]] = []  # list of (k_step, x[BATCH,N,C])
+
+    iters = range(n_steps)
+    if verbose:
+        iters = tqdm(iters, desc="EnKS trajectory", total=n_steps)
+
+    enkf_rng = torch.Generator(device=device).manual_seed(seed + 1)
+
+    def _flush(k_step: int, x: torch.Tensor):
+        pred_np = x.detach().cpu().numpy().reshape(n_inits, n_samples, nlat, nlon, C)
+        all_preds[:, :, k_step] = pred_np
+
+    def _apply_increment(x_slab, mask_i, delta_obs, obs_idx):
+        """Apply per-cell increment ``delta_obs`` (at masked cells) to a
+        per-init ensemble slab ``x_slab[n_samples, N, C]``, optionally with
+        horizontal Gaussian localization."""
+        if loc_sigma > 0.0:
+            inc_grid = torch.zeros(n_samples, C, N, device=device, dtype=delta_obs.dtype)
+            inc_grid[:, :, obs_idx] = delta_obs.permute(0, 2, 1)
+            pres = torch.zeros(1, 1, N, device=device, dtype=delta_obs.dtype)
+            pres[:, :, obs_idx] = 1.0
+            inc_grid = inc_grid.view(n_samples, C, nlat, nlon)
+            pres = pres.view(1, 1, nlat, nlon)
+            inc_smooth = gaussian_smooth_2d(inc_grid, loc_sigma)
+            pres_smooth = gaussian_smooth_2d(pres, loc_sigma)
+            inc_norm = inc_smooth / (pres_smooth + 1e-6)
+            if loc_min_presence > 0:
+                inc_norm = inc_norm * (pres_smooth > loc_min_presence).to(inc_norm.dtype)
+            inc_flat = inc_norm.view(n_samples, C, N).permute(0, 2, 1)
+            return x_slab + inc_flat
+        else:
+            x_slab = x_slab.clone()
+            x_slab[:, obs_idx, :] = x_slab[:, obs_idx, :] + delta_obs
+            return x_slab
+
+    for k in iters:
+        batches_per_init = []
+        for i_pos, init_idx in enumerate(init_indices):
+            idx = init_idx + k
+            if idx + 1 >= T_total:
+                logger.warning("Init %d hit end at lead %d", init_idx, k)
+                batches_per_init.append(None)
+                continue
+            b = data_loader.get_batch(idx, device=device)
+            batches_per_init.append(b)
+            time_coord[i_pos, k] = times_axis[idx + 1]
+
+        if any(b is None for b in batches_per_init):
+            break
+
+        batch = {}
+        for key, v in batches_per_init[0].items():
+            if isinstance(v, torch.Tensor):
+                batch[key] = torch.cat(
+                    [bb[key].expand(n_samples, *bb[key].shape[1:]) for bb in batches_per_init],
+                    dim=0,
+                )
+            else:
+                batch[key] = v
+
+        batch[target_var] = current_co2
+        if f"{target_var}_next" in batch:
+            batch[f"{target_var}_next"] = current_co2.clone()
+
+        preds = _model_call_chunked(model, batch, chunk_size, BATCH, no_grad=True)
+        pred_co2 = preds[target_var].detach()  # [BATCH, N, C]
+
+        if obs_present[k]:
+            if prior_inflation != 1.0:
+                pg = pred_co2.view(n_inits, n_samples, N, C)
+                m_pre = pg.mean(dim=1, keepdim=True)
+                pg = m_pre + prior_inflation * (pg - m_pre)
+                pred_co2 = pg.view(*pred_co2.shape)
+
+            gt_next = [data_loader.get_batch(init_indices[i] + k + 1, device=device) for i in range(n_inits)]
+            gt_stacked = torch.cat(
+                [b[target_var].expand(n_samples, *b[target_var].shape[1:]) for b in gt_next],
+                dim=0,
+            )
+            obs_batch = {kk: vv for kk, vv in batch.items()}
+            obs_batch[target_var] = gt_stacked
+            om, ov = create_column_mask(
+                obs_batch,
+                target_var=target_var,
+                obs_fraction=obs_fraction,
+                mask_pattern=mask_pattern,
+                nlat=nlat,
+                nlon=nlon,
+                ak_10=ak_10,
+                soft_boundary_sigma=soft_boundary_sigma,
+            )
+            hak = (obs_batch["pressure_weight"] * obs_batch["xco2_averaging_kernel"]).squeeze(1)  # [BATCH,N,C]
+            mask_full = om.squeeze(-1).squeeze(1)  # [BATCH, N]
+            y_full = ov.squeeze(-1).squeeze(1)  # [BATCH, N]
+
+            x_grid = pred_co2.view(n_inits, n_samples, N, C)
+
+            # Past-state references for the smoother sweep (within lag).
+            past_grids = [(k_step, x.view(n_inits, n_samples, N, C)) for (k_step, x) in history if k - k_step <= lag]
+
+            for i in range(n_inits):
+                mask_i = mask_full[i * n_samples]
+                y_i = y_full[i * n_samples]
+                hak_i = hak[i * n_samples]
+                obs_idx = mask_i.nonzero(as_tuple=True)[0]
+                if obs_idx.numel() == 0:
+                    continue
+                col = x_grid[i, :, obs_idx, :]  # [n_samples, M, C]
+                hak_obs = hak_i[obs_idx]  # [M, C]
+                y_obs = y_i[obs_idx]  # [M]
+
+                y_pred = (col * hak_obs.unsqueeze(0)).sum(dim=-1)  # [n_samples, M]
+                y_mean = y_pred.mean(dim=0, keepdim=True)
+                y_anom = y_pred - y_mean
+                denom = max(n_samples - 1, 1)
+                Var_y = (y_anom**2).sum(dim=0) / denom  # [M]
+
+                eps = sigma_obs * torch.randn(n_samples, obs_idx.numel(), device=device, generator=enkf_rng)
+                innovation = (y_obs.unsqueeze(0) + eps) - y_pred  # [n_samples, M]
+
+                # ── Filter update (current state) ──
+                x_mean_cur = col.mean(dim=0, keepdim=True)
+                x_anom_cur = col - x_mean_cur
+                Cov_xy_cur = (x_anom_cur * y_anom.unsqueeze(-1)).sum(dim=0) / denom  # [M, C]
+                K_cur = Cov_xy_cur / (Var_y.unsqueeze(-1) + sigma_obs**2)
+                delta_cur = K_cur.unsqueeze(0) * innovation.unsqueeze(-1)  # [n_samples,M,C]
+
+                x_slab = _apply_increment(x_grid[i], mask_i, delta_cur, obs_idx)
+                if inflation != 1.0:
+                    m_post = x_slab.mean(dim=0, keepdim=True)
+                    x_slab = m_post + inflation * (x_slab - m_post)
+                x_grid[i] = x_slab
+
+                # ── Smoother updates (past states within lag) ──
+                # Use cross-cov of past x-anom with CURRENT y-anom (anomalies
+                # of current obs predictions). Same innovation, so the same
+                # innovation realization gets propagated backward — guarantees
+                # consistency between filter and smoother members.
+                for _, past in past_grids:
+                    col_past = past[i, :, obs_idx, :]  # [n_samples,M,C]
+                    xm_p = col_past.mean(dim=0, keepdim=True)
+                    xa_p = col_past - xm_p
+                    Cov_xy_p = (xa_p * y_anom.unsqueeze(-1)).sum(dim=0) / denom  # [M,C]
+                    K_p = damping * Cov_xy_p / (Var_y.unsqueeze(-1) + sigma_obs**2)
+                    delta_p = K_p.unsqueeze(0) * innovation.unsqueeze(-1)
+                    past_slab = _apply_increment(past[i], mask_i, delta_p, obs_idx)
+                    past[i] = past_slab
+
+            current_co2 = x_grid.view(*pred_co2.shape)
+        else:
+            current_co2 = pred_co2
+
+        # Push current state to history; flush states older than lag.
+        history.append((k, current_co2.clone()))
+        while history and (k - history[0][0] > lag):
+            old_k, old_x = history.pop(0)
+            _flush(old_k, old_x)
+
+    # Flush remaining history at end of trajectory.
+    for old_k, old_x in history:
+        _flush(old_k, old_x)
+    history.clear()
 
     inner.generating = prev_generating
 
