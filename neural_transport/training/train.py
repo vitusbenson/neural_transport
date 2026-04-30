@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytorch_lightning as pl
+import torch
 import xarray as xr
 
 logger = logging.getLogger(__name__)
@@ -32,7 +33,7 @@ from neural_transport.plots.plot_results import (
 from neural_transport.tools.conversion import massmix_to_molemix
 
 
-def load_model(exp_dir, ckpt="best", device="cuda"):
+def load_model(exp_dir, ckpt="best", device="cuda", ema=False):
     """Load a trained NeuralTransport model from an experiment directory.
 
     Args:
@@ -40,6 +41,9 @@ def load_model(exp_dir, ckpt="best", device="cuda"):
             Expects checkpoints at {exp_dir}/singlestep/checkpoints/.
         ckpt: "best" or "last".
         device: Device to load model onto.
+        ema: If True and the checkpoint contains an ``ema_state_dict`` key
+            (saved by EMACallback), swap those weights into the model. Standard
+            for FM/diffusion inference.
 
     Returns:
         NeuralTransport LightningModule in eval mode.
@@ -82,6 +86,14 @@ def load_model(exp_dir, ckpt="best", device="cuda"):
 
     logger.info("Loading model from %s", ckptpath)
     model = NeuralTransport.load_from_checkpoint(str(ckptpath), map_location=device)
+    if ema:
+        ckpt_blob = torch.load(str(ckptpath), map_location=device)
+        ema_sd = ckpt_blob.get("ema_state_dict")
+        if ema_sd is None:
+            logger.warning("ema=True requested but no ema_state_dict in %s — using regular weights.", ckptpath)
+        else:
+            model.load_state_dict(ema_sd)
+            logger.info("Loaded EMA weights from %s", ckptpath)
     model = model.to(device)
     model.eval()
     return model
