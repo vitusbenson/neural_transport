@@ -756,8 +756,8 @@ class FlowMatching(RegularGridModel):
                 generate_kwargs=self.generate_kwargs
             )
             x_out = trajectory[-1,...]
+            sol = self.postprocess_outputs(x_out, batch)
             if self.return_intermediates:
-                sol = self.postprocess_outputs(x_out, batch)
                 T, B, C, Nlat, Nlon = trajectory.shape
                 trajectory = trajectory.permute(0, 1, 3, 4, 2)  # [T B Nlat Nlon C]
                 trajectory = trajectory.reshape(T, B, Nlat*Nlon, C)  # [T B Nlat*Nlon C]
@@ -857,6 +857,8 @@ class FlowMatching(RegularGridModel):
         x = x.permute(0, 2, 3, 1).reshape(B, N, -1)
         x_physical = self.denormalize_tensor(x, batch)
         x_physical = x_physical.reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)
+        ### ToDo: x_physical massmix_to_molemix for computation and then back to massmix for normalization, to be consistent with obs_values
+        ###  fill in missing values in co2_profile_prior and xco2_prior with some reasonable defaults where they are NaN, to avoid NaNs in the computation (this should be done in create_oco2_mask similar to ak filling. Different strategies can be tested, e.g. filling with global mean, local mean, interpolate or some physically-based estimate)
 
         ak = masking_config["ak"]  # [B C Nlat Nlon]
         xco2_prior = masking_config["xco2_prior"]  # [B 1 Nlat Nlon]
@@ -866,6 +868,7 @@ class FlowMatching(RegularGridModel):
         _print_stats_torch("x_physical", x_physical)
         _print_stats_torch("ak", ak)
         _print_stats_torch("co2_profile_prior", co2_profile_prior)
+        _print_stats_torch("xco2_prior", xco2_prior)
         _print_stats_torch("xco2", xco2)
 
         target_vars_2d = generate_kwargs["generate_data_kwargs"]["target_vars"]
@@ -979,6 +982,8 @@ class FlowMatching(RegularGridModel):
                         if mask_source == "oco2":
                             x_final = self.compute_xco2(x_final, batch, masking_config, generate_kwargs)
                         x_final = x_final * masking_config["obs_mask"]
+                        _print_stats_torch("x_final", x_final)
+                        _print_stats_torch("obs_values", masking_config["obs_values"])
                         x_target = torch.where(masking_config["obs_mask"], masking_config["obs_values"], torch.zeros_like(masking_config["obs_values"]))
                         loss = torch.nn.functional.mse_loss(x_final, x_target)
                         loss.backward()

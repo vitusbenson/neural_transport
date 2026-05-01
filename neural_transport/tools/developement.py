@@ -12,12 +12,14 @@ def _print_stats_torch(
     if n_nan == total:
         print(f"  {name}: ALL NaN")
         return
+    
+    valid = t[~nan_mask]
 
     print(
         f"  {name}: "
-        f"min={torch.nanmin(t).item():.3e}, "
-        f"max={torch.nanmax(t).item():.3e}, "
-        f"mean={torch.nanmean(t).item():.3e}, "
-        f"std={torch.nanstd(t).item():.3e}, "
+        f"min={valid.min().item():.2f}, "
+        f"max={valid.max().item():.2f}, "
+        f"mean={torch.nanmean(t).item():.2f}, "
+        f"std={valid.std().item():.2f}, "
         f"NaNs={n_nan}/{total}"
     )

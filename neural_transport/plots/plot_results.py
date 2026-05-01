@@ -2087,9 +2087,18 @@ def plot_crps(maps, df_global_scalars, out_dir,
         crps_map = maps["CRPS_map_co2molemix"]
         crps_mean = df_global_scalars["CRPS_ensemble_mean"].iloc[0]
 
-    fig, ax = plt.subplots(figsize=(8, 4), subplot_kw=dict(projection=ccrs.PlateCarree()))
-    crps_map.plot(ax=ax, transform=ccrs.PlateCarree(), cmap="cividis", add_colorbar=True, rasterized=True)
-    ax.coastlines(linewidth=0.5)
+    fig, ax = plt.subplots(figsize=(8, 4), subplot_kw=dict(projection=ccrs.Robinson()))
+    im = crps_map.plot(ax=ax, transform=ccrs.PlateCarree(), cmap="crest_r", add_colorbar=False, rasterized=True)
+    cbar = fig.colorbar(
+        im,
+        ax=ax,
+        orientation="horizontal",
+        pad=0.05,
+        shrink=0.7,
+        aspect=40,
+    )
+    cbar.set_label("CRPS")
+    ax.coastlines(color="white", linewidth=0.5)
     ax.set_title(title)
     fig.text(0.5, 0.01, f"Global mean CRPS = {crps_mean:.4f}", ha="center", fontsize=10)
     for fmt in imgformats:
@@ -2138,7 +2147,7 @@ def plot_scatter_preds_vs_tests(maps, df_global_scalars,
     lims = [min(y_true.min(), ens_mean.min()), max(y_true.max(), ens_mean.max())]
     # --- Plot ---
     fig, ax = plt.subplots(figsize=(6,6))
-    hb = ax.hexbin(y_true, ens_mean, gridsize=100, cmap="cividis", bins="log")
+    hb = ax.hexbin(y_true, ens_mean, gridsize=100, cmap="magma", bins="log")
     plt.colorbar(hb, ax=ax, label="log(count)")
 
     ax.plot(lims, lims, "k--", label="1:1 line")
@@ -2205,41 +2214,64 @@ def plot_error_locations(maps, out_dir,
                          varname="co2molemix", level=None,
                          vmax_bias=5.0, vmax_rmse=10.0,
                          imgformats=["svg", "png", "pdf"]):
-        """
-        Plot spatial bias, RMSE and ensemble spread maps.
-        """
-        out_dir = Path(out_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
+    """Plot spatial bias, RMSE and ensemble spread maps."""
 
-        if level is not None:
-            title=f"Spatial Diagnostics: Bias, RMSE, and Ensemble Spread ({varname}) - level {level:.0f}"
-            level_str = f"_level{level:.0f}"
-            bias = maps[f"Bias_map_co2molemix_level{level:.0f}"].values
-            rmse = maps[f"RMSE_map_co2molemix_level{level:.0f}"].values
-            spread = maps[f"Spread_map_co2molemix_level{level:.0f}"].values
-        else:
-            title=f"Spatial Diagnostics: Bias, RMSE, and Ensemble Spread ({varname}) - mean over levels"
-            level_str = ""
-            bias = maps["Bias_map_co2molemix"].values
-            rmse = maps["RMSE_map_co2molemix"].values
-            spread = maps["Spread_map_co2molemix"].values
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-        fig, axs = plt.subplots(1, 3, figsize=(15, 4), constrained_layout=True)
-        titles = ["Bias [ppm]", "RMSE [ppm]", "Ensemble spread ($\\sigma$) [ppm]"]
-        cmaps = ["RdBu_r", "inferno", "cividis"]
-        data = [bias, rmse, spread]
-        vmins = [-vmax_bias, 0, 0]
-        vmaxs = [vmax_bias, vmax_rmse, vmax_rmse]
+    if level is not None:
+        title = f"Spatial Diagnostics: Bias, RMSE, and Ensemble Spread ({varname}) - level {level:.0f}"
+        level_str = f"_level{level:.0f}"
+        bias = maps[f"Bias_map_co2molemix_level{level:.0f}"]
+        rmse = maps[f"RMSE_map_co2molemix_level{level:.0f}"]
+        spread = maps[f"Spread_map_co2molemix_level{level:.0f}"]
+    else:
+        title = f"Spatial Diagnostics: Bias, RMSE, and Ensemble Spread ({varname}) - mean over levels"
+        level_str = ""
+        bias = maps["Bias_map_co2molemix"]
+        rmse = maps["RMSE_map_co2molemix"]
+        spread = maps["Spread_map_co2molemix"]
 
-        for ax, arr, title, cmap, vmin, vmax in zip(axs, data, titles, cmaps, vmins, vmaxs):
-            im = ax.imshow(arr[::-1, :], cmap=cmap, vmin=vmin, vmax=vmax)
-            ax.set_xlabel("Longitude")
-            ax.set_ylabel("Latitude")
-            ax.set_title(title, fontsize=14)
-            plt.colorbar(im, ax=ax, shrink=0.7)
+    fig, axs = plt.subplots(
+        1, 3,
+        figsize=(15, 4),
+        subplot_kw=dict(projection=ccrs.Robinson())
+    )
 
-        plt.suptitle(title, fontsize=16, fontweight="bold")
+    data = [bias, rmse, spread]
+    titles = ["Bias [ppm]", "RMSE [ppm]", "Ensemble spread ($\\sigma$) [ppm]"]
+    cmaps = ["RdBu_r", "inferno", "cividis"]
+    vmins = [-vmax_bias, 0, 0]
+    vmaxs = [vmax_bias, vmax_rmse, vmax_rmse]
 
-        for fmt in imgformats:
-            fig.savefig(out_dir / f"error_maps_{varname}{level_str}.{fmt}", dpi=300, bbox_inches="tight")
-        plt.close(fig)
+    for ax, da, t, cmap, vmin, vmax in zip(axs, data, titles, cmaps, vmins, vmaxs):
+        im = da.plot(
+            ax=ax,
+            transform=ccrs.PlateCarree(),
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+            add_colorbar=False,
+            rasterized=True
+        )
+
+        cbar = fig.colorbar(
+            im,
+            ax=ax,
+            orientation="horizontal",
+            pad=0.05,
+            shrink=0.7,
+            aspect=30,
+        )
+
+        cbar.set_label(t)
+        ax.coastlines(color="black" if cmap == "RdBu_r" else "white", linewidth=0.5)
+        ax.set_title(t, fontsize=12)
+
+    fig.suptitle(title, fontsize=14)
+
+    for fmt in imgformats:
+        fig.savefig(out_dir / f"error_maps_{varname}{level_str}.{fmt}",
+                    dpi=300, bbox_inches="tight")
+
+    plt.close(fig)
