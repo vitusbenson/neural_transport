@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+import xarray as xr
 
 
 R_EARTH = 6.371e3  # km
@@ -115,10 +116,12 @@ def compute_xco2_via_ak(
     Returns:
     - xco2: Computed XCO₂, shape [N]
     """
-    is_torch = isinstance(co2_profile, torch.Tensor)
+    
 
-    if is_torch:
+    if isinstance(co2_profile, torch.Tensor):
         xco2 = xco2_prior + (ak * (co2_profile - co2_profile_prior)).sum(dim=-1)
+    elif isinstance(co2_profile, xr.DataArray):
+        xco2 = xco2_prior + (ak * (co2_profile - co2_profile_prior)).sum(dim="level")
     else:
         xco2 = xco2_prior + np.sum(ak * (co2_profile - co2_profile_prior), axis=-1)
     

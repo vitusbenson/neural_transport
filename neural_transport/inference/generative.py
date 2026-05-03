@@ -491,6 +491,7 @@ def iterative_generate_oco2(
 
     dss = []
     obss = []
+    
     if mask_pattern is None:
         T = 5
         # T = len(dataset_gen)
@@ -500,6 +501,10 @@ def iterative_generate_oco2(
     print(f"Time alignment offset: {offset} timesteps")
     window_steps = max(1, window_hours // freq_int)
     print(f"Using observation window: {window_hours} hours = {window_steps} timesteps")
+
+    if analyze_masking and masking:
+        batch_analyze_list = []
+        time_indices = [0, 1, T-1]
 
     for t in tqdm(range(T), desc="Generating") if verbose else range(T):
         # batches: dict of tensors [B T N C]
@@ -588,8 +593,9 @@ def iterative_generate_oco2(
 
         dss.append(ds)
 
-        if t == 0 and analyze_masking and masking:
-            batch_analyze = batch
+        if analyze_masking and masking:
+            if t in time_indices:
+                batch_analyze_list.append(batch)
 
     ### !!! Caution: need to fix this properly!!!
     good_dss = []
@@ -625,9 +631,9 @@ def iterative_generate_oco2(
     ds_all.to_zarr(zarrpath, mode="w")
 
     if analyze_masking and masking:
-        plot_masking_diagnostics(batch_analyze, ds_all,
+        plot_masking_diagnostics(batch_analyze_list, ds_all,
                                  str(outpath).replace("preds", "plots"),
-                                 varnames=target_vars_3d, nlat=nlat, nlon=nlon,
+                                 varnames=target_vars_3d, nlat=nlat, nlon=nlon, time_indices=time_indices,
                                  imgformats=["png"])
 
     return ds_all
@@ -676,7 +682,16 @@ def iterative_generate(
     dss = []
     obss = []
 
+    if analyze_masking and masking:
+        batch_analyze_list = []
+        time_indices = np.linspace(0, n_timesteps-1, 3, dtype=int)
+        stride = 4 * 30 * 3  # 6h * 360 = 3 months
+        time_indices = time_indices * stride
+    else:
+        stride = 1
+
     for t in tqdm(range(n_timesteps), desc="Generating samples") if verbose else range(n_timesteps):
+        t = t * stride
         # batches: dict of tensors [B T N C] conditioned on different timesteps
         base_batch = get_batch(t, dataset, device)
 
@@ -743,8 +758,9 @@ def iterative_generate(
 
         dss.append(ds)
 
-        if t == 0 and analyze_masking and masking:
-            batch_analyze = batch
+        if analyze_masking and masking:
+            if t in time_indices:
+                batch_analyze_list.append(batch)
 
     ### !!! Caution: need to fix this properly!!!
     good_dss = []
@@ -768,9 +784,10 @@ def iterative_generate(
     ds_all.to_zarr(zarrpath, mode="w")
 
     if analyze_masking and masking:
-        plot_masking_diagnostics(batch_analyze, ds_all,
+        plot_masking_diagnostics(batch_analyze_list, ds_all,
                                  str(outpath).replace("preds", "plots"),
                                  varnames=target_vars_3d, nlat=nlat, nlon=nlon,
+                                 time_indices=time_indices,
                                  imgformats=["png"])
 
     return ds_all

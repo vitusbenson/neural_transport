@@ -22,6 +22,7 @@ from neural_transport.tools.conversion import (
     zonal_wavenumber_to_wavelength,
     km_per_gridcell,
 )
+from neural_transport.tools.metrics import crps
 
 from sklearn.decomposition import PCA
 
@@ -1023,7 +1024,48 @@ def plot_noise_diagnostics(noises, angles, out_dir, label="$\\theta$", imgformat
     return
 
 
-def plot_panel(ax, data, title, cmap="cividis", vmin=None, vmax=None, aspect_ratio=2.0, bold=False):
+def to_da(
+        arr: np.ndarray, 
+        nlat: int, 
+        nlon: int, 
+        lat: np.ndarray=None, 
+        lon: np.ndarray=None,
+        dims: tuple = ("lat", "lon"),
+        name: str=None
+) -> xr.DataArray:
+    """Convert numpy array [lat, lon] → xarray DataArray with coords."""
+    if lat is None:
+        lat = np.linspace(-90, 90, nlat)
+    if lon is None:
+        lon = np.linspace(-180, 180, nlon)
+
+    return xr.DataArray(
+        arr,
+        dims=dims,
+        coords={"lat": lat, "lon": lon},
+        name=name
+    )
+
+
+def lon_180(da):
+    if "lon" in da.coords:
+        da = da.assign_coords(
+            lon=((da.lon + 180) % 360) - 180
+        )
+        da = da.sortby("lon")
+    return da
+
+
+def plot_panel(
+        ax: mpl.axes.Axes,
+        data: np.ndarray,
+        title: str,
+        cmap: str = "cividis",
+        vmin: float = None,
+        vmax: float = None,
+        aspect_ratio: float = 2.0,
+        bold: bool = False
+) -> mpl.image.AxesImage:
     """Helper to plot one panel with consistent style."""
     im = ax.imshow(
         data[::-1, :],
@@ -1033,6 +1075,35 @@ def plot_panel(ax, data, title, cmap="cividis", vmin=None, vmax=None, aspect_rat
         aspect=aspect_ratio / 2,
     )
     ax.set_title(title, fontsize=13 if bold else 11, fontweight="bold" if bold else "normal")
+    ax.axis("off")
+    return im
+
+
+def plot_panel_map(
+        ax: mpl.axes.Axes,
+        da: xr.DataArray,
+        title: str,
+        cmap: str = "cividis",
+        vmin: float = None,
+        vmax: float = None,
+        bold: bool = False
+) -> mpl.image.AxesImage:
+    """Helper to plot one panel with consistent style and map projection."""
+    im = da.plot(
+        ax=ax,
+        transform=ccrs.PlateCarree(),
+        cmap=cmap,
+        vmin=vmin,
+        vmax=vmax,
+        add_colorbar=False,
+        rasterized=True
+    )
+    ax.coastlines(color="black" if cmap not in ["magma", "inferno", "crest_r"] else "white", linewidth=0.5)
+    ax.set_title(
+        title,
+        fontsize=13 if bold else 11,
+        fontweight="bold" if bold else "normal"
+    )
     ax.axis("off")
     return im
 
@@ -1061,44 +1132,71 @@ def plot_obs_mask_and_samples(
 
     # Generated samples [sample, lat, lon, level, (time)]
     samples = preds_var
+    lat = samples.lat.values
+    lon = samples.lon.values
     if "level" in samples.dims:
         samples = samples.isel(level=0)
     if "time" in samples.dims:
         samples = samples.isel(time=0)
-    samples_np = samples.values  # shape: [sample, lat, lon]
-    n_samples = min(samples_np.shape[0], max_samples)
+
+    n_samples = min(samples.sizes["sample"], max_samples)
+    samples = samples.isel(sample=slice(0, n_samples))  # shape: [sample, lat, lon]
+
+    target_da = to_da(target_vals, nlat, nlon, lat=lat, lon=lon, name="target")
+    masked_da = to_da(masked_obs, nlat, nlon, lat=lat, lon=lon, name="masked")
 
     # Global color limits
-    vmin = np.nanmin([np.nanmin(target_vals), np.nanmin(samples_np[:n_samples, ...])])
-    vmax = np.nanmax([np.nanmax(target_vals), np.nanmax(samples_np[:n_samples, ...])])
-    obs_min, obs_max = np.nanmin(masked_obs), np.nanmax(masked_obs)
-    targ_min, targ_max = np.nanmin(target_vals), np.nanmax(target_vals)
+    vmin = float(np.nanmin([
+        target_da.min().item(),
+        samples.values.min()
+    ]))
+
+    vmax = float(np.nanmax([
+        target_da.max().item(),
+        samples.values.max()
+    ]))
+    obs_min, obs_max = masked_da.min().item(), masked_da.max().item()
+    targ_min, targ_max = target_da.min().item(), target_da.max().item()
 
     # Figure setup
     aspect_ratio = nlon / nlat
     base_size = 3.0
     fig_width = 4 * base_size * (aspect_ratio / 2)
     fig_height = 2 * base_size
-    fig, axs = plt.subplots(2, 4, figsize=(fig_width, fig_height))
+
+    fig, axs = plt.subplots(
+        2, 4,
+        figsize=(fig_width, fig_height),
+        subplot_kw={"projection": ccrs.PlateCarree()},
+    )
     axs = axs.reshape(2, 4)
 
     # Panels ([0,0]: Ground truth, [1,0]: Masked obs, [0,1..3] and [1,1..3]: samples)
-    im = plot_panel(axs[0, 0], target_vals, "Ground Truth", vmin=targ_min, vmax=targ_max, aspect_ratio=aspect_ratio, bold=True)
-    plot_panel(axs[1, 0], np.ma.masked_invalid(masked_obs), "Masked Observations",
-               vmin=obs_min, vmax=obs_max, aspect_ratio=aspect_ratio, bold=True)
+    im = plot_panel_map(axs[0, 0], target_da, "Ground Truth",
+               vmin=targ_min, vmax=targ_max, bold=True)
+    
+    plot_panel_map(axs[1, 0], masked_da, "Masked Observations",
+                   vmin=obs_min, vmax=obs_max, bold=True)
 
     for i in range(n_samples):
         row = 0 if i < 3 else 1
         col = (i % 3) + 1
-        plot_panel(axs[row, col], samples_np[i, :, :], f"Sample {i}",
-                   vmin=vmin, vmax=vmax, aspect_ratio=aspect_ratio)
 
-    fig.text(0.56, 0.9, "Generated Samples", fontsize=14, fontweight="bold", ha="center", va="top")
+        plot_panel_map(
+            axs[row, col],
+            samples.isel(sample=i),
+            f"Sample {i}",
+            vmin=vmin,
+            vmax=vmax,
+        )
 
-    for row in range(2):
-        for col in range(4):
-            if not axs[row, col].images:
-                axs[row, col].axis("off")
+    fig.text(0.56, 0.9, "Generated Samples",
+             fontsize=14, fontweight="bold",
+             ha="center", va="top")
+
+    for ax in axs.flat:
+        if not ax.has_data():
+            ax.axis("off")
 
     # Shared colorbar
     cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
@@ -1109,6 +1207,7 @@ def plot_obs_mask_and_samples(
 
     return fig
 
+
 def plot_obs_mask_and_samples_x(
     batch: dict,
     preds_var: xr.DataArray,
@@ -1118,7 +1217,7 @@ def plot_obs_mask_and_samples_x(
     max_samples: int = 6,
     b: int = 0,
     t: int = 0
-):
+) -> mpl.figure.Figure:
     """
     Plot observed values, masked observations, and several generated samples.
     Layout: 2x4 grid
@@ -1134,6 +1233,8 @@ def plot_obs_mask_and_samples_x(
 
     # Generated samples [sample, lat, lon, level, (time)]
     samples = preds_var
+    lat = samples.lat.values
+    lon = samples.lon.values
     if "time" in samples.dims:
         samples = samples.isel(time=t)
 
@@ -1142,61 +1243,114 @@ def plot_obs_mask_and_samples_x(
         xco2_prior = batch["xco2_apriori"][b, t, :].detach().cpu().numpy().squeeze(-1)  # [N]
         co2_profile_prior = batch["co2_profile_apriori"][b, t, :, :].detach().cpu().numpy()  # [N, C]
         vals = batch[varname][b, t, :, :].detach().cpu().numpy()  # [N, C]
-        target_vals = compute_xco2_via_ak(vals, ak, xco2_prior, co2_profile_prior).reshape(nlat, nlon)
+
+        target_vals = compute_xco2_via_ak(
+            vals, ak, xco2_prior, co2_profile_prior
+        ).reshape(nlat, nlon)  # [lat, lon]
+
         if "level" in samples.dims:
-            ak_reshaped = ak.reshape(nlat, nlon, -1)  # [lat, lon, level]
+            ak_reshaped = ak.reshape(nlat, nlon, -1)  # [lat, lon, C]
             xco2_prior_reshaped = xco2_prior.reshape(nlat, nlon)  # [lat, lon]
-            co2_profile_prior_reshaped = co2_profile_prior.reshape(nlat, nlon, -1)  # [lat, lon, level]
-            samples_np = samples.values  # [sample, lat, lon, level]
+            co2_profile_prior_reshaped = co2_profile_prior.reshape(nlat, nlon, -1)  # [lat, lon, C]
+
             samples_list = []
-            for i in range(min(samples_np.shape[0], max_samples)):
-                samples_list.append(compute_xco2_via_ak(samples_np[i], ak_reshaped, xco2_prior_reshaped, co2_profile_prior_reshaped))
-            samples = xr.DataArray(
-                np.array(samples_list),
-                dims=["sample", "lat", "lon"]
+            for i in range(min(samples.sizes["sample"], max_samples)):
+                samples_list.append(
+                    compute_xco2_via_ak(
+                        samples[i],
+                        ak_reshaped,
+                        xco2_prior_reshaped,
+                        co2_profile_prior_reshaped,
+                    )
+                )
+            samples = to_da(
+                np.stack(samples_list, axis=0), nlat, nlon, lat=lat, lon=lon, dims=["sample", "lat", "lon"], name="samples"
             )
     else:
-        target_vals = batch[varname][b, t, :, :].mean(dim=-1).detach().cpu().numpy().reshape(nlat, nlon)
+        target_vals = (
+            batch[varname][b, t, :, :]
+            .mean(dim=-1)
+            .detach()
+            .cpu()
+            .numpy()
+            .reshape(nlat, nlon)
+        )
         if "level" in samples.dims:
             samples = samples.mean(dim="level")
 
-    samples_np = samples.values  # shape: [sample, lat, lon]
-    n_samples = min(samples_np.shape[0], max_samples)
+    target_da = to_da(target_vals, nlat, nlon, lat=lat, lon=lon, name="target")
+    masked_da = to_da(masked_obs, nlat, nlon, lat=lat, lon=lon, name="masked")
+
+    n_samples = min(samples.sizes["sample"], max_samples)
 
     # Global color limits
-    vmin = np.nanmin([np.nanmin(target_vals), np.nanmin(samples_np[:n_samples, ...])])
-    vmax = np.nanmax([np.nanmax(target_vals), np.nanmax(samples_np[:n_samples, ...])])
+    vmin = float(np.nanmin([
+            target_da.min().item(),
+            samples.isel(sample=slice(0, n_samples)).min().item()
+            ]))
+    vmax = float(np.nanmax([
+            target_da.max().item(),
+            samples.isel(sample=slice(0, n_samples)).max().item()
+            ]))
+
     if np.all(np.isnan(masked_obs)):
         obs_min, obs_max = vmin, vmax
     else:
-        obs_min, obs_max = np.nanmin(masked_obs), np.nanmax(masked_obs)
-    targ_min, targ_max = np.nanmin(target_vals), np.nanmax(target_vals)
+        obs_min, obs_max = masked_da.min().item(), masked_da.max().item()
+
+    targ_min, targ_max = target_da.min().item(), target_da.max().item()
 
     # Figure setup
     aspect_ratio = nlon / nlat
     base_size = 3.0
     fig_width = 4 * base_size * (aspect_ratio / 2)
     fig_height = 2 * base_size
-    fig, axs = plt.subplots(2, 4, figsize=(fig_width, fig_height))
+
+    fig, axs = plt.subplots(
+        2, 4,
+        figsize=(fig_width, fig_height),
+        subplot_kw=dict(projection=ccrs.PlateCarree())
+    )
     axs = axs.reshape(2, 4)
 
     # Panels ([0,0]: Ground truth, [1,0]: Masked obs, [0,1..3] and [1,1..3]: samples)
-    im = plot_panel(axs[0, 0], target_vals, "Ground Truth", vmin=targ_min, vmax=targ_max, aspect_ratio=aspect_ratio, bold=True)
-    plot_panel(axs[1, 0], np.ma.masked_invalid(masked_obs), "Masked Observations",
-               vmin=obs_min, vmax=obs_max, aspect_ratio=aspect_ratio, bold=True)
+    im = plot_panel_map(
+        axs[0, 0],
+        target_da,
+        "Ground Truth",
+        vmin=targ_min,
+        vmax=targ_max,
+        bold=True
+    )
+
+    plot_panel_map(
+        axs[1, 0],
+        masked_da,
+        "Masked Observations",
+        vmin=obs_min,
+        vmax=obs_max,
+        bold=True
+    )
 
     for i in range(n_samples):
         row = 0 if i < 3 else 1
         col = (i % 3) + 1
-        plot_panel(axs[row, col], samples_np[i, :, :], f"Sample {i}",
-                   vmin=vmin, vmax=vmax, aspect_ratio=aspect_ratio)
+
+        da_sample = samples.isel(sample=i)
+
+        plot_panel_map(
+            axs[row, col],
+            da_sample,
+            f"Sample {i}",
+            vmin=vmin,
+            vmax=vmax
+        )
 
     fig.text(0.56, 0.9, "Generated Samples", fontsize=14, fontweight="bold", ha="center", va="top")
 
-    for row in range(2):
-        for col in range(4):
-            if not axs[row, col].images:
-                axs[row, col].axis("off")
+    for ax in axs.flat:
+        if not ax.has_data():
+            ax.axis("off")
 
     # Shared colorbar
     cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
@@ -1229,59 +1383,82 @@ def plot_mask_pattern_on_samples(
 
     # Generated samples [sample, lat, lon, level, (time)]
     samples = preds_var
+    lat = samples.lat.values
+    lon = samples.lon.values
     if "time" in samples.dims:
         samples = samples.isel(time=t)
 
+    mask_da = to_da(obs_mask, nlat, nlon, lat=lat, lon=lon, name="mask")
+
     if "xco2_averaging_kernel" in batch:
         ak = batch["xco2_averaging_kernel"][b, t, :, :].detach().cpu().numpy()  # [N, C]
+
         if "level" in samples.dims:
             ak_reshaped = ak.reshape(nlat, nlon, -1)  # [lat, lon, level]
             xco2_prior_reshaped = batch["xco2_apriori"][b, t, :].detach().cpu().numpy().reshape(nlat, nlon)  # [lat, lon]
             co2_profile_prior_reshaped = batch["co2_profile_apriori"][b, t, :, :].detach().cpu().numpy().reshape(nlat, nlon, -1)  # [lat, lon, level]
-            samples_np = samples.values  # [sample, lat, lon, level]
+
             samples_list = []
-            for i in range(min(samples_np.shape[0], max_samples)):
-                samples_list.append(compute_xco2_via_ak(samples_np[i], ak_reshaped, xco2_prior_reshaped, co2_profile_prior_reshaped))
-            samples = xr.DataArray(
-                np.array(samples_list),
-                dims=["sample", "lat", "lon"]
+            for i in range(min(samples.sizes["sample"], max_samples)):
+                samples_list.append(
+                    compute_xco2_via_ak(
+                        samples[i],
+                        ak_reshaped,
+                        xco2_prior_reshaped,
+                        co2_profile_prior_reshaped,
+                    )
+                )
+
+            samples = to_da(
+                np.stack(samples_list, axis=0),
+                nlat,
+                nlon,
+                lat=lat,
+                lon=lon,
+                dims=("sample", "lat", "lon"),
+                name="samples",
             )
     else:
         if "level" in samples.dims:
             samples = samples.mean(dim="level")
 
-    samples_np = samples.values  # shape: [sample, lat, lon]
-    n_samples = min(samples_np.shape[0], max_samples)
+    n_samples = min(samples.sizes["sample"], max_samples)
+    samples = samples.isel(sample=slice(0, n_samples))
 
     # Global color limits
-    vmin = np.nanmin(samples_np[:n_samples, ...])
-    vmax = np.nanmax(samples_np[:n_samples, ...])
+    vmin = float(samples.min().item())
+    vmax = float(samples.max().item())
 
     # Figure setup
     aspect_ratio = nlon / nlat
     base_size = 3.0
     fig_width = 3 * base_size * (aspect_ratio / 2)
     fig_height = 2 * base_size
-    fig, axs = plt.subplots(2, 3, figsize=(fig_width, fig_height))
+
+    fig, axs = plt.subplots(
+        2, 3,
+        figsize=(fig_width, fig_height),
+        subplot_kw=dict(projection=ccrs.PlateCarree())
+    )
     axs = axs.flatten()
 
     for i in range(n_samples):
         ax = axs[i]
         # Plot sample
-        im = ax.imshow(
-            samples_np[i, :, :],
-            cmap="cividis",
+        im = plot_panel_map(
+            ax,
+            samples.isel(sample=i),
+            f"Sample {i} + Mask",
             vmin=vmin,
             vmax=vmax,
-            aspect=aspect_ratio / 2,
-            origin='lower',
         )
         # Overlay mask as red contour
         ax.contour(
-            obs_mask,
+            mask_da.values,
             levels=[0.5],
-            colors='red',
+            colors="red",
             linewidths=1.5,
+            transform=ccrs.PlateCarree(),
         )
         ax.set_title(f"Sample {i} + Mask", fontsize=11)
         ax.axis("off")
@@ -1324,6 +1501,8 @@ def plot_masked_bias_samples(
 
     # Generated samples [sample, lat, lon, level, (time)]
     samples = preds_var
+    lat = samples.lat.values
+    lon = samples.lon.values
     if "time" in samples.dims:
         samples = samples.isel(time=t)
 
@@ -1332,26 +1511,55 @@ def plot_masked_bias_samples(
         xco2_prior = batch["xco2_apriori"][b, t, :].detach().cpu().numpy().squeeze(-1)
         co2_profile_prior = batch["co2_profile_apriori"][b, t, :, :].detach().cpu().numpy()
         vals = batch[varname][b, t, :, :].detach().cpu().numpy()
-        target_vals = compute_xco2_via_ak(vals, ak, xco2_prior, co2_profile_prior).reshape(nlat, nlon)
+
+        target_vals = compute_xco2_via_ak(
+            vals, ak, xco2_prior, co2_profile_prior
+        ).reshape(nlat, nlon)
+
         if "level" in samples.dims:
             ak_reshaped = ak.reshape(nlat, nlon, -1)
             xco2_prior_reshaped = xco2_prior.reshape(nlat, nlon)
             co2_profile_prior_reshaped = co2_profile_prior.reshape(nlat, nlon, -1)
-            samples_np = samples.values
+
             samples_list = []
-            for i in range(min(samples_np.shape[0], max_samples)):
-                samples_list.append(compute_xco2_via_ak(samples_np[i], ak_reshaped, xco2_prior_reshaped, co2_profile_prior_reshaped))
-            samples = xr.DataArray(
-                np.array(samples_list),
-                dims=["sample", "lat", "lon"]
+            for i in range(min(samples.sizes["sample"], max_samples)):
+                samples_list.append(
+                    compute_xco2_via_ak(
+                        samples[i],
+                        ak_reshaped,
+                        xco2_prior_reshaped,
+                        co2_profile_prior_reshaped,
+                    )
+                )
+
+            samples = to_da(
+                np.stack(samples_list, axis=0),
+                nlat,
+                nlon,
+                lat=lat,
+                lon=lon,
+                dims=("sample", "lat", "lon"),
+                name="samples_bias_input",
             )
     else:
-        target_vals = batch[varname][b, t, :, :].mean(dim=-1).detach().cpu().numpy().reshape(nlat, nlon)
+        target_vals = (
+            batch[varname][b, t, :, :]
+            .mean(dim=-1)
+            .detach()
+            .cpu()
+            .numpy()
+            .reshape(nlat, nlon)
+        )
+
         if "level" in samples.dims:
             samples = samples.mean(dim="level")
 
-    samples_np = samples.values  # shape: [sample, lat, lon]
-    n_samples = min(samples_np.shape[0], max_samples)
+    target_da = to_da(target_vals, nlat, nlon, lat=lat, lon=lon, name="target")
+    masked_da = to_da(masked_obs, nlat, nlon, lat=lat, lon=lon, name="masked")
+
+    samples = samples.isel(sample=slice(0, min(samples.sizes["sample"], max_samples)))
+    samples_np = samples.values
+    n_samples = samples.sizes["sample"]
 
     bias_list = []
     for i in range(n_samples):
@@ -1364,40 +1572,69 @@ def plot_masked_bias_samples(
     # Global symmetric color limits
     vmax = np.nanmax(np.abs(bias_np))
     vmin = -vmax
-    targ_min, targ_max = np.nanmin(target_vals), np.nanmax(target_vals)
+
+    targ_min, targ_max = target_da.min().item(), target_da.max().item()
+
     if np.all(np.isnan(masked_obs)):
         obs_min, obs_max = targ_min, targ_max
     else:
-        obs_min, obs_max = np.nanmin(masked_obs), np.nanmax(masked_obs)
+        obs_min, obs_max = masked_da.min().item(), masked_da.max().item()
 
     # Figure setup
     aspect_ratio = nlon / nlat
     base_size = 3.0
     fig_width = 4 * base_size * (aspect_ratio / 2)
     fig_height = 2 * base_size
-    fig, axs = plt.subplots(2, 4, figsize=(fig_width, fig_height))
+
+    fig, axs = plt.subplots(
+        2, 4,
+        figsize=(fig_width, fig_height),
+        subplot_kw=dict(projection=ccrs.PlateCarree()),
+    )
     axs = axs.reshape(2, 4)
 
     # Panels ([0,0]: Ground truth, [1,0]: Masked obs, [0,1..3] and [1,1..3]: samples)
     # Ground truth
-    im = plot_panel(axs[0, 0], target_vals, "Ground Truth", vmin=targ_min, vmax=targ_max, aspect_ratio=aspect_ratio, bold=True)
+    im = plot_panel_map(
+        axs[0, 0],
+        target_da,
+        "Ground Truth",
+        vmin=targ_min,
+        vmax=targ_max,
+        bold=True,
+    )
 
     # Masked observations
-    plot_panel(axs[1, 0], np.ma.masked_invalid(masked_obs), "Masked Observations",
-        vmin=obs_min, vmax=obs_max, aspect_ratio=aspect_ratio, bold=True)
+    plot_panel_map(
+        axs[1, 0],
+        masked_da,
+        "Masked Observations",
+        vmin=obs_min,
+        vmax=obs_max,
+        bold=True,
+    )
 
     # Bias samples
     for i in range(n_samples):
         row = 0 if i < 3 else 1
         col = (i % 3) + 1
-        im2 = plot_panel(
-            axs[row, col],
+
+        bias_da = to_da(
             bias_np[i],
+            nlat,
+            nlon,
+            lat=lat,
+            lon=lon,
+            name=f"bias_{i}",
+        )
+
+        im2 = plot_panel_map(
+            axs[row, col],
+            bias_da,
             f"Bias Sample {i}",
             cmap="RdBu_r",
             vmin=vmin,
             vmax=vmax,
-            aspect_ratio=aspect_ratio
         )
 
     fig.text(
@@ -1407,13 +1644,12 @@ def plot_masked_bias_samples(
         fontsize=14,
         fontweight="bold",
         ha="center",
-        va="top"
+        va="top",
     )
 
-    for row in range(2):
-        for col in range(4):
-            if not axs[row, col].images:
-                axs[row, col].axis("off")
+    for ax in axs.flat:
+        if not ax.has_data():
+            ax.axis("off")
 
     plt.tight_layout(rect=[0, 0, 0.9, 1], h_pad=0.2)
 
@@ -1421,18 +1657,19 @@ def plot_masked_bias_samples(
     cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
     fig.colorbar(im2, cax=cbar_ax, orientation="vertical", label="Bias [ppm]")
 
-    bbox0 = axs[1,0].get_position()
+    bbox0 = axs[1, 0].get_position()
     cbar_truth_ax = fig.add_axes([
         bbox0.x0,
         bbox0.y0 - 0.05,
         bbox0.width,
-        0.02
+        0.02,
     ])
+
     fig.colorbar(
         im,
         cax=cbar_truth_ax,
         orientation="horizontal",
-        label="XCO₂ [ppm]"
+        label="XCO₂ [ppm]",
     )
 
     fig.suptitle("Bias of Generated Samples (Masked Locations)", fontsize=16)
@@ -1440,13 +1677,209 @@ def plot_masked_bias_samples(
     return fig
 
 
+def plot_obs_mask_samples_metrics(
+    batch_list: list,
+    preds_var: xr.DataArray,
+    varname: str = "co2massmix",
+    nlat: int = 32,
+    nlon: int = 64,
+    max_samples: int = 3,
+    time_indices: list = [0, 1, 4],
+    b: int = 0,
+    t: int = 0
+) -> mpl.figure.Figure:
+    """
+    Plot observed values, masked observations, and several generated samples.
+    Layout: 2x4 grid
+      [0..2,0] = Ground Truth
+      [3,0] = Masked Observations
+      [0..2,1..3] = Generated Samples (up to 3)
+      [3,1] = Ensemble Mean
+      [3,2] = CRPS
+      [3,3] = RMSE
+    """
+    c = 0
+
+    samples = preds_var
+    lat = samples.lat.values
+    lon = samples.lon.values
+
+    # Figure setup
+    fig, axs = plt.subplots(
+        4, 4,
+        figsize=(12, 10),
+        subplot_kw=dict(projection=ccrs.PlateCarree())
+    )
+
+    all_row_samples = []
+    all_row_targets = []
+
+    # ROWS 0–2: Ground truth [0..2, 0] + Samples [0..2, 1..3]
+    for row_idx, t_row in enumerate(time_indices):
+
+        # Observations
+        obs_values = batch_list[row_idx]["obs_values"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
+        obs_mask = batch_list[row_idx]["obs_mask"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
+        masked_obs = np.where(obs_mask, obs_values, np.nan)
+
+        # Samples
+        if "time" in samples.dims:
+            samples = samples.isel(time=t_row)
+
+        # Target
+        if "xco2_averaging_kernel" in batch_list[row_idx]:
+            ak = batch_list[row_idx]["xco2_averaging_kernel"][b, t, :, :].detach().cpu().numpy()
+            xco2_prior = batch_list[row_idx]["xco2_apriori"][b, t, :].detach().cpu().numpy().squeeze(-1)
+            co2_profile_prior = batch_list[row_idx]["co2_profile_apriori"][b, t, :, :].detach().cpu().numpy()
+            vals = batch_list[row_idx][varname][b, t, :, :].detach().cpu().numpy()
+
+            target_vals = compute_xco2_via_ak(vals, ak, xco2_prior, co2_profile_prior).reshape(nlat, nlon)
+
+            if "level" in samples.dims:
+                ak_r = ak.reshape(nlat, nlon, -1)
+                xp_r = xco2_prior.reshape(nlat, nlon)
+                cpp_r = co2_profile_prior.reshape(nlat, nlon, -1)
+
+                samples_list = []
+                for i in range(max_samples):
+                    samples_list.append(
+                        compute_xco2_via_ak(samples[i], ak_r, xp_r, cpp_r)
+                    )
+
+                samples_row = to_da(
+                    np.stack(samples_list, axis=0),
+                    nlat, nlon,
+                    lat=lat, lon=lon,
+                    dims=["sample", "lat", "lon"]
+                )
+        else:
+            target_vals = batch_list[row_idx][varname][b, t, :, :].mean(dim=-1).detach().cpu().numpy().reshape(nlat, nlon)
+            if "level" in samples.dims:
+                samples = samples.mean(dim="level")
+
+            samples_row = samples.isel(sample=slice(0, max_samples))
+
+        target_da = to_da(target_vals, nlat, nlon, lat=lat, lon=lon)
+        masked_da = to_da(masked_obs, nlat, nlon, lat=lat, lon=lon)
+
+        all_row_samples.append(samples_row)
+        all_row_targets.append(target_da)
+
+        # Global color limits for this row (GT + samples)
+        vmin = float(np.nanmin([target_da.min(), samples_row.min()]))
+        vmax = float(np.nanmax([target_da.max(), samples_row.max()]))
+
+        # Ground Truth
+        im = plot_panel_map(
+            axs[row_idx, 0],
+            target_da,
+            f"Ground Truth {row_idx}",
+            vmin=vmin,
+            vmax=vmax,
+            bold=True
+        )
+
+        # Samples
+        for i in range(max_samples):
+            plot_panel_map(
+                axs[row_idx, i+1],
+                samples_row.isel(sample=i),
+                f"Sample {i}",
+                vmin=vmin,
+                vmax=vmax
+            )
+
+        # Shared vertical colorbar for this row
+        row_axes = axs[row_idx, :]
+        bbox = row_axes[0].get_position()
+        cax = fig.add_axes([
+            row_axes[-1].get_position().x1 + 0.01,
+            bbox.y0,
+            0.01,
+            bbox.height
+        ])
+        fig.colorbar(im, cax=cax, orientation="vertical", label="XCO₂ [ppm]")
+
+    # ROW 3: diagnostics (last row)
+    last_samples = all_row_samples[-1]
+    last_target = all_row_targets[-1]
+
+    # Masked observations (from last row's batch)
+    if np.all(np.isnan(masked_obs)):
+        obs_min, obs_max = vmin, vmax
+    else:
+        obs_min, obs_max = masked_da.min().item(), masked_da.max().item()
+    
+    plot_panel_map(
+        axs[3, 0],
+        masked_da,
+        "Masked Observations",
+        vmin=obs_min,
+        vmax=obs_max,
+        bold=True
+    )
+
+    # Ensemble mean
+    ens_mean = last_samples.mean(dim="sample")
+    plot_panel_map(
+        axs[3, 1],
+        ens_mean,
+        "Ensemble Mean",
+        cmap="cividis",
+        vmin=vmin,
+        vmax=vmax,
+        bold=True
+    )
+
+    # RMSE
+    rmse = np.sqrt(((last_samples - last_target)**2).mean(dim="sample"))
+
+    im_rmse = plot_panel_map(
+        axs[3, 3],
+        rmse,
+        "RMSE",
+        cmap="inferno",
+        bold=True
+    )
+
+    # CRPS
+    crps_map = crps(last_samples, last_target)[0]
+    crps_map_da = to_da(crps_map, nlat, nlon, lat=lat, lon=lon, name="crps_map")
+    im_crps = plot_panel_map(
+        axs[3, 2],
+        crps_map_da,
+        "CRPS",
+        cmap="crest_r",
+        bold=True
+    )
+
+    # Horizontal colorbars (metrics)
+    for j, (im, label) in enumerate([
+        (im_crps, "CRPS"),
+        (im_rmse, "RMSE [ppm]")
+    ]):
+        bbox = axs[3, j+2].get_position()
+        cax = fig.add_axes([bbox.x0, bbox.y0 - 0.06, bbox.width, 0.02])
+        fig.colorbar(im, cax=cax, orientation="horizontal", label=label)
+
+    for ax in axs.flat:
+        if not ax.has_data():
+            ax.axis("off")
+
+    fig.suptitle("Observations, Samples, and Diagnostics", fontsize=16)
+    plt.tight_layout(rect=[0, 0.08, 0.9, 0.95])
+
+    return fig
+
+
 def plot_masking_diagnostics(
-        batch: dict,
+        batch_list: list,
         preds: xr.Dataset,
         out_dir: str,
         varnames: list = ["co2massmix"],
         nlat: int = 32,
         nlon: int = 64,
+        time_indices: list = [0, 1, 4],
         imgformats: list = ["svg", "png", "pdf"]) -> None:
     """
     Save diagnostics for masking or flow matching analysis.
@@ -1460,12 +1893,13 @@ def plot_masking_diagnostics(
 
         if varname == "co2massmix":
             varname = "co2molemix"
-            batch[varname] = massmix_to_molemix(batch["co2massmix"])
+            for batch in batch_list:
+                batch[varname] = massmix_to_molemix(batch["co2massmix"])
             preds[varname] = massmix_to_molemix(preds["co2massmix"])
         preds_var = preds[varname]
 
         fig = plot_obs_mask_and_samples_x(
-            batch,
+            batch_list[0],
             preds_var,
             varname=varname,
             nlat=nlat,
@@ -1477,7 +1911,7 @@ def plot_masking_diagnostics(
         plt.close(fig)
 
         fig_bias = plot_masked_bias_samples(
-            batch,
+            batch_list[0],
             preds_var,
             varname=varname,
             nlat=nlat,
@@ -1488,10 +1922,23 @@ def plot_masking_diagnostics(
             fig_bias.savefig(out_dir / f"masking_{varname}_bias.{fmt}", dpi=300, bbox_inches="tight")
         plt.close(fig_bias)
 
+        fig_all = plot_obs_mask_samples_metrics(
+            batch_list,
+            preds_var,
+            varname=varname,
+            nlat=nlat,
+            nlon=nlon,
+            max_samples=3,
+            time_indices=time_indices,
+        )
+        for fmt in imgformats:
+            fig_all.savefig(out_dir / f"masking_{varname}_metrics.{fmt}", dpi=300, bbox_inches="tight")
+        plt.close(fig_all)
+
         # Plot mask pattern overlay on generated samples
-        if "obs_mask_original" in batch:
+        if "obs_mask_original" in batch_list[0]:
             fig_mask = plot_mask_pattern_on_samples(
-                batch,
+                batch_list[0],
                 preds_var,
                 nlat=nlat,
                 nlon=nlon,
@@ -2147,7 +2594,7 @@ def plot_scatter_preds_vs_tests(maps, df_global_scalars,
     lims = [min(y_true.min(), ens_mean.min()), max(y_true.max(), ens_mean.max())]
     # --- Plot ---
     fig, ax = plt.subplots(figsize=(6,6))
-    hb = ax.hexbin(y_true, ens_mean, gridsize=100, cmap="magma", bins="log")
+    hb = ax.hexbin(y_true, ens_mean, gridsize=100, cmap="mako", bins="log")
     plt.colorbar(hb, ax=ax, label="log(count)")
 
     ax.plot(lims, lims, "k--", label="1:1 line")
@@ -2195,7 +2642,7 @@ def plot_spread_skill(maps, out_dir,
 
     # --- Plot ---
     fig, ax = plt.subplots(figsize=(6,6))
-    hb = ax.hexbin(ens_std, abs_error, gridsize=80, cmap="magma", bins="log")
+    hb = ax.hexbin(ens_std, abs_error, gridsize=80, cmap="mako", bins="log")
     plt.colorbar(hb, ax=ax, label="log(count)")
 
     lims = [0, max(ens_std.max(), abs_error.max())]
@@ -2220,13 +2667,13 @@ def plot_error_locations(maps, out_dir,
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if level is not None:
-        title = f"Spatial Diagnostics: Bias, RMSE, and Ensemble Spread ({varname}) - level {level:.0f}"
+        title = f"Spatial Diagnostics: Bias, RMSE, and Ensemble Spread\n({varname}) - level {level:.0f}"
         level_str = f"_level{level:.0f}"
         bias = maps[f"Bias_map_co2molemix_level{level:.0f}"]
         rmse = maps[f"RMSE_map_co2molemix_level{level:.0f}"]
         spread = maps[f"Spread_map_co2molemix_level{level:.0f}"]
     else:
-        title = f"Spatial Diagnostics: Bias, RMSE, and Ensemble Spread ({varname}) - mean over levels"
+        title = f"Spatial Diagnostics: Bias, RMSE, and Ensemble Spread\n({varname}) - mean over levels"
         level_str = ""
         bias = maps["Bias_map_co2molemix"]
         rmse = maps["RMSE_map_co2molemix"]
@@ -2239,20 +2686,19 @@ def plot_error_locations(maps, out_dir,
     )
 
     data = [bias, rmse, spread]
-    titles = ["Bias [ppm]", "RMSE [ppm]", "Ensemble spread ($\\sigma$) [ppm]"]
-    cmaps = ["RdBu_r", "inferno", "cividis"]
+    labels = ["Bias [ppm]", "RMSE [ppm]", "Ensemble spread ($\\sigma$) [ppm]"]
+    cmaps = ["RdBu_r", "inferno", "crest_r"]
     vmins = [-vmax_bias, 0, 0]
     vmaxs = [vmax_bias, vmax_rmse, vmax_rmse]
 
-    for ax, da, t, cmap, vmin, vmax in zip(axs, data, titles, cmaps, vmins, vmaxs):
-        im = da.plot(
-            ax=ax,
-            transform=ccrs.PlateCarree(),
+    for ax, da, label, cmap, vmin, vmax in zip(axs, data, labels, cmaps, vmins, vmaxs):
+        im = plot_panel_map(
+            ax,
+            da,
+            title="",
             cmap=cmap,
             vmin=vmin,
             vmax=vmax,
-            add_colorbar=False,
-            rasterized=True
         )
 
         cbar = fig.colorbar(
@@ -2263,12 +2709,9 @@ def plot_error_locations(maps, out_dir,
             shrink=0.7,
             aspect=30,
         )
+        cbar.set_label(label)
 
-        cbar.set_label(t)
-        ax.coastlines(color="black" if cmap == "RdBu_r" else "white", linewidth=0.5)
-        ax.set_title(t, fontsize=12)
-
-    fig.suptitle(title, fontsize=14)
+    fig.suptitle(title, fontsize=14, fontweight="bold")
 
     for fmt in imgformats:
         fig.savefig(out_dir / f"error_maps_{varname}{level_str}.{fmt}",

@@ -4,6 +4,7 @@ import argparse
 import contextlib
 from pathlib import Path
 
+import cartopy.crs as ccrs
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
@@ -57,7 +58,7 @@ def plot_samples(
     if figsize is None:
         figsize = (panel_width * ncol, (panel_height + 0.6) * nrow)
 
-    fig, axes = plt.subplots(nrow, ncol, figsize=figsize, squeeze=False)
+    fig, axes = plt.subplots(nrow, ncol, figsize=figsize, squeeze=False, subplot_kw=dict(projection=ccrs.PlateCarree()))
     axes_flat = axes.ravel()
 
     for i, (sample_idx, cmap) in enumerate(zip(sample_indices, cmaps)):
@@ -66,20 +67,26 @@ def plot_samples(
         with contextlib.suppress(Exception):
             da_sample = da_sample.compute()
 
-        mappable = da_sample.plot(ax=ax, cmap=cmap, add_colorbar=False, add_labels=False, rasterized=True)
-        ax.set_aspect("equal", adjustable="box")
+        mappable = da_sample.plot(
+            ax=ax,
+            cmap=cmap,
+            transform=ccrs.PlateCarree(),
+            add_colorbar=False,
+            add_labels=False,
+            rasterized=True)
         ax.set_title(f"Sample {sample_idx}", fontsize=12, fontweight="bold")
         ax.set_xlabel("")
         ax.set_ylabel("")
+        ax.coastlines(color="black", linewidth=0.5)
         cbar = fig.colorbar(mappable, ax=ax, fraction=0.025, pad=0.04)
         cbar.ax.set_ylabel("CO₂ (normalized)", rotation=270, labelpad=15)
 
     for j in range(len(sample_indices), len(axes_flat)):
         axes_flat[j].set_visible(False)
 
-    plt.tight_layout()
     if title:
         fig.suptitle(title, fontsize=16, fontweight="bold")
+    plt.tight_layout()
 
     return fig, axes
 
