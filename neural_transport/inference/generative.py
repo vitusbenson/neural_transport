@@ -504,9 +504,10 @@ def iterative_generate_oco2(
 
     if analyze_masking and masking:
         batch_analyze_list = []
-        time_indices = [0, 1, T-1]
+        time_indices = np.linspace(0, T-1, 3, dtype=int)
 
-    for t in tqdm(range(T), desc="Generating") if verbose else range(T):
+    for t_idx in tqdm(range(T), desc="Generating") if verbose else range(T):
+        t = t_idx
         # batches: dict of tensors [B T N C]
         batch, batch_gen = get_batches(t, offset, dataset, dataset_gen, window_steps, device)
 
@@ -594,7 +595,7 @@ def iterative_generate_oco2(
         dss.append(ds)
 
         if analyze_masking and masking:
-            if t in time_indices:
+            if t_idx in time_indices:
                 batch_analyze_list.append(batch)
 
     ### !!! Caution: need to fix this properly!!!
@@ -633,7 +634,8 @@ def iterative_generate_oco2(
     if analyze_masking and masking:
         plot_masking_diagnostics(batch_analyze_list, ds_all,
                                  str(outpath).replace("preds", "plots"),
-                                 varnames=target_vars_3d, nlat=nlat, nlon=nlon, time_indices=time_indices,
+                                 varnames=target_vars_3d, nlat=nlat, nlon=nlon,
+                                 time_indices=time_indices,
                                  imgformats=["png"])
 
     return ds_all
@@ -685,12 +687,9 @@ def iterative_generate(
     if analyze_masking and masking:
         batch_analyze_list = []
         time_indices = np.linspace(0, n_timesteps-1, 3, dtype=int)
-        stride = 4 * 30 * 3  # 6h * 360 = 3 months
-    else:
-        stride = 1
 
     for t_idx in tqdm(range(n_timesteps), desc="Generating samples") if verbose else range(n_timesteps):
-        t = t_idx * stride
+        t = t_idx
         # batches: dict of tensors [B T N C] conditioned on different timesteps
         base_batch = get_batch(t, dataset, device)
 
