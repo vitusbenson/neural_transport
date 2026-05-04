@@ -686,12 +686,11 @@ def iterative_generate(
         batch_analyze_list = []
         time_indices = np.linspace(0, n_timesteps-1, 3, dtype=int)
         stride = 4 * 30 * 3  # 6h * 360 = 3 months
-        time_indices = time_indices * stride
     else:
         stride = 1
 
-    for t in tqdm(range(n_timesteps), desc="Generating samples") if verbose else range(n_timesteps):
-        t = t * stride
+    for t_idx in tqdm(range(n_timesteps), desc="Generating samples") if verbose else range(n_timesteps):
+        t = t_idx * stride
         # batches: dict of tensors [B T N C] conditioned on different timesteps
         base_batch = get_batch(t, dataset, device)
 
@@ -759,7 +758,7 @@ def iterative_generate(
         dss.append(ds)
 
         if analyze_masking and masking:
-            if t in time_indices:
+            if t_idx in time_indices:
                 batch_analyze_list.append(batch)
 
     ### !!! Caution: need to fix this properly!!!

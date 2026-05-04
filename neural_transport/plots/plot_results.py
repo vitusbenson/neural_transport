@@ -1724,7 +1724,9 @@ def plot_obs_mask_samples_metrics(
 
         # Samples
         if "time" in samples.dims:
-            samples = samples.isel(time=t_row)
+            samples_t = samples.isel(time=t_row)
+        else:
+            samples_t = samples
 
         # Target
         if "xco2_averaging_kernel" in batch_list[row_idx]:
@@ -1735,7 +1737,7 @@ def plot_obs_mask_samples_metrics(
 
             target_vals = compute_xco2_via_ak(vals, ak, xco2_prior, co2_profile_prior).reshape(nlat, nlon)
 
-            if "level" in samples.dims:
+            if "level" in samples_t.dims:
                 ak_r = ak.reshape(nlat, nlon, -1)
                 xp_r = xco2_prior.reshape(nlat, nlon)
                 cpp_r = co2_profile_prior.reshape(nlat, nlon, -1)
@@ -1743,7 +1745,7 @@ def plot_obs_mask_samples_metrics(
                 samples_list = []
                 for i in range(max_samples):
                     samples_list.append(
-                        compute_xco2_via_ak(samples[i], ak_r, xp_r, cpp_r)
+                        compute_xco2_via_ak(samples_t[i], ak_r, xp_r, cpp_r)
                     )
 
                 samples_row = to_da(
@@ -1754,10 +1756,10 @@ def plot_obs_mask_samples_metrics(
                 )
         else:
             target_vals = batch_list[row_idx][varname][b, t, :, :].mean(dim=-1).detach().cpu().numpy().reshape(nlat, nlon)
-            if "level" in samples.dims:
-                samples = samples.mean(dim="level")
+            if "level" in samples_t.dims:
+                samples_t = samples_t.mean(dim="level")
 
-            samples_row = samples.isel(sample=slice(0, max_samples))
+            samples_row = samples_t.isel(sample=slice(0, max_samples))
 
         target_da = to_da(target_vals, nlat, nlon, lat=lat, lon=lon)
         masked_da = to_da(masked_obs, nlat, nlon, lat=lat, lon=lon)
@@ -1859,15 +1861,16 @@ def plot_obs_mask_samples_metrics(
         (im_rmse, "RMSE [ppm]")
     ]):
         bbox = axs[3, j+2].get_position()
-        cax = fig.add_axes([bbox.x0, bbox.y0 - 0.06, bbox.width, 0.02])
+        cax = fig.add_axes([bbox.x0, bbox.y0 - 0.02, bbox.width, 0.01])
         fig.colorbar(im, cax=cax, orientation="horizontal", label=label)
 
     for ax in axs.flat:
         if not ax.has_data():
             ax.axis("off")
 
+    fig.text(0.61, 0.9, "Generated Samples", fontsize=14, fontweight="bold", ha="center", va="top")
     fig.suptitle("Observations, Samples, and Diagnostics", fontsize=16)
-    plt.tight_layout(rect=[0, 0.08, 0.9, 0.95])
+    # plt.tight_layout(rect=[0, 0.08, 0.9, 0.95])
 
     return fig
 
