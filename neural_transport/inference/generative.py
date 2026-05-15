@@ -237,15 +237,15 @@ def create_oco2_mask(batch, target_var="xco2_2019_scale"):
     batch[f"{target_var}_offset"] = molemix_to_massmix(batch[f"{target_var}_offset"])
     batch[f"{target_var}_scale"] = molemix_to_massmix(batch[f"{target_var}_scale"])
 
-    # Handle xco2_averaging_kernel
-    ak = batch["xco2_averaging_kernel"].clone()  # [B, T, N, C=10]
-    n_levels = ak.shape[-1]
-    ak_mask = obs_mask.expand(-1, -1, -1, n_levels)  # [B, T, N, C=10]
-    valid_ak = ak[ak_mask]
-    mean_ak_per_level = valid_ak.reshape(-1, n_levels).mean(dim=0)  # [C=10]
-    mean_ak_full = mean_ak_per_level.view(1, 1, 1, -1).expand_as(ak)
-    ak_cleaned = torch.where(ak_mask, ak, mean_ak_full)
-    batch["xco2_averaging_kernel"] = ak_cleaned
+    # # Handle xco2_averaging_kernel
+    # ak = batch["xco2_averaging_kernel"].clone()  # [B, T, N, C=20]
+    # n_levels = ak.shape[-1]
+    # ak_mask = obs_mask.expand(-1, -1, -1, n_levels)  # [B, T, N, C=20]
+    # valid_ak = ak[ak_mask]
+    # mean_ak_per_level = valid_ak.reshape(-1, n_levels).mean(dim=0)  # [C=20]
+    # mean_ak_full = mean_ak_per_level.view(1, 1, 1, -1).expand_as(ak)
+    # ak_cleaned = torch.where(ak_mask, ak, mean_ak_full)
+    # batch["xco2_averaging_kernel"] = ak_cleaned
 
     return obs_mask, obs_values  # [B T N C] each
 
@@ -321,15 +321,15 @@ def create_oco2_mask_test(
     obs_mask[:, :, obs_indices, :] = True
     obs_values[:, :, obs_indices, :] = value
 
-    # Handle xco2_averaging_kernel
-    ak = batch["xco2_averaging_kernel"].clone()  # [B, T, N, C=10]
-    n_levels = ak.shape[-1]
-    true_mask = ~torch.isnan(batch[target_var])
-    ak_mask = true_mask.expand(-1, -1, -1, n_levels)  # [B, T, N, C=10]
-    valid_ak = ak[ak_mask]
-    mean_ak_per_level = valid_ak.reshape(-1, n_levels).mean(dim=0)  # [C=10]
-    mean_ak_full = mean_ak_per_level.view(1, 1, 1, -1).expand_as(ak)
-    batch["xco2_averaging_kernel"] = mean_ak_full
+    # # Handle xco2_averaging_kernel
+    # ak = batch["xco2_averaging_kernel"].clone()  # [B, T, N, C=20]
+    # n_levels = ak.shape[-1]
+    # true_mask = ~torch.isnan(batch[target_var])
+    # ak_mask = true_mask.expand(-1, -1, -1, n_levels)  # [B, T, N, C=20]
+    # valid_ak = ak[ak_mask]
+    # mean_ak_per_level = valid_ak.reshape(-1, n_levels).mean(dim=0)  # [C=20]
+    # mean_ak_full = mean_ak_per_level.view(1, 1, 1, -1).expand_as(ak)
+    # batch["xco2_averaging_kernel"] = mean_ak_full
 
     return obs_mask, obs_values  # [B T N C] each
 

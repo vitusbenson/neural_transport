@@ -725,6 +725,24 @@ class FlowMatching(RegularGridModel):
         self.path = AffineProbPath(scheduler=CondOTScheduler())
         self.target_vars = self.submodel.target_vars # Here target_vars[0] is supposed to be "co2massmix"
 
+        # this should be made more general, but for now:
+        self.ct_pressures = torch.tensor(
+            [1013.0, 1005.0, 995.0, 971.0, 943.0,
+            843.0, 642.0, 441.0, 243.0, 73.0],
+            dtype=torch.float32,
+        )
+
+        self.oco2_pressures = torch.tensor(
+            [
+                0.0984, 52.6136, 105.2272, 156.4836,
+                210.4544, 256.2101, 312.9672, 370.0722,
+                420.9087, 472.6453, 512.4202, 578.6387,
+                625.9344, 663.7776, 740.1443, 770.1723,
+                841.8174, 884.8869, 945.2906, 997.8886
+            ],
+            dtype=torch.float32,
+        )
+
     def forward(self, batch):
         if not hasattr(self, "generate_kwargs"):
             self.generate_kwargs = {}
@@ -845,6 +863,37 @@ class FlowMatching(RegularGridModel):
         }
         return masking_config
 
+    def vertical_interpolation(self, x, model_pressures, condition_pressures):
+        """
+        Interpolate model profile x from model_pressures to condition_pressures using linear interpolation in log-pressure space.
+        Parameters:
+        x: [B N C]
+        model_pressures: [C] in hPa
+        condition_pressures: [C_condition] in hPa
+        Returns:
+        x_interpolated: [B N C_condition]
+        """
+
+        log_model_p = torch.log(model_pressures)
+        log_condition_p = torch.log(condition_pressures)
+
+        B, N, C = x.shape
+        x_flat = x.reshape(-1, C)  # [B*N, C]
+
+        inds = torch.searchsorted(log_model_p, log_condition_p)  # [C_condition]
+        inds = torch.clamp(inds, 1, C-1)
+        x0 = log_model_p[inds-1]
+        x1 = log_model_p[inds]
+
+        weight = (log_condition_p - x0) / (x1 - x0)  # [C_condition]
+
+        y0 = x_flat[:, inds-1]  # [B*N, C_condition]
+        y1 = x_flat[:, inds]    # [B*N, C_condition]
+
+        x_interp_flat = y0 + weight * (y1 - y0)  # [B*N, C_condition]
+        x_interp = x_interp_flat.reshape(B, N, -1)  # [B N C_condition]
+        return x_interp
+
     def compute_xco2(
             self,
             x: torch.Tensor,
@@ -852,15 +901,22 @@ class FlowMatching(RegularGridModel):
             masking_config: dict,
             generate_kwargs: dict,
     ) -> torch.Tensor:
-        """Compute XCO2 from the current state, by first denormalizing with training data, using the averaging kernel and normalizing with conditioning data."""
+        """Compute XCO2 from the current state, by first denormalizing with training data, using the averaging kernel/priors equation and normalizing with conditioning data."""
+        # Denormalize x to physical space
         B, N, C = batch[self.target_vars[0]].shape
         x = x.permute(0, 2, 3, 1).reshape(B, N, -1)
         x_physical = self.denormalize_tensor(x, batch)
-        x_physical = x_physical.reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)
         ### ToDo: x_physical massmix_to_molemix for computation and then back to massmix for normalization, to be consistent with obs_values
-        ###  fill in missing values in co2_profile_prior and xco2_prior with some reasonable defaults where they are NaN, to avoid NaNs in the computation (this should be done in create_oco2_mask similar to ak filling. Different strategies can be tested, e.g. filling with global mean, local mean, interpolate or some physically-based estimate)
 
-        ak = masking_config["ak"]  # [B C Nlat Nlon]
+        # Vertical interpolation of x_physical to match observations
+        model_pressures = torch.flip(self.ct_pressures.to(x.device), dims=[0])  # [C=10] flip to have surface to top ordering
+        oco2_pressures = self.oco2_pressures.to(x.device)  # [C=20]
+        x_physical = torch.flip(x_physical, dims=[2])  # [B N C] flip to have surface to top ordering
+        x_physical = self.vertical_interpolation(x_physical, model_pressures, oco2_pressures)  # [B N C=20] interpolated to observation levels
+        x_physical = x_physical.reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)  # [B=1 C=20 Nlat=32 Nlon=64]
+
+        # Calculate XCO2 using averaging kernel and priors
+        ak = masking_config["ak"]  # [B=1 C=20 Nlat=32 Nlon=64]
         xco2_prior = masking_config["xco2_prior"]  # [B 1 Nlat Nlon]
         co2_profile_prior = masking_config["co2_profile_prior"]  # [B C Nlat Nlon]
         xco2 = xco2_prior + torch.sum(ak * (x_physical - co2_profile_prior), dim=1, keepdim=True)  # [B 1 Nlat Nlon]
@@ -871,6 +927,7 @@ class FlowMatching(RegularGridModel):
         _print_stats_torch("xco2_prior", xco2_prior)
         _print_stats_torch("xco2", xco2)
 
+        # Normalize XCO2
         target_vars_2d = generate_kwargs["generate_data_kwargs"]["target_vars"]
         xco2 = xco2.permute(0, 2, 3, 1).reshape(B, N, -1)
         xco2_normalized = self.normalize_observations(xco2, batch, target_var=target_vars_2d[0], targshift=False)

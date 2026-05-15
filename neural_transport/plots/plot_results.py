@@ -1238,45 +1238,45 @@ def plot_obs_mask_and_samples_x(
     if "time" in samples.dims:
         samples = samples.isel(time=t)
 
-    if "xco2_averaging_kernel" in batch:
-        ak = batch["xco2_averaging_kernel"][b, t, :, :].detach().cpu().numpy()  # [N, C]
-        xco2_prior = batch["xco2_apriori"][b, t, :].detach().cpu().numpy().squeeze(-1)  # [N]
-        co2_profile_prior = batch["co2_profile_apriori"][b, t, :, :].detach().cpu().numpy()  # [N, C]
-        vals = batch[varname][b, t, :, :].detach().cpu().numpy()  # [N, C]
+    # if "xco2_averaging_kernel" in batch:
+    #     ak = batch["xco2_averaging_kernel"][b, t, :, :].detach().cpu().numpy()  # [N, C]
+    #     xco2_prior = batch["xco2_apriori"][b, t, :].detach().cpu().numpy().squeeze(-1)  # [N]
+    #     co2_profile_prior = batch["co2_profile_apriori"][b, t, :, :].detach().cpu().numpy()  # [N, C]
+    #     vals = batch[varname][b, t, :, :].detach().cpu().numpy()  # [N, C]
 
-        target_vals = compute_xco2_via_ak(
-            vals, ak, xco2_prior, co2_profile_prior
-        ).reshape(nlat, nlon)  # [lat, lon]
+    #     target_vals = compute_xco2_via_ak(
+    #         vals, ak, xco2_prior, co2_profile_prior
+    #     ).reshape(nlat, nlon)  # [lat, lon]
 
-        if "level" in samples.dims:
-            ak_reshaped = ak.reshape(nlat, nlon, -1)  # [lat, lon, C]
-            xco2_prior_reshaped = xco2_prior.reshape(nlat, nlon)  # [lat, lon]
-            co2_profile_prior_reshaped = co2_profile_prior.reshape(nlat, nlon, -1)  # [lat, lon, C]
+    #     if "level" in samples.dims:
+    #         ak_reshaped = ak.reshape(nlat, nlon, -1)  # [lat, lon, C]
+    #         xco2_prior_reshaped = xco2_prior.reshape(nlat, nlon)  # [lat, lon]
+    #         co2_profile_prior_reshaped = co2_profile_prior.reshape(nlat, nlon, -1)  # [lat, lon, C]
 
-            samples_list = []
-            for i in range(min(samples.sizes["sample"], max_samples)):
-                samples_list.append(
-                    compute_xco2_via_ak(
-                        samples[i],
-                        ak_reshaped,
-                        xco2_prior_reshaped,
-                        co2_profile_prior_reshaped,
-                    )
-                )
-            samples = to_da(
-                np.stack(samples_list, axis=0), nlat, nlon, lat=lat, lon=lon, dims=["sample", "lat", "lon"], name="samples"
-            )
-    else:
-        target_vals = (
-            batch[varname][b, t, :, :]
-            .mean(dim=-1)
-            .detach()
-            .cpu()
-            .numpy()
-            .reshape(nlat, nlon)
-        )
-        if "level" in samples.dims:
-            samples = samples.mean(dim="level")
+    #         samples_list = []
+    #         for i in range(min(samples.sizes["sample"], max_samples)):
+    #             samples_list.append(
+    #                 compute_xco2_via_ak(
+    #                     samples[i],
+    #                     ak_reshaped,
+    #                     xco2_prior_reshaped,
+    #                     co2_profile_prior_reshaped,
+    #                 )
+    #             )
+    #         samples = to_da(
+    #             np.stack(samples_list, axis=0), nlat, nlon, lat=lat, lon=lon, dims=["sample", "lat", "lon"], name="samples"
+    #         )
+    # else:
+    target_vals = (
+        batch[varname][b, t, :, :]
+        .mean(dim=-1)
+        .detach()
+        .cpu()
+        .numpy()
+        .reshape(nlat, nlon)
+    )
+    if "level" in samples.dims:
+        samples = samples.mean(dim="level")
 
     target_da = to_da(target_vals, nlat, nlon, lat=lat, lon=lon, name="target")
     masked_da = to_da(masked_obs, nlat, nlon, lat=lat, lon=lon, name="masked")
@@ -1390,37 +1390,37 @@ def plot_mask_pattern_on_samples(
 
     mask_da = to_da(obs_mask, nlat, nlon, lat=lat, lon=lon, name="mask")
 
-    if "xco2_averaging_kernel" in batch:
-        ak = batch["xco2_averaging_kernel"][b, t, :, :].detach().cpu().numpy()  # [N, C]
+    # if "xco2_averaging_kernel" in batch:
+    #     ak = batch["xco2_averaging_kernel"][b, t, :, :].detach().cpu().numpy()  # [N, C]
 
-        if "level" in samples.dims:
-            ak_reshaped = ak.reshape(nlat, nlon, -1)  # [lat, lon, level]
-            xco2_prior_reshaped = batch["xco2_apriori"][b, t, :].detach().cpu().numpy().reshape(nlat, nlon)  # [lat, lon]
-            co2_profile_prior_reshaped = batch["co2_profile_apriori"][b, t, :, :].detach().cpu().numpy().reshape(nlat, nlon, -1)  # [lat, lon, level]
+    #     if "level" in samples.dims:
+    #         ak_reshaped = ak.reshape(nlat, nlon, -1)  # [lat, lon, level]
+    #         xco2_prior_reshaped = batch["xco2_apriori"][b, t, :].detach().cpu().numpy().reshape(nlat, nlon)  # [lat, lon]
+    #         co2_profile_prior_reshaped = batch["co2_profile_apriori"][b, t, :, :].detach().cpu().numpy().reshape(nlat, nlon, -1)  # [lat, lon, level]
 
-            samples_list = []
-            for i in range(min(samples.sizes["sample"], max_samples)):
-                samples_list.append(
-                    compute_xco2_via_ak(
-                        samples[i],
-                        ak_reshaped,
-                        xco2_prior_reshaped,
-                        co2_profile_prior_reshaped,
-                    )
-                )
+    #         samples_list = []
+    #         for i in range(min(samples.sizes["sample"], max_samples)):
+    #             samples_list.append(
+    #                 compute_xco2_via_ak(
+    #                     samples[i],
+    #                     ak_reshaped,
+    #                     xco2_prior_reshaped,
+    #                     co2_profile_prior_reshaped,
+    #                 )
+    #             )
 
-            samples = to_da(
-                np.stack(samples_list, axis=0),
-                nlat,
-                nlon,
-                lat=lat,
-                lon=lon,
-                dims=("sample", "lat", "lon"),
-                name="samples",
-            )
-    else:
-        if "level" in samples.dims:
-            samples = samples.mean(dim="level")
+    #         samples = to_da(
+    #             np.stack(samples_list, axis=0),
+    #             nlat,
+    #             nlon,
+    #             lat=lat,
+    #             lon=lon,
+    #             dims=("sample", "lat", "lon"),
+    #             name="samples",
+    #         )
+    # else:
+    if "level" in samples.dims:
+        samples = samples.mean(dim="level")
 
     n_samples = min(samples.sizes["sample"], max_samples)
     samples = samples.isel(sample=slice(0, n_samples))
@@ -1506,53 +1506,53 @@ def plot_masked_bias_samples(
     if "time" in samples.dims:
         samples = samples.isel(time=t)
 
-    if "xco2_averaging_kernel" in batch:
-        ak = batch["xco2_averaging_kernel"][b, t, :, :].detach().cpu().numpy()
-        xco2_prior = batch["xco2_apriori"][b, t, :].detach().cpu().numpy().squeeze(-1)
-        co2_profile_prior = batch["co2_profile_apriori"][b, t, :, :].detach().cpu().numpy()
-        vals = batch[varname][b, t, :, :].detach().cpu().numpy()
+    # if "xco2_averaging_kernel" in batch:
+    #     ak = batch["xco2_averaging_kernel"][b, t, :, :].detach().cpu().numpy()
+    #     xco2_prior = batch["xco2_apriori"][b, t, :].detach().cpu().numpy().squeeze(-1)
+    #     co2_profile_prior = batch["co2_profile_apriori"][b, t, :, :].detach().cpu().numpy()
+    #     vals = batch[varname][b, t, :, :].detach().cpu().numpy()
 
-        target_vals = compute_xco2_via_ak(
-            vals, ak, xco2_prior, co2_profile_prior
-        ).reshape(nlat, nlon)
+    #     target_vals = compute_xco2_via_ak(
+    #         vals, ak, xco2_prior, co2_profile_prior
+    #     ).reshape(nlat, nlon)
 
-        if "level" in samples.dims:
-            ak_reshaped = ak.reshape(nlat, nlon, -1)
-            xco2_prior_reshaped = xco2_prior.reshape(nlat, nlon)
-            co2_profile_prior_reshaped = co2_profile_prior.reshape(nlat, nlon, -1)
+    #     if "level" in samples.dims:
+    #         ak_reshaped = ak.reshape(nlat, nlon, -1)
+    #         xco2_prior_reshaped = xco2_prior.reshape(nlat, nlon)
+    #         co2_profile_prior_reshaped = co2_profile_prior.reshape(nlat, nlon, -1)
 
-            samples_list = []
-            for i in range(min(samples.sizes["sample"], max_samples)):
-                samples_list.append(
-                    compute_xco2_via_ak(
-                        samples[i],
-                        ak_reshaped,
-                        xco2_prior_reshaped,
-                        co2_profile_prior_reshaped,
-                    )
-                )
+    #         samples_list = []
+    #         for i in range(min(samples.sizes["sample"], max_samples)):
+    #             samples_list.append(
+    #                 compute_xco2_via_ak(
+    #                     samples[i],
+    #                     ak_reshaped,
+    #                     xco2_prior_reshaped,
+    #                     co2_profile_prior_reshaped,
+    #                 )
+    #             )
 
-            samples = to_da(
-                np.stack(samples_list, axis=0),
-                nlat,
-                nlon,
-                lat=lat,
-                lon=lon,
-                dims=("sample", "lat", "lon"),
-                name="samples_bias_input",
-            )
-    else:
-        target_vals = (
-            batch[varname][b, t, :, :]
-            .mean(dim=-1)
-            .detach()
-            .cpu()
-            .numpy()
-            .reshape(nlat, nlon)
-        )
+    #         samples = to_da(
+    #             np.stack(samples_list, axis=0),
+    #             nlat,
+    #             nlon,
+    #             lat=lat,
+    #             lon=lon,
+    #             dims=("sample", "lat", "lon"),
+    #             name="samples_bias_input",
+    #         )
+    # else:
+    target_vals = (
+        batch[varname][b, t, :, :]
+        .mean(dim=-1)
+        .detach()
+        .cpu()
+        .numpy()
+        .reshape(nlat, nlon)
+    )
 
-        if "level" in samples.dims:
-            samples = samples.mean(dim="level")
+    if "level" in samples.dims:
+        samples = samples.mean(dim="level")
 
     target_da = to_da(target_vals, nlat, nlon, lat=lat, lon=lon, name="target")
     masked_da = to_da(masked_obs, nlat, nlon, lat=lat, lon=lon, name="masked")
@@ -1729,37 +1729,37 @@ def plot_obs_mask_samples_metrics(
             samples_t = samples
 
         # Target
-        if "xco2_averaging_kernel" in batch_list[row_idx]:
-            ak = batch_list[row_idx]["xco2_averaging_kernel"][b, t, :, :].detach().cpu().numpy()
-            xco2_prior = batch_list[row_idx]["xco2_apriori"][b, t, :].detach().cpu().numpy().squeeze(-1)
-            co2_profile_prior = batch_list[row_idx]["co2_profile_apriori"][b, t, :, :].detach().cpu().numpy()
-            vals = batch_list[row_idx][varname][b, t, :, :].detach().cpu().numpy()
+        # if "xco2_averaging_kernel" in batch_list[row_idx]:
+        #     ak = batch_list[row_idx]["xco2_averaging_kernel"][b, t, :, :].detach().cpu().numpy()
+        #     xco2_prior = batch_list[row_idx]["xco2_apriori"][b, t, :].detach().cpu().numpy().squeeze(-1)
+        #     co2_profile_prior = batch_list[row_idx]["co2_profile_apriori"][b, t, :, :].detach().cpu().numpy()
+        #     vals = batch_list[row_idx][varname][b, t, :, :].detach().cpu().numpy()
 
-            target_vals = compute_xco2_via_ak(vals, ak, xco2_prior, co2_profile_prior).reshape(nlat, nlon)
+        #     target_vals = compute_xco2_via_ak(vals, ak, xco2_prior, co2_profile_prior).reshape(nlat, nlon)
 
-            if "level" in samples_t.dims:
-                ak_r = ak.reshape(nlat, nlon, -1)
-                xp_r = xco2_prior.reshape(nlat, nlon)
-                cpp_r = co2_profile_prior.reshape(nlat, nlon, -1)
+        #     if "level" in samples_t.dims:
+        #         ak_r = ak.reshape(nlat, nlon, -1)
+        #         xp_r = xco2_prior.reshape(nlat, nlon)
+        #         cpp_r = co2_profile_prior.reshape(nlat, nlon, -1)
 
-                samples_list = []
-                for i in range(max_samples):
-                    samples_list.append(
-                        compute_xco2_via_ak(samples_t[i], ak_r, xp_r, cpp_r)
-                    )
+        #         samples_list = []
+        #         for i in range(max_samples):
+        #             samples_list.append(
+        #                 compute_xco2_via_ak(samples_t[i], ak_r, xp_r, cpp_r)
+        #             )
 
-                samples_row = to_da(
-                    np.stack(samples_list, axis=0),
-                    nlat, nlon,
-                    lat=lat, lon=lon,
-                    dims=["sample", "lat", "lon"]
-                )
-        else:
-            target_vals = batch_list[row_idx][varname][b, t, :, :].mean(dim=-1).detach().cpu().numpy().reshape(nlat, nlon)
-            if "level" in samples_t.dims:
-                samples_t = samples_t.mean(dim="level")
+        #         samples_row = to_da(
+        #             np.stack(samples_list, axis=0),
+        #             nlat, nlon,
+        #             lat=lat, lon=lon,
+        #             dims=["sample", "lat", "lon"]
+        #         )
+        # else:
+        target_vals = batch_list[row_idx][varname][b, t, :, :].mean(dim=-1).detach().cpu().numpy().reshape(nlat, nlon)
+        if "level" in samples_t.dims:
+            samples_t = samples_t.mean(dim="level")
 
-            samples_row = samples_t.isel(sample=slice(0, max_samples))
+        samples_row = samples_t.isel(sample=slice(0, max_samples))
 
         target_da = to_da(target_vals, nlat, nlon, lat=lat, lon=lon)
         masked_da = to_da(masked_obs, nlat, nlon, lat=lat, lon=lon)
