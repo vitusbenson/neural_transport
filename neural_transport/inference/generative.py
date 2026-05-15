@@ -504,6 +504,7 @@ def iterative_generate_oco2(
 
     if analyze_masking and masking:
         batch_analyze_list = []
+        condition_analyze_list = []
         time_indices = np.linspace(0, T-1, 3, dtype=int)
 
     for t_idx in tqdm(range(T), desc="Generating") if verbose else range(T):
@@ -521,6 +522,7 @@ def iterative_generate_oco2(
 
         # Masking
         if masking:
+            condition_batch = {}
             target_var = target_vars_2d[0]
             if mask_pattern is None:
                 obs_mask, obs_values = create_oco2_mask(batch_gen, target_var=target_var)
@@ -530,11 +532,11 @@ def iterative_generate_oco2(
             batch_gen["obs_mask"] = obs_mask
             obs_values_normed = model.model.normalize_observations(obs_values, batch_gen, target_var=target_var, targshift=False)
             for k in target_vars_2d + generate_kwargs["generate_data_kwargs"]["forcing_vars"] + ["obs_mask", "obs_mask_original"]:
-                batch[k] = batch_gen[k]
+                condition_batch[k] = batch_gen[k]
             for k in target_vars_2d:
-                batch[f"{k}_offset"] = batch_gen[f"{k}_offset"]
-                batch[f"{k}_scale"] = batch_gen[f"{k}_scale"]
-            batch["obs_values"] = obs_values_normed  # [B=1 T=1 N=2048 C=1]
+                condition_batch[f"{k}_offset"] = batch_gen[f"{k}_offset"]
+                condition_batch[f"{k}_scale"] = batch_gen[f"{k}_scale"]
+            condition_batch["obs_values"] = obs_values_normed  # [B=1 T=1 N=2048 C=1]
             print(f"\nDEBUG iterative_generate_oco2 t={t}")
             print("  obs_values stats:")
             obs_valid = obs_values[~torch.isnan(obs_values)]
@@ -553,6 +555,8 @@ def iterative_generate_oco2(
 
         for k in batch.keys():
             batch[k] = batch[k].expand(n_samples, -1, -1, -1)  # [B=n_samples T N C]
+        for k in condition_batch.keys():
+            condition_batch[k] = condition_batch[k].expand(n_samples, -1, -1, -1) if masking else None
         batch["noise"] = torch.cat(noise_list, dim=0).to(device)  # [B=n_samples T N C]
 
         if zero_surfflux:
@@ -560,7 +564,7 @@ def iterative_generate_oco2(
                 batch[var] = torch.zeros_like(batch[var])
 
         with torch.no_grad():
-            preds = model(batch)
+            preds = model(batch, condition_batch=condition_batch)
             traj = preds["trajectory"]
 
         preds_fixed = {}
@@ -597,6 +601,7 @@ def iterative_generate_oco2(
         if analyze_masking and masking:
             if t_idx in time_indices:
                 batch_analyze_list.append(batch)
+                condition_analyze_list.append(condition_batch)
 
     ### !!! Caution: need to fix this properly!!!
     good_dss = []
@@ -632,7 +637,9 @@ def iterative_generate_oco2(
     ds_all.to_zarr(zarrpath, mode="w")
 
     if analyze_masking and masking:
-        plot_masking_diagnostics(batch_analyze_list, ds_all,
+        plot_masking_diagnostics(batch_analyze_list,
+                                 condition_analyze_list,
+                                 ds_all,
                                  str(outpath).replace("preds", "plots"),
                                  varnames=target_vars_3d, nlat=nlat, nlon=nlon,
                                  time_indices=time_indices,

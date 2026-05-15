@@ -743,7 +743,7 @@ class FlowMatching(RegularGridModel):
             dtype=torch.float32,
         )
 
-    def forward(self, batch):
+    def forward(self, batch, condition_batch=None):
         if not hasattr(self, "generate_kwargs"):
             self.generate_kwargs = {}
         if self.training:
@@ -761,16 +761,17 @@ class FlowMatching(RegularGridModel):
                 x_init = noise.reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)  # [B C Nlat Nlon]
             else:
                 x_init = torch.randn_like(all_levels, device=x_in.device)
-            if "obs_mask" in batch and "obs_values" in batch:
+            if "obs_mask" in condition_batch and "obs_values" in condition_batch:
                 obs_var = self.generate_kwargs.get("obs_var", "co2massmix")
-                masking_config = self.prepare_masking_config(batch, B, C, obs_var)
+                condition_config = self.prepare_condition_config(batch, condition_batch, B, C, obs_var)
             else:
-                masking_config = {}
+                condition_config = {}
             trajectory = self.inference_forward(
                 x_in,
                 x_init,
                 batch=batch,
-                masking_config=masking_config,
+                condition_batch=condition_batch,
+                condition_config=condition_config,
                 generate_kwargs=self.generate_kwargs
             )
             x_out = trajectory[-1,...]
@@ -830,27 +831,28 @@ class FlowMatching(RegularGridModel):
 
         return x_out, dx_t #, x_1_normalized # return {self.target_vars[0]: x_out}
 
-    def prepare_masking_config(self, batch, B, C, obs_var):
-        # print("\nDEBUG prepare_masking_config:")
-        if "xco2_averaging_kernel" in batch:
-            obs_mask = batch["obs_mask"].reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2)
-            obs_values = batch["obs_values"].reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2)
-            ak = batch["xco2_averaging_kernel"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)
-            xco2_prior = batch["xco2_apriori"].reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2)
-            co2_profile_prior = batch["co2_profile_apriori"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)
+    def prepare_condition_config(self, batch, condition_batch, B, C, obs_var):
+        # print("\nDEBUG prepare_condition_config:")
+        if "xco2_averaging_kernel" in condition_batch:
+            obs_mask = condition_batch["obs_mask"].reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2)
+            obs_values = condition_batch["obs_values"].reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2)
+            ak = condition_batch["xco2_averaging_kernel"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)
+            xco2_prior = condition_batch["xco2_apriori"].reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2)
+            co2_profile_prior = condition_batch["co2_profile_apriori"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)
         else:
-            obs_mask = batch["obs_mask"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)
-            obs_values = batch["obs_values"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)
+            obs_mask = condition_batch["obs_mask"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)
+            obs_values = condition_batch["obs_values"].reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)
             ak = None
             xco2_prior = None
             co2_profile_prior = None
 
+        # Note, mean and std is taken from training data even for observations
         obs_mean = batch[f"{obs_var}_offset"].view(B, 1, 1, 1)
         obs_std = batch[f"{obs_var}_scale"].view(B, 1, 1, 1)
         target_mean = batch[f"{self.target_vars[0]}_offset"].view(B, 1, 1, 1)
         target_std = batch[f"{self.target_vars[0]}_scale"].view(B, 1, 1, 1)
 
-        masking_config = {
+        condition_config = {
             "obs_mask": obs_mask,        # [B 1 Nlat Nlon]  or tests [B C Nlat Nlon]
             "obs_values": obs_values,    # [B 1 Nlat Nlon]  or tests [B C Nlat Nlon]
             "obs_mean": obs_mean,        # [B 1 1 1]
@@ -861,7 +863,7 @@ class FlowMatching(RegularGridModel):
             "xco2_prior": xco2_prior,    # [B 1 Nlat Nlon]  or tests None
             "co2_profile_prior": co2_profile_prior,  # [B C Nlat Nlon] or tests None
         }
-        return masking_config
+        return condition_config
 
     def vertical_interpolation(self, x, model_pressures, condition_pressures):
         """
@@ -898,7 +900,8 @@ class FlowMatching(RegularGridModel):
             self,
             x: torch.Tensor,
             batch: dict,
-            masking_config: dict,
+            condition_batch: dict,
+            condition_config: dict,
             generate_kwargs: dict,
     ) -> torch.Tensor:
         """Compute XCO2 from the current state, by first denormalizing with training data, using the averaging kernel/priors equation and normalizing with conditioning data."""
@@ -916,9 +919,9 @@ class FlowMatching(RegularGridModel):
         x_physical = x_physical.reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)  # [B=1 C=20 Nlat=32 Nlon=64]
 
         # Calculate XCO2 using averaging kernel and priors
-        ak = masking_config["ak"]  # [B=1 C=20 Nlat=32 Nlon=64]
-        xco2_prior = masking_config["xco2_prior"]  # [B 1 Nlat Nlon]
-        co2_profile_prior = masking_config["co2_profile_prior"]  # [B C Nlat Nlon]
+        ak = condition_config["ak"]  # [B=1 C=20 Nlat=32 Nlon=64]
+        xco2_prior = condition_config["xco2_prior"]  # [B 1 Nlat Nlon]
+        co2_profile_prior = condition_config["co2_profile_prior"]  # [B C Nlat Nlon]
         xco2 = xco2_prior + torch.sum(ak * (x_physical - co2_profile_prior), dim=1, keepdim=True)  # [B 1 Nlat Nlon]
         print("\nDEBUG compute_xco2")
         _print_stats_torch("x_physical", x_physical)
@@ -930,7 +933,7 @@ class FlowMatching(RegularGridModel):
         # Normalize XCO2
         target_vars_2d = generate_kwargs["generate_data_kwargs"]["target_vars"]
         xco2 = xco2.permute(0, 2, 3, 1).reshape(B, N, -1)
-        xco2_normalized = self.normalize_observations(xco2, batch, target_var=target_vars_2d[0], targshift=False)
+        xco2_normalized = self.normalize_observations(xco2, condition_batch, target_var=target_vars_2d[0], targshift=False)
         xco2_normalized = xco2_normalized.reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2)
 
         return xco2_normalized  # [B 1 Nlat Nlon]
@@ -939,15 +942,15 @@ class FlowMatching(RegularGridModel):
             self,
             submodel,
             static_inputs=None,
-            masking_config=None,
+            condition_config=None,
             generate_kwargs=None,
             ):
         """Return velocity wrapper with optional masking and/or DPS guidance."""
 
-        if masking_config is None:
-            masking_config = getattr(self, 'masking_config', {})
-        obs_mask = masking_config.get("obs_mask", None)
-        obs_values = masking_config.get("obs_values", None)
+        if condition_config is None:
+            condition_config = getattr(self, 'condition_config', {})
+        obs_mask = condition_config.get("obs_mask", None)
+        obs_values = condition_config.get("obs_values", None)
 
         if generate_kwargs is None:
             generate_kwargs = getattr(self, 'generate_kwargs', {})
@@ -957,7 +960,7 @@ class FlowMatching(RegularGridModel):
         if obs_mask is not None and obs_values is not None and posterior_method is None:
             return MaskedVelocityWrapper(
                 submodel=submodel,
-                masking_config=masking_config,
+                masking_config=condition_config,
                 nlev=self.nlev,
                 static_inputs=static_inputs,
                 **generate_kwargs,
@@ -975,7 +978,8 @@ class FlowMatching(RegularGridModel):
             x_in,
             x_init,
             batch=None,
-            masking_config=None,
+            condition_batch=None,
+            condition_config=None,
             generate_kwargs=None
             ):
         if generate_kwargs is None:
@@ -996,13 +1000,13 @@ class FlowMatching(RegularGridModel):
         print("\nDEBUG inference_forward:")
         print(f"  time_grid: {time_grid}")
         print(f"  time_grid diffs: {torch.diff(time_grid)}")
-        masking_config["time_grid"] = time_grid
+        condition_config["time_grid"] = time_grid
 
         # UNet expects normalization parameters
         velocity_model = self.return_velocity_wrapper(
             submodel=self.submodel,
             static_inputs=None,
-            masking_config=masking_config,
+            condition_config=condition_config,
             generate_kwargs=generate_kwargs,
             # static_inputs=x_in[:,:self.nlev*len(self.target_vars),:,:],  # [B C Nlat Nlon] (static inputs for conditioning later)
         )
@@ -1037,11 +1041,11 @@ class FlowMatching(RegularGridModel):
                         )  # [T B C Nlat Nlon]
                         x_final = trajectory[-1,...]  # [B C Nlat Nlon]
                         if mask_source == "oco2":
-                            x_final = self.compute_xco2(x_final, batch, masking_config, generate_kwargs)
-                        x_final = x_final * masking_config["obs_mask"]
+                            x_final = self.compute_xco2(x_final, batch, condition_batch, condition_config, generate_kwargs)
+                        x_final = x_final * condition_config["obs_mask"]
                         _print_stats_torch("x_final", x_final)
-                        _print_stats_torch("obs_values", masking_config["obs_values"])
-                        x_target = torch.where(masking_config["obs_mask"], masking_config["obs_values"], torch.zeros_like(masking_config["obs_values"]))
+                        _print_stats_torch("obs_values", condition_config["obs_values"])
+                        x_target = torch.where(condition_config["obs_mask"], condition_config["obs_values"], torch.zeros_like(condition_config["obs_values"]))
                         loss = torch.nn.functional.mse_loss(x_final, x_target)
                         loss.backward()
                         optimizer_x_0.step()
@@ -1073,9 +1077,9 @@ class FlowMatching(RegularGridModel):
                             )  # [T B C Nlat Nlon]
                             x_final = trajectory[-1,...]  # [B C Nlat Nlon]
                             if mask_source == "oco2":
-                                x_final = self.compute_xco2(x_final, batch, masking_config, generate_kwargs)
-                            x_final = x_final * masking_config["obs_mask"]
-                            x_target = torch.where(masking_config["obs_mask"], masking_config["obs_values"], torch.zeros_like(masking_config["obs_values"]))
+                                x_final = self.compute_xco2(x_final, batch, condition_config, generate_kwargs)
+                            x_final = x_final * condition_config["obs_mask"]
+                            x_target = torch.where(condition_config["obs_mask"], condition_config["obs_values"], torch.zeros_like(condition_config["obs_values"]))
                             obs_loss = torch.nn.functional.mse_loss(x_final, x_target)
                             reg_loss = self.lbfgs_reg_loss(x_0, x_init, reg_loss_type)
                             loss = obs_loss + reg_loss_weight * reg_loss

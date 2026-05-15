@@ -145,14 +145,14 @@ class RegularGridModel(nn.Module):
         return batch_normalized
     
 
-    def normalize_observations(self, obs_values, batch, target_var, targshift=None):
-        mean = batch[f"{target_var}_offset"]
-        std = batch[f"{target_var}_scale"]
+    def normalize_observations(self, obs_values, condition_batch, target_var, targshift=None):
+        mean = condition_batch[f"{target_var}_offset"]
+        std = condition_batch[f"{target_var}_scale"]
         print("\nDEBUG normalize_observations")
         print(f"  mean: {mean.flatten()[0]:.6f}, std: {std.flatten()[0]:.6f}")
         print(f"  target_var: {target_var}")
         
-        obs_mask = batch["obs_mask"]
+        obs_mask = condition_batch["obs_mask"]
         mask = obs_mask.bool()
 
         obs_norm = torch.where(
@@ -170,7 +170,7 @@ class RegularGridModel(nn.Module):
         if targshift is None:
             targshift = self.targshift
         if targshift:
-            mean = torch.nanmean((batch[target_var] - mean) / std, dim=(1, 2), keepdim=True)
+            mean = torch.nanmean((condition_batch[target_var] - mean) / std, dim=(1, 2), keepdim=True)
             obs_norm = torch.where(mask, obs_norm - mean, obs_norm)
             print(f"  mean used for targshift: {mean.flatten()[0]:.6f}")
             if mask.any():
@@ -181,17 +181,17 @@ class RegularGridModel(nn.Module):
         return obs_norm
 
 
-    def denormalize_observations(self, obs_norm, batch, target_var, targshift=None):
-        mean = batch[f"{target_var}_offset"]
-        std = batch[f"{target_var}_scale"]
+    def denormalize_observations(self, obs_norm, condition_batch, target_var, targshift=None):
+        mean = condition_batch[f"{target_var}_offset"]
+        std = condition_batch[f"{target_var}_scale"]
 
-        obs_mask = batch["obs_mask"]
+        obs_mask = condition_batch["obs_mask"]
         mask = obs_mask.bool()
 
         if targshift is None:
             targshift = self.targshift
         if targshift:
-            mean = torch.nanmean((batch[target_var] - mean) / std, dim=(1, 2), keepdim=True)
+            mean = torch.nanmean((condition_batch[target_var] - mean) / std, dim=(1, 2), keepdim=True)
             obs_norm = torch.where(mask, obs_norm + mean, obs_norm)
 
         obs_values = torch.where(

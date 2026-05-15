@@ -63,7 +63,7 @@ class NeuralTransport(pl.LightningModule):
         self.loss = LOSSES[loss](**loss_kwargs)
         self.metrics = ManyMetrics(metrics)
 
-    def forward(self, batch):
+    def forward(self, batch, condition_batch=None):
 
         T = max(batch[v].shape[1] for v in batch if isinstance(batch[v], torch.Tensor))
 
@@ -81,9 +81,9 @@ class NeuralTransport(pl.LightningModule):
 
             if self.no_grad_shedule(self.global_step, t):
                 with torch.no_grad():
-                    curr_preds = self.model(curr_data)
+                    curr_preds = self.model(curr_data, condition_batch=condition_batch)
             else:
-                curr_preds = self.model(curr_data)
+                curr_preds = self.model(curr_data, condition_batch=condition_batch)
             if t == 0:
                 preds = {k : torch.empty((curr_preds[k].shape[0], T, *curr_preds[k].shape[1:]), device=curr_preds[k].device) for k in curr_preds}
 

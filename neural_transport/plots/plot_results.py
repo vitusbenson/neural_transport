@@ -1110,6 +1110,7 @@ def plot_panel_map(
 
 def plot_obs_mask_and_samples(
     batch,
+    condition_batch,
     preds_var,
     varname="co2massmix",
     nlat=32,
@@ -1125,8 +1126,8 @@ def plot_obs_mask_and_samples(
     """
     b, t, c = 0, 0, 0
 
-    obs_values = batch["obs_values"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
-    obs_mask = batch["obs_mask"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
+    obs_values = condition_batch["obs_values"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
+    obs_mask = condition_batch["obs_mask"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
     target_vals = batch[varname][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
     masked_obs = np.where(obs_mask, obs_values, np.nan)
 
@@ -1210,6 +1211,7 @@ def plot_obs_mask_and_samples(
 
 def plot_obs_mask_and_samples_x(
     batch: dict,
+    condition_batch: dict,
     preds_var: xr.DataArray,
     varname: str = "co2massmix",
     nlat: int = 32,
@@ -1227,8 +1229,8 @@ def plot_obs_mask_and_samples_x(
     """
     b, t, c = 0, 0, 0
 
-    obs_values = batch["obs_values"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
-    obs_mask = batch["obs_mask"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
+    obs_values = condition_batch["obs_values"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
+    obs_mask = condition_batch["obs_mask"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
     masked_obs = np.where(obs_mask, obs_values, np.nan)
 
     # Generated samples [sample, lat, lon, level, (time)]
@@ -1238,10 +1240,10 @@ def plot_obs_mask_and_samples_x(
     if "time" in samples.dims:
         samples = samples.isel(time=t)
 
-    # if "xco2_averaging_kernel" in batch:
-    #     ak = batch["xco2_averaging_kernel"][b, t, :, :].detach().cpu().numpy()  # [N, C]
-    #     xco2_prior = batch["xco2_apriori"][b, t, :].detach().cpu().numpy().squeeze(-1)  # [N]
-    #     co2_profile_prior = batch["co2_profile_apriori"][b, t, :, :].detach().cpu().numpy()  # [N, C]
+    # if "xco2_averaging_kernel" in condition_batch:
+    #     ak = condition_batch["xco2_averaging_kernel"][b, t, :, :].detach().cpu().numpy()  # [N, C]
+    #     xco2_prior = condition_batch["xco2_apriori"][b, t, :].detach().cpu().numpy().squeeze(-1)  # [N]
+    #     co2_profile_prior = condition_batch["co2_profile_apriori"][b, t, :, :].detach().cpu().numpy()  # [N, C]
     #     vals = batch[varname][b, t, :, :].detach().cpu().numpy()  # [N, C]
 
     #     target_vals = compute_xco2_via_ak(
@@ -1363,7 +1365,7 @@ def plot_obs_mask_and_samples_x(
 
 
 def plot_mask_pattern_on_samples(
-    batch,
+    batch_condition,
     preds_var,
     nlat=32,
     nlon=64,
@@ -1376,10 +1378,10 @@ def plot_mask_pattern_on_samples(
     b, t, c = 0, 0, 0
 
     # Get mask pattern
-    if "obs_mask_original" in batch:
-        obs_mask = batch["obs_mask_original"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
+    if "obs_mask_original" in batch_condition:
+        obs_mask = batch_condition["obs_mask_original"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
     else:
-        obs_mask = batch["obs_mask"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
+        obs_mask = batch_condition["obs_mask"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
 
     # Generated samples [sample, lat, lon, level, (time)]
     samples = preds_var
@@ -1391,12 +1393,12 @@ def plot_mask_pattern_on_samples(
     mask_da = to_da(obs_mask, nlat, nlon, lat=lat, lon=lon, name="mask")
 
     # if "xco2_averaging_kernel" in batch:
-    #     ak = batch["xco2_averaging_kernel"][b, t, :, :].detach().cpu().numpy()  # [N, C]
+    #     ak = batch_condition["xco2_averaging_kernel"][b, t, :, :].detach().cpu().numpy()  # [N, C]
 
     #     if "level" in samples.dims:
     #         ak_reshaped = ak.reshape(nlat, nlon, -1)  # [lat, lon, level]
-    #         xco2_prior_reshaped = batch["xco2_apriori"][b, t, :].detach().cpu().numpy().reshape(nlat, nlon)  # [lat, lon]
-    #         co2_profile_prior_reshaped = batch["co2_profile_apriori"][b, t, :, :].detach().cpu().numpy().reshape(nlat, nlon, -1)  # [lat, lon, level]
+    #         xco2_prior_reshaped = batch_condition["xco2_apriori"][b, t, :].detach().cpu().numpy().reshape(nlat, nlon)  # [lat, lon]
+    #         co2_profile_prior_reshaped = batch_condition["co2_profile_apriori"][b, t, :, :].detach().cpu().numpy().reshape(nlat, nlon, -1)  # [lat, lon, level]
 
     #         samples_list = []
     #         for i in range(min(samples.sizes["sample"], max_samples)):
@@ -1479,6 +1481,7 @@ def plot_mask_pattern_on_samples(
 
 def plot_masked_bias_samples(
     batch,
+    condition_batch,
     preds_var,
     varname="co2massmix",
     nlat=32,
@@ -1495,8 +1498,8 @@ def plot_masked_bias_samples(
 
     b, t, c = 0, 0, 0
 
-    obs_values = batch["obs_values"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
-    obs_mask = batch["obs_mask"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
+    obs_values = condition_batch["obs_values"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
+    obs_mask = condition_batch["obs_mask"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
     masked_obs = np.where(obs_mask, obs_values, np.nan)
 
     # Generated samples [sample, lat, lon, level, (time)]
@@ -1506,10 +1509,10 @@ def plot_masked_bias_samples(
     if "time" in samples.dims:
         samples = samples.isel(time=t)
 
-    # if "xco2_averaging_kernel" in batch:
-    #     ak = batch["xco2_averaging_kernel"][b, t, :, :].detach().cpu().numpy()
-    #     xco2_prior = batch["xco2_apriori"][b, t, :].detach().cpu().numpy().squeeze(-1)
-    #     co2_profile_prior = batch["co2_profile_apriori"][b, t, :, :].detach().cpu().numpy()
+    # if "xco2_averaging_kernel" in condition_batch:
+    #     ak = condition_batch["xco2_averaging_kernel"][b, t, :, :].detach().cpu().numpy()
+    #     xco2_prior = condition_batch["xco2_apriori"][b, t, :].detach().cpu().numpy().squeeze(-1)
+    #     co2_profile_prior = condition_batch["co2_profile_apriori"][b, t, :, :].detach().cpu().numpy()
     #     vals = batch[varname][b, t, :, :].detach().cpu().numpy()
 
     #     target_vals = compute_xco2_via_ak(
@@ -1679,6 +1682,7 @@ def plot_masked_bias_samples(
 
 def plot_obs_mask_samples_metrics(
     batch_list: list,
+    condition_batch_list: list,
     preds_var: xr.DataArray,
     varname: str = "co2massmix",
     nlat: int = 32,
@@ -1718,8 +1722,8 @@ def plot_obs_mask_samples_metrics(
     for row_idx, t_row in enumerate(time_indices):
 
         # Observations
-        obs_values = batch_list[row_idx]["obs_values"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
-        obs_mask = batch_list[row_idx]["obs_mask"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
+        obs_values = condition_batch_list[row_idx]["obs_values"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
+        obs_mask = condition_batch_list[row_idx]["obs_mask"][b, t, :, c].detach().cpu().numpy().reshape(nlat, nlon)
         masked_obs = np.where(obs_mask, obs_values, np.nan)
 
         # Samples
@@ -1729,10 +1733,10 @@ def plot_obs_mask_samples_metrics(
             samples_t = samples
 
         # Target
-        # if "xco2_averaging_kernel" in batch_list[row_idx]:
-        #     ak = batch_list[row_idx]["xco2_averaging_kernel"][b, t, :, :].detach().cpu().numpy()
-        #     xco2_prior = batch_list[row_idx]["xco2_apriori"][b, t, :].detach().cpu().numpy().squeeze(-1)
-        #     co2_profile_prior = batch_list[row_idx]["co2_profile_apriori"][b, t, :, :].detach().cpu().numpy()
+        # if "xco2_averaging_kernel" in condition_batch_list[row_idx]:
+        #     ak = condition_batch_list[row_idx]["xco2_averaging_kernel"][b, t, :, :].detach().cpu().numpy()
+        #     xco2_prior = condition_batch_list[row_idx]["xco2_apriori"][b, t, :].detach().cpu().numpy().squeeze(-1)
+        #     co2_profile_prior = condition_batch_list[row_idx]["co2_profile_apriori"][b, t, :, :].detach().cpu().numpy()
         #     vals = batch_list[row_idx][varname][b, t, :, :].detach().cpu().numpy()
 
         #     target_vals = compute_xco2_via_ak(vals, ak, xco2_prior, co2_profile_prior).reshape(nlat, nlon)
@@ -1877,6 +1881,7 @@ def plot_obs_mask_samples_metrics(
 
 def plot_masking_diagnostics(
         batch_list: list,
+        condition_list: list,
         preds: xr.Dataset,
         out_dir: str,
         varnames: list = ["co2massmix"],
@@ -1903,6 +1908,7 @@ def plot_masking_diagnostics(
 
         fig = plot_obs_mask_and_samples_x(
             batch_list[0],
+            condition_list[0],
             preds_var,
             varname=varname,
             nlat=nlat,
@@ -1915,6 +1921,7 @@ def plot_masking_diagnostics(
 
         fig_bias = plot_masked_bias_samples(
             batch_list[0],
+            condition_list[0],
             preds_var,
             varname=varname,
             nlat=nlat,
@@ -1927,6 +1934,7 @@ def plot_masking_diagnostics(
 
         fig_all = plot_obs_mask_samples_metrics(
             batch_list,
+            condition_list,
             preds_var,
             varname=varname,
             nlat=nlat,
@@ -1941,7 +1949,7 @@ def plot_masking_diagnostics(
         # Plot mask pattern overlay on generated samples
         if "obs_mask_original" in batch_list[0]:
             fig_mask = plot_mask_pattern_on_samples(
-                batch_list[0],
+                condition_list[0],
                 preds_var,
                 nlat=nlat,
                 nlon=nlon,
