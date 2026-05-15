@@ -513,13 +513,12 @@ def iterative_generate_oco2(
         batch, batch_gen = get_batches(t, offset, dataset, dataset_gen, window_steps, device)
 
         # Noise
-        noise_list = noise(dataset_gen[0],  # only shape matters
-                           target_var=generate_kwargs["generate_data_kwargs"]["forcing_vars"][0],
+        noise_list = noise(dataset[0],  # only shape matters
+                           target_var=target_vars_3d[0],
                            n_samples=n_samples,
                            noise_pattern=noise_pattern,
                            analyze_noise=analyze_noise,
                            outpath=outpath)
-
         # Masking
         if masking:
             condition_batch = {}

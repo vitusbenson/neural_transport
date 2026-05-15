@@ -13,6 +13,7 @@ from flow_matching.solver import ODESolver
 # neural_transport
 from neural_transport.models import MODELS
 from neural_transport.models.regulargrid import RegularGridModel
+from neural_transport.tools.conversion import massmix_to_molemix, molemix_to_massmix
 from neural_transport.tools.guidance import XCO2Guidance
 from neural_transport.tools.developement import _print_stats_torch
 
@@ -757,13 +758,14 @@ class FlowMatching(RegularGridModel):
             # surface_level = x_in[:, :1, :, :]  # [B 1 Nlat Nlon]
             if "noise" in batch:
                 noise = batch["noise"]
-                B, N, C = noise.shape
+                B, _, C = noise.shape
                 x_init = noise.reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)  # [B C Nlat Nlon]
             else:
                 x_init = torch.randn_like(all_levels, device=x_in.device)
             if "obs_mask" in condition_batch and "obs_values" in condition_batch:
                 obs_var = self.generate_kwargs.get("obs_var", "co2massmix")
-                condition_config = self.prepare_condition_config(batch, condition_batch, B, C, obs_var)
+                B, _, C_cond = condition_batch["xco2_averaging_kernel"].shape
+                condition_config = self.prepare_condition_config(batch, condition_batch, B, C_cond, obs_var)
             else:
                 condition_config = {}
             trajectory = self.inference_forward(
@@ -906,22 +908,23 @@ class FlowMatching(RegularGridModel):
     ) -> torch.Tensor:
         """Compute XCO2 from the current state, by first denormalizing with training data, using the averaging kernel/priors equation and normalizing with conditioning data."""
         # Denormalize x to physical space
-        B, N, C = batch[self.target_vars[0]].shape
+        B, N, _ = batch[self.target_vars[0]].shape
+        _, _, C_cond = condition_batch["xco2_averaging_kernel"].shape
         x = x.permute(0, 2, 3, 1).reshape(B, N, -1)
         x_physical = self.denormalize_tensor(x, batch)
-        ### ToDo: x_physical massmix_to_molemix for computation and then back to massmix for normalization, to be consistent with obs_values
+        x_physical = massmix_to_molemix(x_physical)
 
         # Vertical interpolation of x_physical to match observations
         model_pressures = torch.flip(self.ct_pressures.to(x.device), dims=[0])  # [C=10] flip to have surface to top ordering
-        oco2_pressures = self.oco2_pressures.to(x.device)  # [C=20]
+        oco2_pressures = self.oco2_pressures.to(x.device)  # [C_cond=20]
         x_physical = torch.flip(x_physical, dims=[2])  # [B N C] flip to have surface to top ordering
-        x_physical = self.vertical_interpolation(x_physical, model_pressures, oco2_pressures)  # [B N C=20] interpolated to observation levels
-        x_physical = x_physical.reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)  # [B=1 C=20 Nlat=32 Nlon=64]
+        x_physical = self.vertical_interpolation(x_physical, model_pressures, oco2_pressures)  # [B N C_cond=20] interpolated to observation levels
+        x_physical = x_physical.reshape(B, self.nlat, self.nlon, C_cond).permute(0, 3, 1, 2)  # [B=1 C_cond=20 Nlat=32 Nlon=64]
 
         # Calculate XCO2 using averaging kernel and priors
-        ak = condition_config["ak"]  # [B=1 C=20 Nlat=32 Nlon=64]
+        ak = condition_config["ak"]  # [B=1 C_cond=20 Nlat=32 Nlon=64]
         xco2_prior = condition_config["xco2_prior"]  # [B 1 Nlat Nlon]
-        co2_profile_prior = condition_config["co2_profile_prior"]  # [B C Nlat Nlon]
+        co2_profile_prior = condition_config["co2_profile_prior"]  # [B C_cond Nlat Nlon]
         xco2 = xco2_prior + torch.sum(ak * (x_physical - co2_profile_prior), dim=1, keepdim=True)  # [B 1 Nlat Nlon]
         print("\nDEBUG compute_xco2")
         _print_stats_torch("x_physical", x_physical)
@@ -931,10 +934,13 @@ class FlowMatching(RegularGridModel):
         _print_stats_torch("xco2", xco2)
 
         # Normalize XCO2
+        xco2 = molemix_to_massmix(xco2)
+        _print_stats_torch("xco2 massmix", xco2)
         target_vars_2d = generate_kwargs["generate_data_kwargs"]["target_vars"]
         xco2 = xco2.permute(0, 2, 3, 1).reshape(B, N, -1)
         xco2_normalized = self.normalize_observations(xco2, condition_batch, target_var=target_vars_2d[0], targshift=False)
         xco2_normalized = xco2_normalized.reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2)
+        _print_stats_torch("xco2_normalized", xco2_normalized)
 
         return xco2_normalized  # [B 1 Nlat Nlon]
 
@@ -997,9 +1003,6 @@ class FlowMatching(RegularGridModel):
             time_grid = torch.cat([coarse, fine[1:]])
         else:
             time_grid = torch.linspace(0, 1, steps=steps-1, device=x_init.device) 
-        print("\nDEBUG inference_forward:")
-        print(f"  time_grid: {time_grid}")
-        print(f"  time_grid diffs: {torch.diff(time_grid)}")
         condition_config["time_grid"] = time_grid
 
         # UNet expects normalization parameters

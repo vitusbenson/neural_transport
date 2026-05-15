@@ -79,11 +79,20 @@ class NeuralTransport(pl.LightningModule):
 
             curr_data |= curr_preds
 
+            if condition_batch is not None:
+                curr_condition_data = {
+                    v: condition_batch[v][:, t] if condition_batch[v].shape[1] == T else condition_batch[v][:, 0]
+                    for v in condition_batch
+                    if isinstance(condition_batch[v], torch.Tensor)
+                }
+            else:
+                curr_condition_data = None
+
             if self.no_grad_shedule(self.global_step, t):
                 with torch.no_grad():
-                    curr_preds = self.model(curr_data, condition_batch=condition_batch)
+                    curr_preds = self.model(curr_data, condition_batch=curr_condition_data)
             else:
-                curr_preds = self.model(curr_data, condition_batch=condition_batch)
+                curr_preds = self.model(curr_data, condition_batch=curr_condition_data)
             if t == 0:
                 preds = {k : torch.empty((curr_preds[k].shape[0], T, *curr_preds[k].shape[1:]), device=curr_preds[k].device) for k in curr_preds}
 

@@ -241,9 +241,6 @@ class RegularGridModel(nn.Module):
                 )
                 x_out_next_normalized = (x_out_next - x_grid_offset) / x_grid_scale
                 x_out_next_normalized_mean = x_out_next_normalized.mean((1, 2), keepdim=True)
-                print("\nDEBUG denormalize_tensor with targshift and _next keys")
-                print(f"  x_out shape: {x_out.shape}")
-                print(f"  x_out_next_normalized_mean shape: {x_out_next_normalized_mean.shape}")
                 x_out_next = (x_out + x_out_next_normalized_mean) * x_grid_scale + x_grid_offset
             else:
                 x_out_next = x_out * x_grid_scale + x_grid_offset
