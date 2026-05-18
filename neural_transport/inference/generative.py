@@ -462,7 +462,6 @@ def iterative_generate_oco2(
     remap=False,
     target_vars_3d=[],
     target_vars_2d=[],
-    save_obs=True,
     **generate_kwargs,
 ):
     n_samples = generate_kwargs.get("n_samples", 10)
@@ -473,6 +472,7 @@ def iterative_generate_oco2(
     analyze_noise = generate_kwargs.get("analyze_noise", False)
     freq_int = parse_freq(generate_kwargs.get("generate_data_kwargs", {}).get("freq", "6h"))
     window_hours = generate_kwargs.get("window_hours", freq_int)
+    save_obs = generate_kwargs.get("save_obs", False)
 
     nlat, nlon = model.model.in_nlat, model.model.in_nlon
 
@@ -660,7 +660,6 @@ def iterative_generate(
     remap=False,
     target_vars_3d=[],
     target_vars_2d=[],
-    save_obs=True,
     **generate_kwargs,
 ):
     n_timesteps = generate_kwargs.get("n_timesteps", 5)
@@ -671,6 +670,7 @@ def iterative_generate(
     obs_fraction = generate_kwargs.get("obs_fraction", 0.2)
     noise_pattern = generate_kwargs.get("noise_pattern", None)
     analyze_noise = generate_kwargs.get("analyze_noise", False)
+    save_obs = generate_kwargs.get("save_obs", False)
 
     nlat, nlon = model.model.in_nlat, model.model.in_nlon
 

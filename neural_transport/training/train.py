@@ -176,7 +176,6 @@ def predict(
     lit_module_kwargs={},
     massfixer="default",
     zero_surfflux=False,
-    save_obs=False,
     generate_kwargs={},
 ):
     log_path = Path(log_path)
@@ -216,7 +215,6 @@ def predict(
                 remap=("latlon" not in data_kwargs["grid"]),
                 target_vars_3d=data_kwargs["target_vars"],
                 target_vars_2d=generate_kwargs["generate_data_kwargs"]["target_vars"],
-                save_obs=save_obs,
                 **generate_kwargs,
             )
         else:
@@ -232,7 +230,6 @@ def predict(
                 remap=("latlon" not in data_kwargs["grid"]),
                 target_vars_3d=data_kwargs["target_vars"],
                 target_vars_2d=[],
-                save_obs=save_obs,
                 **generate_kwargs,
             )
     else:
@@ -485,8 +482,10 @@ def train_and_eval_singlestep(
         / f"obs_co2_pred_rollout_{freq}.zarr"
     )
     if type(lit_module_kwargs['model']).__name__ == "FlowMatching" or lit_module_kwargs['model'] == "flowmatching":
-        obs_pred_path = None
         plot_types += ["samples"]
+        compare_to_obs = generate_kwargs.get("compare_to_obs", False)
+        if not compare_to_obs:
+            obs_pred_path = None
     
     target_var = data_kwargs['target_vars'][0]
     score(target_path, pred_path,

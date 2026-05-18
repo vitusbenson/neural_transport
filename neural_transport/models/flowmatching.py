@@ -11,6 +11,7 @@ from flow_matching.path import AffineProbPath
 from flow_matching.solver import ODESolver
 
 # neural_transport
+from neural_transport.datasets.grids import VERTICAL_LAYERS_PROTOTYPE_COORDS
 from neural_transport.models import MODELS
 from neural_transport.models.regulargrid import RegularGridModel
 from neural_transport.tools.conversion import massmix_to_molemix, molemix_to_massmix
@@ -726,24 +727,6 @@ class FlowMatching(RegularGridModel):
         self.path = AffineProbPath(scheduler=CondOTScheduler())
         self.target_vars = self.submodel.target_vars # Here target_vars[0] is supposed to be "co2massmix"
 
-        # this should be made more general, but for now:
-        self.ct_pressures = torch.tensor(
-            [1013.0, 1005.0, 995.0, 971.0, 943.0,
-            843.0, 642.0, 441.0, 243.0, 73.0],
-            dtype=torch.float32,
-        )
-
-        self.oco2_pressures = torch.tensor(
-            [
-                0.0984, 52.6136, 105.2272, 156.4836,
-                210.4544, 256.2101, 312.9672, 370.0722,
-                420.9087, 472.6453, 512.4202, 578.6387,
-                625.9344, 663.7776, 740.1443, 770.1723,
-                841.8174, 884.8869, 945.2906, 997.8886
-            ],
-            dtype=torch.float32,
-        )
-
     def forward(self, batch, condition_batch=None):
         if not hasattr(self, "generate_kwargs"):
             self.generate_kwargs = {}
@@ -907,24 +890,55 @@ class FlowMatching(RegularGridModel):
             generate_kwargs: dict,
     ) -> torch.Tensor:
         """Compute XCO2 from the current state, by first denormalizing with training data, using the averaging kernel/priors equation and normalizing with conditioning data."""
+
+        self.training_pressures = torch.tensor(
+            VERTICAL_LAYERS_PROTOTYPE_COORDS[
+                generate_kwargs["vertical_levels"]
+                if generate_kwargs is not None and "vertical_levels" in generate_kwargs
+                else "l10"
+            ]["level"],
+            dtype=torch.float32,
+        )
+
+        self.condition_pressures = torch.tensor(
+            VERTICAL_LAYERS_PROTOTYPE_COORDS[
+                (
+                    generate_kwargs["generate_data_kwargs"]["vertical_levels"] + "_oco2"
+                )
+                if (
+                    generate_kwargs is not None
+                    and "generate_data_kwargs" in generate_kwargs
+                    and "vertical_levels" in generate_kwargs["generate_data_kwargs"]
+                )
+                else "l20_oco2"
+            ]["level"],
+            dtype=torch.float32,
+        )
+
         # Denormalize x to physical space
-        B, N, _ = batch[self.target_vars[0]].shape
+        B, N, C = batch[self.target_vars[0]].shape
         _, _, C_cond = condition_batch["xco2_averaging_kernel"].shape
         x = x.permute(0, 2, 3, 1).reshape(B, N, -1)
         x_physical = self.denormalize_tensor(x, batch)
         x_physical = massmix_to_molemix(x_physical)
 
-        # Vertical interpolation of x_physical to match observations
-        model_pressures = torch.flip(self.ct_pressures.to(x.device), dims=[0])  # [C=10] flip to have surface to top ordering
-        oco2_pressures = self.oco2_pressures.to(x.device)  # [C_cond=20]
-        x_physical = torch.flip(x_physical, dims=[2])  # [B N C] flip to have surface to top ordering
-        x_physical = self.vertical_interpolation(x_physical, model_pressures, oco2_pressures)  # [B N C_cond=20] interpolated to observation levels
-        x_physical = x_physical.reshape(B, self.nlat, self.nlon, C_cond).permute(0, 3, 1, 2)  # [B=1 C_cond=20 Nlat=32 Nlon=64]
+        if C != C_cond:
+            # Vertical interpolation of x_physical to match observations
+            model_pressures = torch.flip(self.training_pressures.to(x.device), dims=[0])  # [C=10] flip to have surface to top ordering
+            oco2_pressures = self.condition_pressures.to(x.device)  # [C_cond=20]
+            x_physical = torch.flip(x_physical, dims=[2])  # [B N C] flip to have surface to top ordering
+            x_physical = self.vertical_interpolation(x_physical, model_pressures, oco2_pressures)  # [B N C_cond=20] interpolated to observation levels
+        x_physical = x_physical.reshape(B, self.nlat, self.nlon, C_cond).permute(0, 3, 1, 2)  # [B C_cond Nlat Nlon]
 
         # Calculate XCO2 using averaging kernel and priors
-        ak = condition_config["ak"]  # [B=1 C_cond=20 Nlat=32 Nlon=64]
+        ak = condition_config["ak"]  # [B=n_samples C_cond=20 Nlat=32 Nlon=64]
         xco2_prior = condition_config["xco2_prior"]  # [B 1 Nlat Nlon]
         co2_profile_prior = condition_config["co2_profile_prior"]  # [B C_cond Nlat Nlon]
+        valid_obs = condition_config["obs_mask"].expand(-1, C_cond, -1, -1)
+        valid_xco2 = condition_config["obs_mask"]
+        ak = torch.where(valid_obs, ak, torch.zeros_like(ak))
+        xco2_prior = torch.where(valid_xco2, xco2_prior, torch.zeros_like(xco2_prior))
+        co2_profile_prior = torch.where(valid_obs, co2_profile_prior, torch.zeros_like(co2_profile_prior))
         xco2 = xco2_prior + torch.sum(ak * (x_physical - co2_profile_prior), dim=1, keepdim=True)  # [B 1 Nlat Nlon]
         print("\nDEBUG compute_xco2")
         _print_stats_torch("x_physical", x_physical)
@@ -1045,10 +1059,12 @@ class FlowMatching(RegularGridModel):
                         x_final = trajectory[-1,...]  # [B C Nlat Nlon]
                         if mask_source == "oco2":
                             x_final = self.compute_xco2(x_final, batch, condition_batch, condition_config, generate_kwargs)
-                        x_final = x_final * condition_config["obs_mask"]
                         _print_stats_torch("x_final", x_final)
                         _print_stats_torch("obs_values", condition_config["obs_values"])
+                        x_final = torch.where(condition_config["obs_mask"], x_final, torch.zeros_like(x_final))
+                        _print_stats_torch("x_final masked", x_final)
                         x_target = torch.where(condition_config["obs_mask"], condition_config["obs_values"], torch.zeros_like(condition_config["obs_values"]))
+                        _print_stats_torch("x_target masked", x_target)
                         loss = torch.nn.functional.mse_loss(x_final, x_target)
                         loss.backward()
                         optimizer_x_0.step()
