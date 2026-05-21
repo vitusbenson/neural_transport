@@ -464,6 +464,7 @@ def iterative_generate_oco2(
     target_vars_2d=[],
     **generate_kwargs,
 ):
+    # n_timesteps = generate_kwargs.get("n_timesteps", 5) # just for testing/debugging with fewer steps
     n_samples = generate_kwargs.get("n_samples", 10)
     masking = generate_kwargs.get("masking", True)
     mask_pattern = generate_kwargs.get("mask_pattern", None)
@@ -490,11 +491,13 @@ def iterative_generate_oco2(
     model.model.generate_kwargs = generate_kwargs
 
     dss = []
-    obss = []
     
     if mask_pattern is None:
-        T = 5
-        # T = len(dataset_gen)
+        # T = min(n_timesteps, len(dataset_gen))  # just for testing/debugging with fewer steps
+        # print(f"Using only first {T} timesteps for generation (for testing/debugging)")
+        T = len(dataset_gen)
+        print(f"Using full dataset with {T} timesteps for generation")
+        raise Exception("Stop here for debugging")
     else:
         T = min(len(dataset), len(dataset_gen))
     offset = align_time(dataset.ds.time.values, dataset_gen.ds.time.values)
@@ -527,30 +530,38 @@ def iterative_generate_oco2(
                 obs_mask, obs_values = create_oco2_mask(batch_gen, target_var=target_var)
             else:
                 obs_mask, obs_values = create_oco2_mask_test(batch_gen, target_var=target_var, mask_pattern=mask_pattern, nlat=nlat, nlon=nlon)
-            batch_gen["obs_mask_original"] = obs_mask.clone()
-            batch_gen["obs_mask"] = obs_mask
-            obs_values_normed = model.model.normalize_observations(obs_values, batch_gen, target_var=target_var, targshift=False)
-            for k in target_vars_2d + generate_kwargs["generate_data_kwargs"]["forcing_vars"] + ["obs_mask", "obs_mask_original"]:
-                condition_batch[k] = batch_gen[k]
-            for k in target_vars_2d:
-                condition_batch[f"{k}_offset"] = batch_gen[f"{k}_offset"]
-                condition_batch[f"{k}_scale"] = batch_gen[f"{k}_scale"]
-            condition_batch["obs_values"] = obs_values_normed  # [B=1 T=1 N=2048 C=1]
-            print(f"\nDEBUG iterative_generate_oco2 t={t}")
-            print("  obs_values stats:")
-            obs_valid = obs_values[~torch.isnan(obs_values)]
-            print(f"    min={obs_valid.min().item():.6f}, max={obs_valid.max().item():.6f}")
-            print(f"    mean={obs_valid.mean().item():.6f}, std={obs_valid.std().item():.6f}")
-            print("  obs_values_normed stats:")
-            obs_normed_valid = obs_values_normed[~torch.isnan(obs_values_normed)]
-            print(f"  min={obs_normed_valid.min().item():.6f}, max={obs_normed_valid.max().item():.6f}")
-            print(f"  mean={obs_normed_valid.mean().item():.6f}, std={obs_normed_valid.std().item():.6f}")
-            # ### DEBUG: no masking
-            # batch["obs_mask"] = torch.zeros_like(obs_mask, dtype=torch.bool)
-            # ### DEBUG: test non tca masking_methods
-            # batch["obs_mask"] = batch["obs_mask"].expand(-1, -1, -1, 10)
-            # batch["obs_values"] = batch["obs_values"].expand(-1, -1, -1, 10)
-            # ### End DEBUG
+            valid_obs = ~torch.isnan(obs_values)  # This is a hack to deal with observation gaps in OCO-2 and basically turn of masking. Ideally this should trigger the unconditional generation for those timesteps.
+            if valid_obs.any():
+                batch_gen["obs_mask_original"] = obs_mask.clone()
+                batch_gen["obs_mask"] = obs_mask
+                obs_values_normed = model.model.normalize_observations(obs_values, batch_gen, target_var=target_var, targshift=False)
+                for k in target_vars_2d + generate_kwargs["generate_data_kwargs"]["forcing_vars"] + ["obs_mask", "obs_mask_original"]:
+                    condition_batch[k] = batch_gen[k]
+                for k in target_vars_2d:
+                    condition_batch[f"{k}_offset"] = batch_gen[f"{k}_offset"]
+                    condition_batch[f"{k}_scale"] = batch_gen[f"{k}_scale"]
+                condition_batch["obs_values"] = obs_values_normed  # [B=1 T=1 N=2048 C=1]
+                print(f"\nDEBUG iterative_generate_oco2 t={t}")
+                print("  obs_values stats:")
+                obs_valid = obs_values[~torch.isnan(obs_values)]
+                print(f"    min={obs_valid.min().item():.6f}, max={obs_valid.max().item():.6f}")
+                print(f"    mean={obs_valid.mean().item():.6f}, std={obs_valid.std().item():.6f}")
+                print("  obs_values_normed stats:")
+                obs_normed_valid = obs_values_normed[~torch.isnan(obs_values_normed)]
+                print(f"  min={obs_normed_valid.min().item():.6f}, max={obs_normed_valid.max().item():.6f}")
+                print(f"  mean={obs_normed_valid.mean().item():.6f}, std={obs_normed_valid.std().item():.6f}")
+            else:
+                print(f"\nWARNING: No OCO-2 observations at time index {t} (time {dataset_gen.ds.time.values[t_idx + offset]})")
+                print("  Using zero-filled dummy observations")
+                batch_gen["obs_mask_original"] = torch.zeros_like(batch_gen[target_var], dtype=torch.bool)
+                batch_gen["obs_mask"] = torch.zeros_like(batch_gen[target_var], dtype=torch.bool)
+                for k in target_vars_2d + generate_kwargs["generate_data_kwargs"]["forcing_vars"] + ["obs_mask", "obs_mask_original"]:
+                    condition_batch[k] = torch.zeros_like(batch_gen[k])
+                for k in target_vars_2d:
+                    condition_batch[f"{k}_offset"] = batch_gen[f"{k}_offset"]
+                    condition_batch[f"{k}_scale"] = batch_gen[f"{k}_scale"]
+                condition_batch["obs_values"] = torch.zeros_like(batch_gen[target_var])  # [B=1 T=1 N=2048 C=1]
+
 
         for k in batch.keys():
             batch[k] = batch[k].expand(n_samples, -1, -1, -1)  # [B=n_samples T N C]
@@ -590,11 +601,6 @@ def iterative_generate_oco2(
         if remap:
             ds = remap_with_cdo(dataset, prototype_zarr.isel(time=0), ds)
 
-        if save_obs:
-            obs = dataset.readout_stations(ds, grid="default" if remap else None)
-            ds = ds.drop_vars(["gph_bottom", "gph_top"])
-            obss.append(obs)
-
         dss.append(ds)
 
         if analyze_masking and masking:
@@ -604,6 +610,8 @@ def iterative_generate_oco2(
 
     ### !!! Caution: need to fix this properly!!!
     good_dss = []
+    obss = []
+
     for i, ds in enumerate(dss):
         bad_mask = is_bad_sample(ds["co2massmix"])
         if bad_mask.all():  # all samples bad
@@ -622,6 +630,15 @@ def iterative_generate_oco2(
             sample_mask = xr.DataArray(~bad_mask, dims=["sample"])
             ds_good = ds.where(sample_mask)
         good_dss.append(ds_good)
+
+        if save_obs:
+            ds_obs = (
+                ds_good.isel(trajectory_steps=-1).mean(dim="sample")
+            )
+            obs = dataset.readout_stations(ds_obs, grid="default" if remap else None)
+            ds = ds.drop_vars(["gph_bottom", "gph_top"])
+            obss.append(obs)
+
     if all(ds["co2massmix"].isnull().all() for ds in good_dss):
         raise RuntimeError("All generated samples were bad")
 
@@ -631,7 +648,6 @@ def iterative_generate_oco2(
     if save_obs:
         obs_all = xr.concat(obss, dim="time").fillna({"obs_filename": ""})
         obs_all.to_zarr(obspath, mode="w")
-        ds_all = ds_all.fillna({"obs_filename": ""})
 
     ds_all.to_zarr(zarrpath, mode="w")
 

@@ -19,6 +19,7 @@ def extract_obspack_locs_from_xarray(ds, obs, grid="latlon4"):
         ).argmax(
             "level"
         )  # ((1000*ds_loc.gph - obs_t.height) ** 2).argmin("level")
+        height_idx = height_idx.squeeze(drop=True)
         height_idx = height_idx.assign_coords(
             height=("cell", height_idx.values)
         ).compute()
@@ -46,6 +47,7 @@ def extract_obspack_locs_from_xarray(ds, obs, grid="latlon4"):
         ds_loc = ds.isel(cell=idxs)
 
         height_idx = ((ds_loc.gph - obs_t.height) ** 2).argmin("level").compute()
+        height_idx = height_idx.squeeze(drop=True)
         ds_cell = ds_loc.isel(level=height_idx.compute())
 
         ds_out = xr.merge(
