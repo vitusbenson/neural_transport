@@ -71,6 +71,7 @@ class MSE(nn.Module):
         cutoff=None,
         scale_by_spectral_power=True,
         normalize_batch=False,
+        step_weights=None,
     ):
         super().__init__()
 
@@ -81,11 +82,33 @@ class MSE(nn.Module):
             self.register_buffer(f"weights_{variable}", torch.from_numpy(weight.astype("float32")))  # N, C
         self.massconserve_weight = massconserve_weight
 
+        # step_weights: per-rollout-step weighting. None = uniform. "quadratic_discount"
+        # = 1/(1+i)^2 normalized to mean 1 (Brandstetter / AWG f_θ rollout-FT recipe).
+        # Or a list/tuple of floats (length must match rollout T at runtime).
+        self.step_weights_mode = step_weights if isinstance(step_weights, str) else None
+        if isinstance(step_weights, list | tuple):
+            sw = torch.tensor(step_weights, dtype=torch.float32)
+            sw = sw / sw.mean()
+            self.register_buffer("step_weights_static", sw)
+        else:
+            self.step_weights_static = None
+
         self.spectral_power_weight = spectral_power_weight
         self.scale_by_spectral_power = scale_by_spectral_power
         if self.spectral_power_weight > 0:
             self.cutoff = cutoff or nlat
             self.sht = torch_harmonics.RealSHT(nlat, nlon, grid="equiangular")
+
+    def _get_step_weights(self, T, device, dtype):
+        if self.step_weights_static is not None:
+            sw = self.step_weights_static.to(device=device, dtype=dtype)
+            return sw[:T] if sw.shape[0] >= T else sw
+        if self.step_weights_mode == "quadratic_discount":
+            i = torch.arange(T, device=device, dtype=dtype)
+            sw = 1.0 / (1.0 + i) ** 2
+            sw = sw / sw.mean()
+            return sw
+        return None
 
     def forward(self, preds, batch):
         loss = 0
@@ -105,7 +128,14 @@ class MSE(nn.Module):
                 se = (preds[v] - batch_normalized[f"{v}_next"]) ** 2
             else:
                 se = (preds[v] - batch[f"{v}_next"]) ** 2
-            wmse = torch.mean(se * getattr(self, f"weights_{v}"))
+            sp_weight = getattr(self, f"weights_{v}")
+            # se shape: [B, T, N, C] for rollout, [B, N, C] for single-step.
+            if se.dim() == 4:
+                T = se.shape[1]
+                step_w = self._get_step_weights(T, se.device, se.dtype)
+                if step_w is not None:
+                    se = se * step_w.view(1, T, 1, 1)
+            wmse = torch.mean(se * sp_weight)
             losses[f"Loss_Vari/weighted_{v}"] = wmse
             losses[f"Loss_Vari/unweighted_{v}"] = torch.mean(se)
             # if getattr(self, f"weights_{v}").shape[-1] > se.shape[-1]:

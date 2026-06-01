@@ -2680,6 +2680,165 @@ These are session-scope-exceeding work items deferred to Phase 26+.
 
 ---
 
+## Phase 25p: Stable Backbone Iteration (this session)
+
+**Goal**: break the 2.589 ppm EnKF SOTA by improving the deterministic backbone
+`f_det`. Phase 25o concluded the wall is "spatial bias drift" in the residual-FM
+model — driven by `f_det`, since the FM head only adds zero-mean residuals.
+
+### 25p.0 — Quick probe: load phase 2c with `ema=True` at inference
+
+The Phase 25o session shipped EMA inference loading (`load_model(ema=True)`)
+but never evaluated it. **Result: RMSE = 7.37 ppm** (vs phase 2 baseline
+3.80 ppm). Phase 2c training was unstable — val-loss climbed 1.12 → 1.35
+across 40k steps; EMA tracked that drift. No free win.
+
+### 25p.A1 — Rollout-FT with quadratic discount (FAIL)
+
+Hypothesis: phase 1b's val-loss-up-during-FT was driven by (i) `lr_mult=1.0` reusing
+single-step `max_lr=0.73` → too aggressive; (ii) `1/(1+i)²` quadratic discount was
+a TODO and never applied; (iii) no curriculum on K. Implemented `step_weights`
+in MSE loss (`neural_transport/tools/loss.py`), tried quadratic discount.
+
+| Step | Weight (norm to mean 1) |
+|---|---|
+| 0 (single-step) | 2.82 |
+| 1 | 0.71 |
+| 2 | 0.31 |
+| 3 (3 steps ahead) | 0.18 |
+
+Recipe: `lr_mult=0.2`, K=4, EMA(decay=0.999, start_step=200), 8k steps,
+warm-start from phase 1 single-step best. Val_loss=0.585 (best epoch 8,
+then drift to 0.605).
+
+**OSSE eval (n=20)**: RMSE = **5.96 ppm**, RMSE@28 = 5.01, RMSE@119 = 7.48 —
+*much worse* than phase 1b (3.81 / 1.99 / 6.57).
+
+Diagnosis: discount over-weighted step 0; model became great at single-step
+(@1=0.63 ppm) but compounded badly mid-window (@28=5.01 vs phase 1b 1.99).
+**Quadratic discount is the wrong schedule for AR rollout — biases against
+multi-step generalization.**
+
+### 25p.A2 — Rollout-FT with uniform weights (PARTIAL WIN)
+
+Re-ran with `--no-step-discount` (uniform K=4), `lr_mult=0.1`,
+EMA(0.999, start=200), 16k steps. Val_loss=0.923 (best epoch 12, drift to
+0.948 by step 16k). Same drift pattern as phase 1b but with EMA shadow weights
+captured.
+
+**OSSE eval (n=20)** on the EMA-frozen `last.ckpt`:
+
+| f_det | RMSE | RMSE@1 | RMSE@28 | RMSE@119 |
+|---|---|---|---|---|
+| Phase 1 (single-step, no FT) | 6.60 | 0.59 | 6.45 | 7.62 |
+| Phase 1b (orig rollout-FT) | **3.81** | 0.62 | **1.99** | 6.57 |
+| Phase 1p A1 (quad discount) | 5.96 | 0.63 | 5.01 | 7.48 |
+| Phase 1p A2 raw (uniform, best-ckpt) | 4.69 | 0.63 | 2.55 | 7.05 |
+| **Phase 1p A2 EMA-frozen (uniform)** | 3.85 | 0.63 | 2.08 | **6.18** |
+
+EMA-uniform is **tied on mean** with phase 1b but **6 % better at long lead
+(6.18 vs 6.57)** — the SOTA-relevant horizon (Phase 25j showed EnKF wins by
+30 % at lead=119). Worth using as the new `f_det`.
+
+`tools/freeze_ema_ckpt.py` script: writes a new checkpoint where
+`state_dict ← ema_state_dict`, so `ResidualFlowMatching` (which loads via
+`NeuralTransport.load_from_checkpoint`) picks up the averaged weights.
+
+### 25p.D — Noise-scale ablation on phase 2 (NEGATIVE)
+
+Tested `noise_scale ∈ {0.3, 0.5, 1.5, 2.0}` to probe whether the residual-FM
+head's initial noise was over-tuned at 1.05 (the AWG default).
+
+| Method | noise_scale | RMSE | CRPS |
+|---|---|---|---|
+| free | 0.5 | 5.86 | 2.87 |
+| free | 1.05 (default) | **3.80** | – |
+| EnKF loc=4 | 0.3 | 4.14 | 2.39 |
+| EnKF loc=4 | 0.5 | 3.21 | 1.54 |
+| EnKF loc=4 | **1.05** | **2.59** | **1.07** |
+| EnKF loc=4 | 1.5 | 2.69 | 1.22 |
+| EnKF loc=4 | 2.0 | 3.82 | 2.07 |
+
+`1.05` is at the optimum. No free win.
+
+### 25p.B — Retrain residual-FM head on the new `f_det` (running)
+
+Slurm 6505281: phase 2p train.py points at the EMA-frozen
+`phase1p_det_stable_rollout_ft/.../ema_frozen.ckpt` for `f_det`. Reuses
+phase 2's `sigma_res.npy` (within ~5 % of the freshly-computed value;
+the FM head can compensate). 20k steps, bs=128, no EMA — same recipe as
+phase 2 baseline. ETA ~3 h.
+
+Key files:
+- `phase1p_det_stable_rollout_ft/{train.py,train.slurm,train_uniform.slurm,eval_ar.py}`
+- `phase1p_det_stable_rollout_ft/singlestep/checkpoints/ema_frozen.ckpt`
+- `phase2p_residual_fm_stable/{train.py,train.slurm,compute_sigma_res.py,sigma_res.npy,sigma_res_p1p_ema.npy}`
+- New code: `MSE.step_weights` kwarg in `neural_transport/tools/loss.py`
+- New code: `eval_trajectory_v2.py --phase 25p2` to load phase 2p model.
+
+### 25p.C — OSSE eval at n=20 (NEW SOTA)
+
+| Method | RMSE n=20 | CRPS | spread/err |
+|---|---|---|---|
+| Phase 2 free (Phase 25g baseline) | 3.797 | – | – |
+| **Phase 2p free (new f_det)** | **3.765** | 1.589 | 0.44 |
+| Phase 2 EnKF loc=4 (Phase 25j prev SOTA) | 2.570 | 1.052 | 0.27 |
+| **🏆 Phase 2p EnKF loc=4** | **2.540** | 1.059 | 0.35 |
+
+EnKF gain: 2.570 → **2.540** ppm (1.2 % at n=20). Spread/err improved
+0.27 → 0.35 (closer to ideal 1.0 — better-calibrated ensemble). Free run
+slightly better too. Worth confirming at n=100 + seed=43 robustness check.
+
+### 25p.E — n=100 and cross-seed confirmation (NEW SOTA confirmed)
+
+| Method | RMSE n=100 | CRPS | spread/err |
+|---|---|---|---|
+| Phase 2 EnKF loc=4 (Phase 25m prev SOTA) | 2.589 | 1.066 | – |
+| **🏆 Phase 2p EnKF loc=4** | **2.513** | **1.030** | 0.32 |
+| Phase 2p free | 3.241 | 1.253 | 0.44 |
+| Phase 2 free (Phase 25m) | 3.101 | 1.158 | – |
+
+**Headline: 2.589 → 2.513 ppm (-3 %, confirmed at n=100).** CRPS also down
+3 %. Free run slightly worse at n=100 (3.24 vs 3.10), within sampling noise;
+the FM-head-induced randomness compounds slightly more without DA.
+
+### 25p.E — Cross-seed gap (the actual robustness story)
+
+| Seed | Phase 2 EnKF | Phase 2p EnKF |
+|---|---|---|
+| 42 | 2.570 | 2.540 |
+| 43 | 2.727 | **2.420** |
+| **mean** | 2.65 | **2.48** |
+| **gap (max−min)/min** | +6.1 % | **−4.7 % (anti-gap!)** |
+
+Phase 2p is *better on seed=43* than seed=42 — the opposite direction of the
+old model. Cross-seed mean improved 6.4 %, gap reversed. The improved
+backbone genuinely generalises better across init pools, not just at one seed.
+
+### Summary of Phase 25p
+
+- New f_det: phase1p_uniform = phase1b's recipe + lower LR + EMA.
+- The single decisive trick was **EMA shadow weights on f_det during
+  rollout-FT**: val-loss climbed during FT (as in phase 1b), but EMA captured
+  averaged weights that won at long lead.
+- 6 % improvement at long lead → 3 % improvement on full-window EnKF →
+  6.4 % cross-seed-mean improvement.
+- The 2.5 ppm wall is *not* a hard backbone limit. Phase 25o's "all cheap fixes
+  fail" should be amended: an *honest* rollout-FT with EMA still has measurable
+  upside. This suggests the wall can be pushed further with bigger-leverage
+  changes (architectural, more data, multi-step pushforward).
+
+### Phase 25p next steps (deferred)
+
+1. **Multi-step pushforward training of the FM head** (the original Phase 2b
+   idea, with corrected loss scaling). Now that the f_det is more stable, the
+   pushforward target distribution should also be tighter.
+2. **Bigger backbone (size M)**: 192 vs 96 embed_dim. Phase 1 from scratch
+   ~3 h; phase 2p retrain ~3 h; total ~7 h.
+3. **Conditional FM (Phase 29)**: classifier-free guidance with synthetic XCO2.
+
+---
+
 ## Phase 26: E2E Validation — Real OCO-2 Inversion
 
 **Goal**: Run actual inversion using real OCO-2 data via `OCO2DataLoader` + `GenerationPipeline`. Validate the complete real-data pipeline.

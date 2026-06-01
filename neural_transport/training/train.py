@@ -87,7 +87,7 @@ def load_model(exp_dir, ckpt="best", device="cuda", ema=False):
     logger.info("Loading model from %s", ckptpath)
     model = NeuralTransport.load_from_checkpoint(str(ckptpath), map_location=device)
     if ema:
-        ckpt_blob = torch.load(str(ckptpath), map_location=device)
+        ckpt_blob = torch.load(str(ckptpath), map_location=device, weights_only=False)
         ema_sd = ckpt_blob.get("ema_state_dict")
         if ema_sd is None:
             logger.warning("ema=True requested but no ema_state_dict in %s — using regular weights.", ckptpath)
