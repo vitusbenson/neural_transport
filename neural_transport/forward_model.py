@@ -13,6 +13,121 @@ import torch
 from torch import Tensor
 
 
+def build_interp_matrix(
+    p_src: Tensor,
+    p_dst: Tensor,
+    *,
+    log_pressure: bool = True,
+) -> Tensor:
+    """Linear-in-(log-)pressure interpolation matrix ``W`` with ``x_dst = W @ x_src``.
+
+    Builds the weights that interpolate a profile defined on source pressure
+    levels ``p_src`` to destination pressure levels ``p_dst``. Used to map the
+    model's CO2 profile (on the coarse model grid) onto the retrieval's native
+    pressure levels before applying the averaging-kernel formula (the
+    MIP-prescribed "interpolate-then-apply" operator).
+
+    The weights depend only on the pressures (not on the profile values), so the
+    resulting operator ``x -> W @ x`` is linear and differentiable in ``x``.
+    Out-of-range destination levels are handled by clamping to the nearest
+    source level (constant extrapolation), which keeps every row of ``W`` a
+    convex combination (rows sum to 1).
+
+    Parameters
+    ----------
+    p_src : Tensor
+        Source (model) pressure levels, shape ``[..., S]``. Need not be sorted.
+    p_dst : Tensor
+        Destination (retrieval) pressure levels, shape ``[..., D]``. Leading
+        dims must broadcast with ``p_src``'s leading dims.
+    log_pressure : bool
+        Interpolate linearly in ``log(p)`` (default, physically natural for
+        mixing ratios) rather than in ``p``.
+
+    Returns
+    -------
+    Tensor
+        Interpolation matrix ``W`` of shape ``[..., D, S]`` such that
+        ``(W @ x_src)`` gives the profile on ``p_dst``.
+    """
+    ps = torch.log(p_src) if log_pressure else p_src
+    pd = torch.log(p_dst) if log_pressure else p_dst
+
+    # Sort source levels ascending along the level axis (keep a mapping back).
+    ps_sorted, sort_idx = torch.sort(ps, dim=-1)
+    S = ps_sorted.shape[-1]
+
+    # Broadcast source levels against each destination level: [..., D, S].
+    ps_b = ps_sorted.unsqueeze(-2)  # [..., 1, S]
+    pd_b = pd.unsqueeze(-1)  # [..., D, 1]
+
+    # Bracket index: largest src level <= dst level, clamped to [0, S-2].
+    # (count of src levels strictly below dst) - 1
+    left = (ps_b < pd_b).sum(dim=-1) - 1  # [..., D]
+    left = left.clamp(0, S - 2)
+    right = left + 1
+
+    p_left = torch.gather(ps_sorted, -1, left)  # [..., D]
+    p_right = torch.gather(ps_sorted, -1, right)
+    denom = (p_right - p_left).clamp_min(torch.finfo(ps.dtype).eps)
+    p_dst_flat = pd  # [..., D]
+    t = ((p_dst_flat - p_left) / denom).clamp(0.0, 1.0)  # clamp -> constant extrapolation
+
+    # Scatter (1-t) to `left` and t to `right`, in SORTED source coordinates.
+    W_sorted = torch.zeros(*pd.shape, S, device=p_src.device, dtype=ps.dtype)
+    W_sorted.scatter_(-1, left.unsqueeze(-1), (1.0 - t).unsqueeze(-1))
+    W_sorted.scatter_add_(-1, right.unsqueeze(-1), t.unsqueeze(-1))
+
+    # Undo the source sort: column j of W_sorted corresponds to sort_idx[..., j].
+    inv = torch.argsort(sort_idx, dim=-1)  # [..., S]
+    inv_b = inv.unsqueeze(-2).expand(*W_sorted.shape)  # [..., D, S]
+    W = torch.gather(W_sorted, -1, inv_b)
+    return W
+
+
+def effective_column_kernel(
+    p_model: Tensor,
+    p_ret: Tensor,
+    pressure_weights: Tensor,
+    ak: Tensor,
+    co2_profile_prior: Tensor,
+    xco2_prior: Tensor,
+    *,
+    log_pressure: bool = True,
+) -> tuple[Tensor, Tensor]:
+    """Reduce the MIP "interpolate-then-apply" operator to a model-grid kernel.
+
+    Returns ``(g, column_offset)`` such that, for a model CO2 profile ``x_model``
+    (physical ppm, on ``p_model``):
+
+        ``H(x_model) = column_offset + sum_l g_l * x_model_l``
+                     ``= xco2_prior + sum_k h_k a_k (W x_model - x_apriori)_k``
+
+    where ``W`` interpolates ``p_model -> p_ret`` and ``g = W^T (h*a)``.  Both the
+    standalone :class:`XCO2ForwardModel` and the inline EnKF observation operator
+    can consume this, so the corrected operator is a single source of truth.
+
+    Shapes: ``p_model`` ``[C_model]`` or ``[B,C_model,Nlat,Nlon]``; everything
+    else ``[B,C_ret,Nlat,Nlon]`` (``xco2_prior`` ``[B,1,Nlat,Nlon]``).
+    Returns ``g`` ``[B,C_model,Nlat,Nlon]`` and ``column_offset`` ``[B,1,Nlat,Nlon]``.
+    """
+    h_a = pressure_weights * ak  # [B, C_ret, Nlat, Nlon]
+    B, C_ret, Nlat, Nlon = h_a.shape
+    C_model = p_model.shape[-3] if p_model.dim() == 4 else p_model.shape[-1]
+
+    p_ret_l = p_ret.permute(0, 2, 3, 1)  # [B, Nlat, Nlon, C_ret]
+    if p_model.dim() == 4:
+        p_model_l = p_model.permute(0, 2, 3, 1)
+    else:
+        p_model_l = p_model.view(1, 1, 1, C_model).expand(B, Nlat, Nlon, C_model)
+
+    W = build_interp_matrix(p_model_l, p_ret_l, log_pressure=log_pressure)  # [B,Nlat,Nlon,C_ret,C_model]
+    h_a_l = h_a.permute(0, 2, 3, 1)  # [B, Nlat, Nlon, C_ret]
+    g = (W * h_a_l.unsqueeze(-1)).sum(dim=-2).permute(0, 3, 1, 2)  # [B, C_model, Nlat, Nlon]
+    column_offset = xco2_prior - (h_a * co2_profile_prior).sum(dim=1, keepdim=True)  # [B,1,Nlat,Nlon]
+    return g, column_offset
+
+
 class XCO2ForwardModel:
     """OCO-2 XCO2 forward model: H(x) = xco2_prior + sum(h * a * (x - x_prior)).
 
@@ -52,6 +167,7 @@ class XCO2ForwardModel:
         target_std: Tensor | None = None,
         targshift_mean: Tensor | None = None,
         nlev: int | None = None,
+        column_offset: Tensor | None = None,
     ) -> None:
         self.pressure_weights = pressure_weights
         self.ak = ak
@@ -63,6 +179,10 @@ class XCO2ForwardModel:
         self.target_std = target_std
         self.targshift_mean = targshift_mean
         self.nlev = nlev
+        # Affine "interpolate-then-apply" operator (MIP-correct, P1): when set,
+        # H(x_phys) = column_offset + sum_l (h_ak_eff_l * x_phys_l), where
+        # h_ak_eff already encodes W^T(h*a) on the model grid. Shape [B,1,Nlat,Nlon].
+        self.column_offset = column_offset
 
         # Eagerly compute h_ak if possible
         self._h_ak = self._compute_h_ak()
@@ -122,7 +242,20 @@ class XCO2ForwardModel:
         if h is None:
             h = 1.0 / x.shape[1]
 
-        if self.has_priors:
+        if self.column_offset is not None:
+            # Affine "interpolate-then-apply" operator (P1). h_ak already holds
+            # the model-grid effective kernel W^T(h*a); column_offset holds
+            # xco2_prior - sum(h*a*x_apriori). Linear & differentiable in x.
+            x_corrected = x + self.targshift_mean if self.targshift_mean is not None else x
+            ts = self.target_std if self.target_std is not None else 1.0
+            tm = self.target_mean if self.target_mean is not None else 0.0
+            x_phys = x_corrected * ts + tm
+            h_ak = self._get_h_ak_for_x(x)
+            xco2 = self.column_offset + (h_ak * x_phys).sum(dim=1, keepdim=True)
+            om = self.obs_mean if self.obs_mean is not None else 0.0
+            os_ = self.obs_std if self.obs_std is not None else 1.0
+            return (xco2 - om) / os_
+        elif self.has_priors:
             x_corrected = x + self.targshift_mean if self.targshift_mean is not None else x
             x_phys = x_corrected * self.target_std + self.target_mean
             xco2 = self.xco2_prior + (h * self.ak * (x_phys - self.co2_profile_prior)).sum(dim=1, keepdim=True)
@@ -234,6 +367,64 @@ class XCO2ForwardModel:
         return x_hat + correction
 
     @classmethod
+    def from_retrieval_levels(
+        cls,
+        *,
+        p_model: Tensor,
+        p_ret: Tensor,
+        pressure_weights: Tensor,
+        ak: Tensor,
+        co2_profile_prior: Tensor,
+        xco2_prior: Tensor,
+        obs_mean: Tensor | None = None,
+        obs_std: Tensor | None = None,
+        target_mean: Tensor | None = None,
+        target_std: Tensor | None = None,
+        targshift_mean: Tensor | None = None,
+        log_pressure: bool = True,
+    ) -> XCO2ForwardModel:
+        """MIP-correct "interpolate-then-apply" operator (P1).
+
+        Interpolates the model CO2 profile (on ``p_model``) to the retrieval's
+        native pressure levels ``p_ret`` and applies the averaging formula
+        there:  ``XCO2 = xco2_prior + sum_k h_k a_k (x_interp_k - x_apriori_k)``.
+
+        Because interpolation ``x_interp = W x_model`` is linear, the whole
+        operator is affine in the model state with an *effective* model-grid
+        kernel ``g = W^T (h*a)`` and a constant ``column_offset``.  We precompute
+        both so ``forward`` / ``jacobian_transpose`` / ``project`` reuse the
+        existing machinery (the transpose of ``W`` is baked into ``g``).
+
+        Parameters
+        ----------
+        p_model : Tensor
+            Model pressure levels [hPa], shape ``[C_model]`` or
+            ``[B, C_model, Nlat, Nlon]``.
+        p_ret : Tensor
+            Retrieval native pressure levels [hPa], ``[B, C_ret, Nlat, Nlon]``.
+        pressure_weights, ak, co2_profile_prior : Tensor
+            Retrieval-level ``h_k``, ``a_k``, ``x_apriori_k``,
+            ``[B, C_ret, Nlat, Nlon]``.
+        xco2_prior : Tensor
+            Retrieval prior column XCO2 [ppm], ``[B, 1, Nlat, Nlon]``.
+        """
+        g, column_offset = effective_column_kernel(
+            p_model, p_ret, pressure_weights, ak, co2_profile_prior, xco2_prior, log_pressure=log_pressure
+        )
+        return cls(
+            pressure_weights=g,
+            ak=None,  # h_ak == g directly
+            xco2_prior=None,
+            co2_profile_prior=None,
+            obs_mean=obs_mean,
+            obs_std=obs_std,
+            target_mean=target_mean,
+            target_std=target_std,
+            targshift_mean=targshift_mean,
+            column_offset=column_offset,
+        )
+
+    @classmethod
     def from_masking_config(cls, masking_config: dict) -> XCO2ForwardModel:
         """Bridge constructor extracting params from legacy masking_config dict.
 
@@ -247,6 +438,31 @@ class XCO2ForwardModel:
         -------
         XCO2ForwardModel
         """
+        # P1: dispatch to the MIP-correct interpolate-then-apply operator when
+        # requested and the native-level retrieval fields + pressures are present.
+        if (
+            masking_config.get("forward_operator", "aggregate") == "interp"
+            and masking_config.get("p_model") is not None
+            and masking_config.get("p_ret") is not None
+            and masking_config.get("ak") is not None
+            and masking_config.get("pressure_weights") is not None
+            and masking_config.get("co2_profile_prior") is not None
+            and masking_config.get("xco2_prior") is not None
+        ):
+            return cls.from_retrieval_levels(
+                p_model=masking_config["p_model"],
+                p_ret=masking_config["p_ret"],
+                pressure_weights=masking_config["pressure_weights"],
+                ak=masking_config["ak"],
+                co2_profile_prior=masking_config["co2_profile_prior"],
+                xco2_prior=masking_config["xco2_prior"],
+                obs_mean=masking_config.get("obs_mean", None),
+                obs_std=masking_config.get("obs_std", None),
+                target_mean=masking_config.get("target_mean", None),
+                target_std=masking_config.get("target_std", None),
+                targshift_mean=masking_config.get("targshift_mean", None),
+                log_pressure=masking_config.get("log_pressure", True),
+            )
         return cls(
             pressure_weights=masking_config.get("pressure_weights", None),
             ak=masking_config.get("ak", None),

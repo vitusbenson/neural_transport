@@ -93,23 +93,49 @@ the model's coarse `l10` grid and applies the formula there (`forward_model.py:1
 if the profile is linear within each aggregation group. (Confirmed by reading the code 2026-06-01.)
 
 ### Tasks
-- [ ] **Tests first** (`tests/test_forward_model.py`): on a sample of real soundings (from
-      `oco2_assimilate.zarr` / the raw nc4), compare (a) current down-aggregated op vs
-      (b) interpolate-then-apply op; quantify the discrepancy. **Reference check**: applying the
-      operator to the retrieval's own a-priori profile must reproduce `xco2_apriori` to round-off.
-- [ ] Add `XCO2ForwardModel` mode taking model `(p_model, x_model)` + retrieval
-      `(p_ret[20], h[20], a[20], x_apriori[20], xco2_prior)`: pressure-aware interpolation
-      `x_model→p_ret` (mixing-ratio-consistent), then the averaging formula at 20 levels.
-- [ ] Keep it **differentiable** — samplers / DA need `jacobian_transpose` / `project`; add the
-      interpolation to the adjoint path.
-- [ ] Wire through `data/oco2_loader.py` → `masking_config` / `ObservationBatch` so DA uses the
-      corrected operator; keep the old path behind a flag for the ablation.
-- [ ] Decide storage: keep **native 20-level** AK / `h` / a-priori / pressure_levels in the obs
-      products (don't pre-aggregate to l10) so the corrected op has what it needs.
+- [x] **Tests first** (`tests/test_forward_model.py`): on a sample of real soundings, compared
+      (a) current down-aggregated op vs (b) interpolate-then-apply op; quantified the discrepancy.
+      **Reference check** passes: `H(x_apriori) == xco2_apriori` (and `Σ h_k·xa_k ≈ xco2_apriori`
+      to 0.003 ppm — the 2-decimal rounding of stored `xco2_apriori`).
+- [x] Added `XCO2ForwardModel.from_retrieval_levels(p_model, p_ret[20], h[20], a[20], x_apriori[20],
+      xco2_prior)`: linear-in-log-pressure interpolation `x_model→p_ret` (`build_interp_matrix`,
+      clamped/constant extrapolation, rows sum to 1), then the averaging formula at 20 levels.
+- [x] **Differentiable + adjoint**: key insight — interp `x_interp = W·x_model` is linear, so the
+      whole operator is affine: `H = column_offset + gᵀx_model` with effective model-grid kernel
+      `g = Wᵀ(h·a)` and `column_offset = xco2_prior − (h·a)ᵀx_apriori`. So `jacobian_transpose`
+      (`= g·err`) and `project` work **unchanged** (Wᵀ is baked into `g`). Verified `g·err` matches
+      autograd of `forward`. Shared helper `forward_model.effective_column_kernel()` is the single
+      source of truth (samplers + future EnKF both consume it).
+- [x] Wiring **mechanism** delivered: `XCO2ForwardModel.from_masking_config` dispatches to the
+      corrected operator when `forward_operator="interp"` + native fields (`p_model`, `p_ret`, 20-level
+      `ak/h/x_apriori`, `xco2_prior`) are present; falls back to `"aggregate"` (legacy l10) otherwise —
+      this **is** the ablation flag. `ObservationBatch` now carries `pressure_levels` (p_ret) and the
+      loader extracts it. **Full DA activation deferred** to P3/P6 (see note) because it needs the
+      native l20 obs product with `C_ret=20 ≠ C_model=10`, which doesn't exist yet — the EnKF inline
+      operator (`generation.py:2148`) and `_build_obs` (`generation.py:1639`) currently assume
+      `C_ret==C_model`. The shared helper makes that switch-over a localized change.
+- [x] **Storage decided**: keep **native 20-level** product. Verified `regrid_mip_oco2(...,
+      vertical_levels="l20")` retains `xco2_averaging_kernel`, `co2_profile_apriori`, `pressure_weight`,
+      `xco2_apriori`, and per-gridcell `pressure_levels[20]` (the l20 vertical aggregation is an
+      identity relabel — no code change to `mip_oco2.py` needed). P5 rebuilds the multi-year product
+      at l20.
 
-**Key files**: `forward_model.py`, `datasets/mip_oco2.py`, `data/oco2_loader.py`,
-`tests/test_forward_model.py`. **Deliverable**: verified forward operator + short note quantifying
-old-vs-new discrepancy. **Gate**: a-priori reproduction test passes; interpolate-then-apply is default.
+**Result (discrepancy note)**: on 3000 real soundings with realistic structured model profiles
+(boundary-layer enhancement + free-trop curvature), down-aggregated-l10 vs interpolate-then-apply
+disagree by **bias ≈ 1.4 ppm, RMSE ≈ 1.7 ppm, max ≈ 5.3 ppm** — comparable to the entire 2.5 ppm SOTA
+signal. A large part is the pressure-grid mismatch the legacy path ignores (CarbonTracker-l10 model
+values index-aligned to OCO2-l10 aggregated kernels at *different* pressures). Confirms P1 matters.
+
+**Next step (P3/P6)**: activate the corrected operator in the DA loop once the l20 obs product is
+built — decouple `C_ret` (20, obs) from `C_model` (10, state) in `_build_obs`/EnKF and swap the inline
+`h·a` for `effective_column_kernel(...)` (g + column_offset; the offset cancels in EnKF anomalies and
+only enters the innovation). For the OSSE (P3), generate synthetic obs *with* the corrected operator.
+
+**Key files**: `forward_model.py` (operator + `build_interp_matrix` + `effective_column_kernel`),
+`datasets/mip_oco2.py` (l20 path verified), `data/oco2_loader.py` (`pressure_levels`),
+`tests/test_forward_model.py` (+13 tests). **Deliverable**: verified forward operator + discrepancy
+note ✅. **Gate**: a-priori reproduction test passes ✅; interpolate-then-apply is the default operator
+(`forward_operator="interp"`) wherever native-level data is available ✅.
 
 ---
 

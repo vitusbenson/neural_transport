@@ -1,11 +1,13 @@
 """Unit tests for MaskedVelocityWrapper and XCO2ForwardModel."""
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 import torch
 from conftest import MockSubmodel
 
-from neural_transport.forward_model import XCO2ForwardModel
+from neural_transport.forward_model import XCO2ForwardModel, build_interp_matrix
 from neural_transport.models.flowmatching import MaskedVelocityWrapper
 from neural_transport.tools.spatial import gaussian_smooth_2d as _gaussian_smooth_2d
 
@@ -562,3 +564,257 @@ class TestXCO2ForwardModelNumPyParity:
         actual = fm.forward_numpy(x_np, levels_axis=-1)
 
         np.testing.assert_allclose(actual, expected, atol=1e-10)
+
+
+# ── P1: interpolate-then-apply (MIP-correct) forward operator ────────────
+
+# CarbonTracker l10 model pressure levels [hPa] (surface -> top of atmosphere).
+P_MODEL_L10 = torch.tensor([1013.0, 1005.0, 995.0, 971.0, 943.0, 843.0, 642.0, 441.0, 243.0, 73.0])
+
+OCO2_ASSIM_ZARR = Path("/Net/Groups/BGI/tscratch/vbenson/graph_tm/data/OCO2MIP_OCO2/oco2_assimilate.zarr")
+
+
+class TestBuildInterpMatrix:
+    def test_rows_sum_to_one(self):
+        """Every interpolation row is a convex combination (sums to 1)."""
+        p_src = torch.tensor([1000.0, 800.0, 500.0, 200.0, 50.0])
+        p_dst = torch.linspace(1050.0, 30.0, 20)  # includes out-of-range ends
+        W = build_interp_matrix(p_src, p_dst)
+        assert torch.allclose(W.sum(-1), torch.ones(20), atol=1e-6)
+        assert (W >= -1e-7).all(), "interpolation weights must be non-negative"
+
+    def test_reproduces_linear_in_logp(self):
+        """A profile linear in log-pressure is interpolated exactly."""
+        p_src = torch.tensor([1000.0, 700.0, 400.0, 100.0])
+        p_dst = torch.tensor([900.0, 550.0, 250.0])
+        # y = c0 + c1 * log(p)
+        y_src = 3.0 + 2.0 * torch.log(p_src)
+        y_dst_true = 3.0 + 2.0 * torch.log(p_dst)
+        W = build_interp_matrix(p_src, p_dst, log_pressure=True)
+        y_dst = W @ y_src
+        assert torch.allclose(y_dst, y_dst_true, atol=1e-5), f"{y_dst} vs {y_dst_true}"
+
+    def test_constant_extrapolation(self):
+        """Destination levels outside the source range clamp to the nearest level."""
+        p_src = torch.tensor([900.0, 500.0, 100.0])
+        p_dst = torch.tensor([1050.0, 30.0])  # below-surface and above-top
+        y_src = torch.tensor([10.0, 5.0, 1.0])
+        W = build_interp_matrix(p_src, p_dst)
+        y_dst = W @ y_src
+        assert torch.allclose(y_dst, torch.tensor([10.0, 1.0]), atol=1e-5)
+
+    def test_identity_when_grids_match(self):
+        """dst == src yields the identity matrix."""
+        p = torch.tensor([1000.0, 600.0, 300.0, 80.0])
+        W = build_interp_matrix(p, p)
+        assert torch.allclose(W, torch.eye(4), atol=1e-5)
+
+    def test_batched_shapes(self):
+        """Batched per-gridcell destination pressures produce [...,D,S]."""
+        B, Nlat, Nlon, S, D = 2, 3, 4, 10, 20
+        p_src = P_MODEL_L10.view(1, 1, 1, S).expand(B, Nlat, Nlon, S)
+        p_dst = torch.linspace(1010.0, 40.0, D).view(1, 1, 1, D).expand(B, Nlat, Nlon, D).contiguous()
+        W = build_interp_matrix(p_src, p_dst)
+        assert W.shape == (B, Nlat, Nlon, D, S)
+        assert torch.allclose(W.sum(-1), torch.ones(B, Nlat, Nlon, D), atol=1e-5)
+
+
+def _make_retrieval_operator(B=2, Cret=20, Nlat=3, Nlon=4, seed=0):
+    """Build a from_retrieval_levels operator + the raw retrieval fields."""
+    torch.manual_seed(seed)
+    sig = torch.linspace(1e-4, 1.0, Cret)
+    psurf = 980.0 + 60.0 * torch.rand(B, Nlat, Nlon)
+    p_ret = sig.view(1, Cret, 1, 1) * psurf.unsqueeze(1)  # [B, Cret, Nlat, Nlon], top->surf
+    h = torch.softmax(torch.randn(B, Cret, Nlat, Nlon), dim=1)  # sums to 1 over levels
+    a = 0.2 + 0.85 * torch.rand(B, Cret, Nlat, Nlon)
+    xa = 395.0 + 10.0 * torch.rand(B, Cret, Nlat, Nlon)
+    xco2_prior = (h * xa).sum(1, keepdim=True)  # consistent prior
+    tm = torch.tensor(400.0).view(1, 1, 1, 1)
+    ts = torch.tensor(5.0).view(1, 1, 1, 1)
+    fm = XCO2ForwardModel.from_retrieval_levels(
+        p_model=P_MODEL_L10,
+        p_ret=p_ret,
+        pressure_weights=h,
+        ak=a,
+        co2_profile_prior=xa,
+        xco2_prior=xco2_prior,
+        obs_mean=tm,
+        obs_std=ts,
+        target_mean=tm,
+        target_std=ts,
+    )
+    return fm, dict(p_ret=p_ret, h=h, a=a, xa=xa, xco2_prior=xco2_prior, tm=tm, ts=ts)
+
+
+class TestInterpolateThenApplyOperator:
+    def test_affine_matches_explicit_formula(self):
+        """Effective-kernel forward == explicit interpolate-then-apply formula."""
+        fm, r = _make_retrieval_operator()
+        B, Cmod, Nlat, Nlon = fm.h_ak.shape
+        torch.manual_seed(1)
+        x_phys = 398.0 + 6.0 * torch.rand(B, Cmod, Nlat, Nlon)
+        x = (x_phys - r["tm"]) / r["ts"]
+        out_phys = fm.forward(x) * r["ts"] + r["tm"]
+
+        W = build_interp_matrix(
+            P_MODEL_L10.view(1, 1, 1, Cmod).expand(B, Nlat, Nlon, Cmod),
+            r["p_ret"].permute(0, 2, 3, 1),
+        )
+        x_interp = (W * x_phys.permute(0, 2, 3, 1).unsqueeze(-2)).sum(-1).permute(0, 3, 1, 2)
+        ref = r["xco2_prior"] + (r["h"] * r["a"] * (x_interp - r["xa"])).sum(1, keepdim=True)
+        assert torch.allclose(out_phys, ref, atol=1e-3), f"max|diff|={(out_phys - ref).abs().max().item()}"
+
+    def test_apriori_reproduction(self):
+        """REFERENCE GATE: feeding the a-priori profile reproduces xco2_apriori.
+
+        When the model grid equals the retrieval grid (W = identity) and the
+        model profile equals the a-priori, H(x) must equal xco2_prior exactly.
+        """
+        torch.manual_seed(2)
+        B, C, Nlat, Nlon = 2, 20, 3, 4
+        p_ret = torch.linspace(1e-4, 1.0, C).view(1, C, 1, 1) * (980.0 + 40.0 * torch.rand(B, Nlat, Nlon)).unsqueeze(1)
+        h = torch.softmax(torch.randn(B, C, Nlat, Nlon), dim=1)
+        a = 0.2 + 0.85 * torch.rand(B, C, Nlat, Nlon)
+        xa = 395.0 + 10.0 * torch.rand(B, C, Nlat, Nlon)
+        xco2_prior = (h * xa).sum(1, keepdim=True)
+        tm = torch.tensor(400.0).view(1, 1, 1, 1)
+        ts = torch.tensor(5.0).view(1, 1, 1, 1)
+        # p_model == p_ret per gridcell -> identity interpolation.
+        fm = XCO2ForwardModel.from_retrieval_levels(
+            p_model=p_ret,
+            p_ret=p_ret,
+            pressure_weights=h,
+            ak=a,
+            co2_profile_prior=xa,
+            xco2_prior=xco2_prior,
+            obs_mean=tm,
+            obs_std=ts,
+            target_mean=tm,
+            target_std=ts,
+        )
+        x = (xa - tm) / ts  # a-priori profile in normalized space
+        out_phys = fm.forward(x) * ts + tm
+        assert torch.allclose(out_phys, xco2_prior, atol=1e-3), (
+            f"a-priori not reproduced: max|diff|={(out_phys - xco2_prior).abs().max().item()}"
+        )
+
+    def test_linearity(self):
+        """The operator is affine: H(a*x1+(1-a)*x2) == a*H(x1)+(1-a)*H(x2)."""
+        fm, r = _make_retrieval_operator()
+        B, Cmod, Nlat, Nlon = fm.h_ak.shape
+        torch.manual_seed(3)
+        x1 = torch.randn(B, Cmod, Nlat, Nlon)
+        x2 = torch.randn(B, Cmod, Nlat, Nlon)
+        al = 0.6
+        lhs = fm.forward(al * x1 + (1 - al) * x2)
+        rhs = al * fm.forward(x1) + (1 - al) * fm.forward(x2)
+        assert torch.allclose(lhs, rhs, atol=1e-4)
+
+    def test_adjoint_matches_autograd(self):
+        """jacobian_transpose (phys-space) is consistent with autograd of forward."""
+        fm, r = _make_retrieval_operator()
+        B, Cmod, Nlat, Nlon = fm.h_ak.shape
+        torch.manual_seed(4)
+        x = torch.randn(B, Cmod, Nlat, Nlon, requires_grad=True)
+        y = fm.forward(x)
+        err = torch.randn_like(y)
+        (y * err).sum().backward()
+        # d forward/dx = h_ak * (target_std / obs_std); jacobian_transpose returns h_ak*err (phys).
+        expected_grad = fm.h_ak * err * r["ts"] / r["ts"]
+        assert torch.allclose(x.grad, expected_grad, atol=1e-5)
+        # jacobian_transpose itself is the phys-space adjoint h_ak * err.
+        assert torch.allclose(fm.jacobian_transpose(err), fm.h_ak * err, atol=1e-6)
+
+    def test_project_reduces_error(self):
+        """project() still reduces the observation residual with the new operator."""
+        fm, r = _make_retrieval_operator()
+        B, Cmod, Nlat, Nlon = fm.h_ak.shape
+        torch.manual_seed(5)
+        x = torch.randn(B, Cmod, Nlat, Nlon)
+        y = fm.forward(x + 0.3 * torch.randn_like(x))  # a feasible target
+        mask = torch.ones(B, 1, Nlat, Nlon, dtype=torch.bool)
+        err_before = (y - fm.forward(x)).abs()[mask].mean()
+        x_proj = fm.project(x, y, mask, sigma=0.05)
+        err_after = (y - fm.forward(x_proj)).abs()[mask].mean()
+        assert err_after < err_before
+
+
+@pytest.mark.skipif(not OCO2_ASSIM_ZARR.exists(), reason="OCO-2 assimilate zarr not staged")
+class TestOperatorDiscrepancyRealSoundings:
+    """Quantify the down-aggregated vs interpolate-then-apply discrepancy on real soundings.
+
+    Deliverable for P1: a number proving the operator choice matters.
+    """
+
+    @staticmethod
+    def _load(n=2000, seed=0):
+        import xarray as xr
+
+        ds = xr.open_zarr(OCO2_ASSIM_ZARR)
+        rng = np.random.default_rng(seed)
+        idx = np.sort(rng.choice(ds.sizes["sounding_id"], n, replace=False))
+        sub = ds.isel(sounding_id=idx).compute()
+        h = sub["pressure_weight"].values
+        a = sub["xco2_averaging_kernel"].values
+        xa = sub["co2_profile_apriori"].values
+        xco2_ap = sub["xco2_apriori"].values
+        p_ret = sub["sigma_levels"].values.T * sub["psurf"].values[:, None]
+        return h, a, xa, xco2_ap, p_ret
+
+    def test_apriori_reproduction_real(self):
+        """H(a-priori) == xco2_apriori to round-off on real soundings."""
+        h, a, xa, xco2_ap, _ = self._load(n=1000)
+        recon = (h * xa).sum(1)
+        # stored xco2_apriori is rounded to 2 decimals; agreement to that precision.
+        assert np.nanmax(np.abs(recon - xco2_ap)) < 0.02
+
+    def test_down_agg_vs_interp_discrepancy(self):
+        """The two operators disagree by a decision-relevant amount (>0.5 ppm RMSE)."""
+        from neural_transport.datasets.mip_oco2 import MIP_OCO2_LEVEL_AGG
+
+        h, a, xa, xco2_ap, p_ret = self._load(n=3000)
+        N = h.shape[0]
+        p_model = P_MODEL_L10.numpy()
+        rng = np.random.default_rng(7)
+        # Realistic structured model profiles on l10 (boundary-layer enhancement + curvature).
+        pn = p_model / p_model.max()
+        amp = rng.uniform(2, 8, (N, 1))
+        curv = rng.uniform(-4, 4, (N, 1))
+        base = rng.uniform(395, 405, (N, 1))
+        x_l10 = base + amp * pn[None] + curv * pn[None] ** 2  # [N, 10]
+
+        # Down-aggregated l10 operator (legacy path).
+        groups = MIP_OCO2_LEVEL_AGG["l10"]
+        h_agg = np.zeros((N, 10))
+        a_agg = np.zeros((N, 10))
+        xa_agg = np.zeros((N, 10))
+        for g, grp in enumerate(groups):
+            hg = h[:, grp]
+            hs = hg.sum(1)
+            w = hg / hs[:, None]
+            h_agg[:, g] = hs
+            a_agg[:, g] = (a[:, grp] * w).sum(1)
+            xa_agg[:, g] = (xa[:, grp] * w).sum(1)
+        H_agg = xco2_ap + (h_agg * a_agg * (x_l10 - xa_agg)).sum(1)
+
+        # Interpolate-then-apply operator via the production builder.
+        fm = XCO2ForwardModel.from_retrieval_levels(
+            p_model=torch.tensor(p_model, dtype=torch.float32),
+            p_ret=torch.tensor(p_ret[:, :, None, None], dtype=torch.float32),
+            pressure_weights=torch.tensor(h[:, :, None, None], dtype=torch.float32),
+            ak=torch.tensor(a[:, :, None, None], dtype=torch.float32),
+            co2_profile_prior=torch.tensor(xa[:, :, None, None], dtype=torch.float32),
+            xco2_prior=torch.tensor(xco2_ap[:, None, None, None], dtype=torch.float32),
+            obs_mean=torch.zeros(1, 1, 1, 1),
+            obs_std=torch.ones(1, 1, 1, 1),
+            target_mean=torch.zeros(1, 1, 1, 1),
+            target_std=torch.ones(1, 1, 1, 1),
+        )
+        x_t = torch.tensor(x_l10[:, :, None, None], dtype=torch.float32)
+        H_int = fm.forward(x_t).squeeze().numpy()
+
+        d = H_agg - H_int
+        rmse = float(np.sqrt(np.mean(d**2)))
+        bias = float(np.mean(d))
+        print(f"\n[P1] down-agg vs interp: bias={bias:.3f} ppm  RMSE={rmse:.3f} ppm  max|d|={np.abs(d).max():.3f} ppm")
+        assert rmse > 0.5, f"Expected a decision-relevant discrepancy; got RMSE={rmse:.3f} ppm"

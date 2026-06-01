@@ -36,6 +36,7 @@ class ObservationBatch:
     obs_mean: Tensor  # normalization offset
     obs_std: Tensor  # normalization scale
     raw_batch: dict[str, Tensor]  # full aggregated OCO-2 batch dict
+    pressure_levels: Tensor | None = None  # [B, T, N, C_levels] retrieval native pressures [hPa] (P1)
 
     def inject_into_batch(
         self,
@@ -249,6 +250,9 @@ class OCO2DataLoader(InferenceDataLoader):
         xco2_prior = batch_gen.get("xco2_apriori")
         co2_profile_prior = batch_gen.get("co2_profile_apriori")
         pressure_weights = batch_gen.get("pressure_weight")
+        # P1: native retrieval pressure levels [hPa], present only in the
+        # native-level (l20) obs product; enables the interpolate-then-apply op.
+        pressure_levels = batch_gen.get("pressure_levels")
 
         return ObservationBatch(
             obs_values=obs_values,
@@ -260,4 +264,5 @@ class OCO2DataLoader(InferenceDataLoader):
             obs_mean=obs_mean,
             obs_std=obs_std,
             raw_batch=batch_gen,
+            pressure_levels=pressure_levels,
         )
