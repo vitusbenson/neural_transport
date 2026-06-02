@@ -1273,6 +1273,10 @@ def generate_trajectory_ensemble_batched(
     obs_every=1,
     obs_offset=0,
     reinit_every=None,
+    orbit_obs=None,
+    obs_noise=0.0,
+    ak_mode="real",
+    thin_fraction=1.0,
     target_var="co2massmix",
     device="cuda",
     seed=42,
@@ -1281,6 +1285,11 @@ def generate_trajectory_ensemble_batched(
 ):
     """Batched (init × sample) auto-regressive ensemble rollout with optional
     per-step posterior conditioning.
+
+    ``orbit_obs`` (an OrbitObsProvider): if given, the synthetic obs are sampled
+    at the *real* OCO-2 orbit footprints with the corrected P1 operator
+    (effective model-grid kernel ``g``), instead of ``create_column_mask`` — the
+    MIP-style OSSE obs for FMPS/D-Flow (mirrors ``generate_trajectory_enkf``).
 
     This is the canonical Phase 25b generator. Improvements over
     ``generate_trajectory_ensemble_with_obs``:
@@ -1344,6 +1353,8 @@ def generate_trajectory_ensemble_batched(
     for k in range(n_steps):
         obs_present[k] = has_obs and ((k - obs_offset) >= 0) and ((k - obs_offset) % obs_every == 0)
 
+    obs_rng = torch.Generator(device=device).manual_seed(seed + 2)  # orbit obs noise/thinning
+
     if has_obs:
         mask_pattern = sampler_generate_kwargs.get("mask_pattern", "satellite")
         obs_fraction = sampler_generate_kwargs.get("obs_fraction", 0.3)
@@ -1403,16 +1414,48 @@ def generate_trajectory_ensemble_batched(
             )
             obs_batch = {kk: vv for kk, vv in batch.items()}
             obs_batch[target_var] = gt_next_stacked
-            om, ov = create_column_mask(
-                obs_batch,
-                target_var=target_var,
-                obs_fraction=obs_fraction,
-                mask_pattern=mask_pattern,
-                nlat=nlat,
-                nlon=nlon,
-                ak_10=ak_10,
-                soft_boundary_sigma=soft_boundary_sigma,
-            )
+            if orbit_obs is not None:
+                # MIP-realistic obs: real OCO-2 orbit + corrected P1 operator (g).
+                gt_grid = torch.cat([b[target_var] for b in gt_next_per_init], dim=0).view(n_inits, N, C)
+                pb = torch.cat([b["p_bottom"] for b in gt_next_per_init], dim=0).view(n_inits, N, C)
+                pt = torch.cat([b["p_top"] for b in gt_next_per_init], dim=0).view(n_inits, N, C)
+                obs_ts = [times_axis[init_indices[i] + k + 1] for i in range(n_inits)]
+                m_grid, y_grid_i, g_grid_i = _build_orbit_enkf_obs(
+                    orbit_obs,
+                    obs_ts,
+                    gt_grid,
+                    pb,
+                    pt,
+                    nlat,
+                    nlon,
+                    ak_mode=ak_mode,
+                    thin_fraction=thin_fraction,
+                    obs_noise=obs_noise,
+                    rng=obs_rng,
+                    device=device,
+                )
+                m_b = m_grid.repeat_interleave(n_samples, dim=0)  # [BATCH, N]
+                y_b = y_grid_i.repeat_interleave(n_samples, dim=0)  # [BATCH, N]
+                g_b = g_grid_i.repeat_interleave(n_samples, dim=0)  # [BATCH, N, C]
+                om = m_b.view(BATCH, 1, N, 1)
+                ov = torch.nan_to_num(y_b, nan=0.0).view(BATCH, 1, N, 1)
+                # Effective kernel g is the forward operator: set ak=g, h=1 so
+                # h_ak = g; zero priors (perfect-model OSSE, offset cancels).
+                obs_batch["xco2_averaging_kernel"] = g_b.view(BATCH, 1, N, C)
+                obs_batch["pressure_weight"] = torch.ones(BATCH, 1, N, C, device=device)
+                obs_batch["xco2_apriori"] = torch.zeros(BATCH, 1, N, 1, device=device)
+                obs_batch["co2_profile_apriori"] = torch.zeros(BATCH, 1, N, C, device=device)
+            else:
+                om, ov = create_column_mask(
+                    obs_batch,
+                    target_var=target_var,
+                    obs_fraction=obs_fraction,
+                    mask_pattern=mask_pattern,
+                    nlat=nlat,
+                    nlon=nlon,
+                    ak_10=ak_10,
+                    soft_boundary_sigma=soft_boundary_sigma,
+                )
             obs_batch["obs_mask"] = om
             obs_batch["obs_values"] = ov
             ov_normed = inner.normalize_observations(ov, obs_batch, target_var=target_var, targshift=False)
