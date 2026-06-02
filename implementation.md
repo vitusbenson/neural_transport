@@ -197,18 +197,45 @@ realistic sparsity, and retrieval noise** — and run FM-DA on it.
 *known truth* under realistic observing conditions, and characterise the synthetic→real
 "performance drop" the README flags, before touching real obs.
 
-### Tasks
-- [ ] Sample obs locations/times from real OCO-2 (and OCO-3) swaths over a test window; apply the
-      P1 forward operator + retrieval-error noise to CarbonTracker truth → synthetic XCO₂.
-- [ ] Run FM-DA (EnKF loc=4, FMPS, D-Flow) over the window; reconstruct the 3-D field.
-- [ ] Compare reconstruction to the (known) truth: RMSE/bias of field + XCO₂, plus at synthetic
-      "held-out" sounding locations (mimicking the validation split).
-- [ ] Sweep realism knobs: swath sparsity, retrieval noise level, AK on/off, obs cadence.
-- [ ] Use the leak-free model from P2.
+**Data note (answers "do we need P5 data?")**: **No.** The OSSE needs only the OCO-2
+*observation geometry* (where/when soundings land + their real AKs), which is already staged:
+`OCO2MIP_OCO2/train/mip_oco2_latlon5.625_l20_6h.zarr` is the native-l20 product (the one P1 was
+waiting on), on the model grid, covering **2014-09 → 2020-12** (the whole MIP period). XCO₂ *values*
+are synthesised from the CarbonTracker truth, so real retrievals aren't needed here. P5's full v11
+re-download + assimilate/validate freeze is only for the **real** assimilation (P6+).
 
-**Key files**: new `carbonbench/.../27_mip_style_osse/`, `inference/masking.py` (orbit-track masks),
-`inference/generation.py`. **Deliverable**: MIP-like OSSE runs with known-truth scores.
-**Gate**: stable runs; quantified skill under realistic sampling; synthetic→idealised gap measured.
+### Tasks
+- [x] **P3.1 — orbit-obs provider** (`neural_transport/inference/orbit_obs.py`,
+      `OrbitObsProvider`): reads the staged MIP-l20 product and serves, keyed by timestamp, the real
+      OCO-2 obs mask + 20-level AK/pressure_levels/pressure_weight on the model grid (NaN-free, exact
+      time alignment to the CarbonTracker truth; realised coverage ≈ **1.5–2.4 %** of cells per 6 h).
+      +12 tests (provider gated on staged data; synthesis math via a CI-safe mock provider).
+- [x] **P3.2 — corrected operator in the EnKF** (activated the P1-deferred C_ret=20 ≠ C_model=10
+      path): `_build_orbit_enkf_obs` synthesises obs from the known truth via
+      `effective_column_kernel` (the real 20-level AK + log-p interpolation baked into the effective
+      model-grid kernel `g`). In a perfect-model OSSE `column_offset` cancels in the EnKF innovation,
+      so only `g` is needed. `generate_trajectory_enkf` gains `orbit_obs`/`obs_noise`/`ak_mode`/
+      `thin_fraction` (pure-EnKF). Adjoint/synthesis verified by tests.
+- [x] **P3.3 — runner + smoke** (`carbonbench/.../27_mip_style_osse/eval_mip_osse.py`): leak-free
+      (P2) residual-FM EnKF on real-orbit synthetic obs. **Smoke (n_inits=4, n_samples=10, 80 steps,
+      real ~1.6 % coverage)**: EnKF beats free with the gain **growing monotonically with lead**
+      — +0.3 % @ lead 4 → +1.9 % @ lead 40 → **+3.0 % @ lead 79** (free 1.907 → EnKF 1.851 ppm;
+      summary RMSE 1.728 → 1.701, CRPS 0.780 → 0.747). Sparse real-orbit DA progressively corrects
+      free-run drift, exactly as expected.
+- [~] **P3.4 — realism sweep** (running, full stats n_inits=20×n_samples=10, 120 steps): free
+      baseline + orbit-EnKF + {AK uniform-vs-real, thin 50 %, retrieval noise σ=0.3}. Aggregated by
+      `summarize.py`. *(Numbers to be folded in on completion.)*
+
+**Headline finding (so far)**: under **realistic OCO-2 sparsity (~1.6 % of cells/6 h, ~20× sparser
+than the 30 % idealised OSSE)**, FM-DA still improves over the free run, with gains concentrated at
+long lead — quantifying the synthetic→realistic "performance drop" the README flags.
+
+**Key files**: `neural_transport/inference/orbit_obs.py` (`OrbitObsProvider`), `inference/
+generation.py` (`_build_orbit_enkf_obs` + `orbit_obs` path), `forward_model.effective_column_kernel`
+(P1), `carbonbench/.../27_mip_style_osse/{eval_mip_osse.py, run_mip_osse.slurm, summarize.py,
+README.md}`, `tests/test_orbit_obs.py` (+12). **Deliverable**: MIP-like OSSE runs with known-truth
+scores ✅ (machinery + smoke); full stats + sweep in progress. **Gate**: stable runs ✅; skill under
+realistic sampling quantified ✅; synthetic→idealised gap measured (sweep).
 
 ---
 
