@@ -18,6 +18,7 @@ from tqdm import tqdm
 logger = logging.getLogger(__name__)
 
 from neural_transport.configs import DEFAULT_T
+from neural_transport.forward_model import effective_column_kernel
 from neural_transport.inference.masking import (
     create_column_mask,
     create_mask,
@@ -1934,6 +1935,97 @@ def generate_trajectory_window_dflow(
     return ds
 
 
+def _build_orbit_enkf_obs(
+    orbit_obs,
+    obs_timestamps,
+    gt_grid,
+    p_bottom,
+    p_top,
+    nlat,
+    nlon,
+    *,
+    ak_mode="real",
+    thin_fraction=1.0,
+    obs_noise=0.0,
+    rng=None,
+    device="cuda",
+):
+    """Synthesise MIP-realistic XCO2 obs from a known truth via the P1 operator.
+
+    For each init, look up the *real* OCO-2 orbit footprint + 20-level averaging
+    kernel at that init's absolute timestamp, reduce the corrected
+    interpolate-then-apply operator to a model-grid kernel ``g`` (P1's
+    ``effective_column_kernel``), and synthesise the column observation
+    ``y = sum_l g_l * x_truth_l`` at the observed cells (+ optional retrieval
+    noise).  In a perfect-model OSSE ``column_offset`` cancels in the EnKF
+    innovation, so only ``g`` (which carries the real AK shape + the
+    model->retrieval vertical interpolation) is needed.
+
+    Parameters
+    ----------
+    orbit_obs : OrbitObsProvider
+    obs_timestamps : list[np.datetime64]  (len n_inits) — obs time per init.
+    gt_grid : Tensor [n_inits, N, C_model]  — truth CO2 (physical).
+    p_bottom, p_top : Tensor [n_inits, N, C_model]  — model level edges (hPa).
+    ak_mode : {"real", "uniform"}  — use real AK shape or flatten it to 1
+        (AK-ablation for the realism sweep).
+    thin_fraction : float in (0,1]  — keep this fraction of observed cells
+        (sparsity ablation). 1.0 = all real soundings.
+    obs_noise : float  — std of additive retrieval noise (physical units).
+
+    Returns
+    -------
+    mask_grid : Tensor [n_inits, N] bool
+    y_grid    : Tensor [n_inits, N]  physical XCO2 (NaN at unobserved)
+    g_grid    : Tensor [n_inits, N, C_model]  effective model-grid kernel
+    """
+    n_inits = gt_grid.shape[0]
+    N, C = gt_grid.shape[1], gt_grid.shape[2]
+    mask_grid = torch.zeros(n_inits, N, dtype=torch.bool, device=device)
+    y_grid = torch.full((n_inits, N), float("nan"), device=device)
+    g_grid = torch.zeros(n_inits, N, C, device=device)
+
+    for i in range(n_inits):
+        rec = orbit_obs.get(obs_timestamps[i])
+        if rec is None or rec["n_obs"] == 0:
+            continue
+        mask2d = torch.as_tensor(rec["mask"], device=device)  # [nlat, nlon]
+        ak = torch.as_tensor(rec["ak"], device=device).unsqueeze(0)  # [1,Lr,nlat,nlon]
+        p_ret = torch.as_tensor(rec["p_ret"], device=device).unsqueeze(0)
+        pw = torch.as_tensor(rec["pw"], device=device).unsqueeze(0)
+        if ak_mode == "uniform":
+            ak = torch.ones_like(ak)
+
+        # Model level-center pressures from this init's edges (per cell).
+        pmid = 0.5 * (p_bottom[i] + p_top[i])  # [N, C]
+        p_model = pmid.transpose(0, 1).reshape(1, C, nlat, nlon)  # [1,C,nlat,nlon]
+        zeros_prof = torch.zeros_like(ak)
+        zeros_col = torch.zeros(1, 1, nlat, nlon, device=device)
+        g, _offset = effective_column_kernel(p_model, p_ret, pw, ak, zeros_prof, zeros_col)  # g: [1, C, nlat, nlon]
+        g_flat = g.squeeze(0).reshape(C, N).transpose(0, 1)  # [N, C]
+
+        mask = mask2d.reshape(N)
+        if thin_fraction < 1.0:
+            obs_idx = mask.nonzero(as_tuple=True)[0]
+            keep = max(1, int(round(thin_fraction * obs_idx.numel())))
+            perm = torch.randperm(obs_idx.numel(), device=device, generator=rng)[:keep]
+            new_mask = torch.zeros_like(mask)
+            new_mask[obs_idx[perm]] = True
+            mask = new_mask
+
+        # Synthesise obs: y = sum_l g_l * x_truth_l at observed cells.
+        y = (g_flat * gt_grid[i]).sum(dim=-1)  # [N]
+        if obs_noise > 0:
+            y = y + obs_noise * torch.randn(N, device=device, generator=rng)
+        y = torch.where(mask, y, torch.full_like(y, float("nan")))
+
+        mask_grid[i] = mask
+        y_grid[i] = y
+        g_grid[i] = g_flat
+
+    return mask_grid, y_grid, g_grid
+
+
 def generate_trajectory_enkf(
     model,
     data_loader,
@@ -1952,6 +2044,10 @@ def generate_trajectory_enkf(
     loc_sigma=0.0,
     loc_min_presence=0.05,
     global_bias_correct=False,
+    orbit_obs=None,
+    obs_noise=0.0,
+    ak_mode="real",
+    thin_fraction=1.0,
     target_var="co2massmix",
     device="cuda",
     seed=42,
@@ -1983,6 +2079,22 @@ def generate_trajectory_enkf(
         ak_10 / soft_boundary_sigma / noise_scale).
     free_kwargs : dict | None
         Unconditional generate_kwargs.
+    orbit_obs : OrbitObsProvider | None
+        If given, replaces the synthetic ``create_column_mask`` obs with
+        MIP-realistic observations: real OCO-2 orbit footprints + 20-level
+        averaging kernels, synthesised from the known truth through the
+        corrected P1 operator (effective model-grid kernel ``g``). Pure-EnKF
+        only (``sampler_kwargs`` must be None). This is the P3 MIP-style OSSE.
+    obs_noise : float
+        Std of additive retrieval noise applied to the synthesised orbit obs
+        (physical units). Realism knob, separate from ``sigma_obs`` (the
+        filter's assumed obs-error std).
+    ak_mode : {"real", "uniform"}
+        Orbit-obs AK handling: use the real 20-level AK shape, or flatten it to
+        1 (AK-ablation). Only used when ``orbit_obs`` is given.
+    thin_fraction : float
+        Keep this fraction of real observed cells per step (sparsity ablation).
+        Only used when ``orbit_obs`` is given.
     """
     import numpy as _np
 
@@ -1998,6 +2110,12 @@ def generate_trajectory_enkf(
 
     if free_kwargs is None:
         free_kwargs = {"n_samples": 1, "masking": False}
+
+    if orbit_obs is not None and sampler_kwargs is not None:
+        raise NotImplementedError(
+            "orbit_obs (MIP-realistic obs) is only supported for the pure EnKF "
+            "path; pass sampler_kwargs=None (no FMPS hybrid)."
+        )
 
     dataset = data_loader.dataset
     n_inits = len(init_indices)
@@ -2124,34 +2242,63 @@ def generate_trajectory_enkf(
                 m_pre = pred_grid_pre.mean(dim=1, keepdim=True)
                 pred_grid_pre = m_pre + prior_inflation * (pred_grid_pre - m_pre)
                 pred_co2 = pred_grid_pre.view(*pred_co2.shape)
-            if not obs_built:
-                # Build GT obs and pressure_weight / averaging kernel for EnKF.
+            if orbit_obs is not None:
+                # MIP-realistic obs: real OCO-2 orbit footprints + 20-level AKs,
+                # synthesised from the known truth via the corrected (P1)
+                # interpolate-then-apply operator (effective model-grid kernel g).
                 gt_next = [data_loader.get_batch(init_indices[i] + k + 1, device=device) for i in range(n_inits)]
-                gt_stacked = torch.cat(
-                    [b[target_var].expand(n_samples, *b[target_var].shape[1:]) for b in gt_next],
-                    dim=0,
+                gt_grid = torch.cat([b[target_var] for b in gt_next], dim=0).view(n_inits, N, C)
+                pb = torch.cat([b["p_bottom"] for b in gt_next], dim=0).view(n_inits, N, C)
+                pt = torch.cat([b["p_top"] for b in gt_next], dim=0).view(n_inits, N, C)
+                obs_ts = [times_axis[init_indices[i] + k + 1] for i in range(n_inits)]
+                m_grid, y_grid_i, g_grid_i = _build_orbit_enkf_obs(
+                    orbit_obs,
+                    obs_ts,
+                    gt_grid,
+                    pb,
+                    pt,
+                    nlat,
+                    nlon,
+                    ak_mode=ak_mode,
+                    thin_fraction=thin_fraction,
+                    obs_noise=obs_noise,
+                    rng=enkf_rng,
+                    device=device,
                 )
-                obs_batch = {kk: vv for kk, vv in batch.items()}
-                obs_batch[target_var] = gt_stacked
-                om, ov = create_column_mask(
-                    obs_batch,
-                    target_var=target_var,
-                    obs_fraction=obs_fraction,
-                    mask_pattern=mask_pattern,
-                    nlat=nlat,
-                    nlon=nlon,
-                    ak_10=ak_10,
-                    soft_boundary_sigma=soft_boundary_sigma,
-                )
-            # om: [BATCH, T=1, N, 1] bool ; ov: [BATCH, T=1, N, 1] physical XCO2
-            # pressure_weight & ak attached to obs_batch (and thus batch via shared dict)
-            hak = (obs_batch["pressure_weight"] * obs_batch["xco2_averaging_kernel"]).squeeze(1)  # [BATCH, N, C]
+                # Expand per-init rows across the n_samples ensemble axis so the
+                # per-init slicing below (i * n_samples) selects the right init.
+                mask_full = m_grid.repeat_interleave(n_samples, dim=0)  # [BATCH, N]
+                y_full = y_grid_i.repeat_interleave(n_samples, dim=0)  # [BATCH, N]
+                hak = g_grid_i.repeat_interleave(n_samples, dim=0)  # [BATCH, N, C] (effective g)
+            else:
+                if not obs_built:
+                    # Build GT obs and pressure_weight / averaging kernel for EnKF.
+                    gt_next = [data_loader.get_batch(init_indices[i] + k + 1, device=device) for i in range(n_inits)]
+                    gt_stacked = torch.cat(
+                        [b[target_var].expand(n_samples, *b[target_var].shape[1:]) for b in gt_next],
+                        dim=0,
+                    )
+                    obs_batch = {kk: vv for kk, vv in batch.items()}
+                    obs_batch[target_var] = gt_stacked
+                    om, ov = create_column_mask(
+                        obs_batch,
+                        target_var=target_var,
+                        obs_fraction=obs_fraction,
+                        mask_pattern=mask_pattern,
+                        nlat=nlat,
+                        nlon=nlon,
+                        ak_10=ak_10,
+                        soft_boundary_sigma=soft_boundary_sigma,
+                    )
+                # om: [BATCH, T=1, N, 1] bool ; ov: [BATCH, T=1, N, 1] physical XCO2
+                # pressure_weight & ak attached to obs_batch (and thus batch via shared dict)
+                hak = (obs_batch["pressure_weight"] * obs_batch["xco2_averaging_kernel"]).squeeze(1)  # [BATCH, N, C]
 
-            # Per-init slice: ensemble is consecutive n_samples. Mask & y_obs are
-            # identical across the n_samples axis (built from GT, expanded), so
-            # slice [0] for each init.
-            mask_full = om.squeeze(-1).squeeze(1)  # [BATCH, N] bool
-            y_full = ov.squeeze(-1).squeeze(1)  # [BATCH, N] physical XCO2 (NaN at unobserved)
+                # Per-init slice: ensemble is consecutive n_samples. Mask & y_obs are
+                # identical across the n_samples axis (built from GT, expanded), so
+                # slice [0] for each init.
+                mask_full = om.squeeze(-1).squeeze(1)  # [BATCH, N] bool
+                y_full = ov.squeeze(-1).squeeze(1)  # [BATCH, N] physical XCO2 (NaN at unobserved)
 
             x_grid = pred_co2.view(n_inits, n_samples, N, C)
             for i in range(n_inits):
