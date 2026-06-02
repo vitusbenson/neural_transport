@@ -222,20 +222,59 @@ re-download + assimilate/validate freeze is only for the **real** assimilation (
       — +0.3 % @ lead 4 → +1.9 % @ lead 40 → **+3.0 % @ lead 79** (free 1.907 → EnKF 1.851 ppm;
       summary RMSE 1.728 → 1.701, CRPS 0.780 → 0.747). Sparse real-orbit DA progressively corrects
       free-run drift, exactly as expected.
-- [~] **P3.4 — realism sweep** (running, full stats n_inits=20×n_samples=10, 120 steps): free
-      baseline + orbit-EnKF + {AK uniform-vs-real, thin 50 %, retrieval noise σ=0.3}. Aggregated by
-      `summarize.py`. *(Numbers to be folded in on completion.)*
+- [x] **P3.4 — realism sweep** (full stats **n_inits=20 × n_samples=10 = 200 trajectories, 120
+      steps** over the leak-free test 2015–2020; runs fanned out across local GPUs, ≤24 threads):
 
-**Headline finding (so far)**: under **realistic OCO-2 sparsity (~1.6 % of cells/6 h, ~20× sparser
-than the 30 % idealised OSSE)**, FM-DA still improves over the free run, with gains concentrated at
-long lead — quantifying the synthetic→realistic "performance drop" the README flags.
+      | run | config | summary RMSE | CRPS | spread/err |
+      |---|---|---|---|---|
+      | `none_full` | free (no DA) | 2.025 | 0.921 | 0.27 |
+      | `enkf_full` | real AK, full real coverage | 1.991 | 0.879 | 0.26 |
+      | `sweep_akuniform` | flat AK (AK ablation) | 1.989 | 0.878 | 0.26 |
+      | `sweep_noise03` | retrieval noise σ=0.3, sigma_obs=0.3 | **1.985** | 0.888 | 0.26 |
+      | `sweep_thin50` | half the soundings | 2.018 | 0.902 | 0.26 |
+      | `sweep_inflation` | prior-inflation 1.08 | 2.054 | **0.863** | **0.41** |
+
+**Findings**:
+1. **FM-DA beats free in every realistic config** (summary RMSE 1.985–2.018 vs 2.025; CRPS clearly
+   better) — under **~1.6–2.4 % OCO-2 coverage per 6 h, ~15–20× sparser than the 30 % idealised
+   OSSE**. This quantifies the synthetic→realistic "performance drop" the README flags: the gain
+   shrinks from idealised ~21 % (3.24→2.54 SOTA) to a few-% lead-averaged signal here.
+2. **Gain grows with lead then reverses** (`enkf_full` vs free): +1.1 % @ lead 4 → +3.5 % @ 20 →
+   +3.7 % @ 80, but **−9 % @ lead 119**. Sparse DA corrects free drift at short/medium lead, but the
+   **small (n=10) ensemble's spurious covariance injects error at the longest leads** (>~25 days,
+   many chained cycles) — a real, documented EnKF failure mode.
+3. **AK shape barely matters in-OSSE** (1.991 ≈ 1.989): obs and forward use the *same* operator, so
+   the kernel shape largely cancels in relative skill. P1's operator correctness matters for matching
+   the **real** retrieval (P6), not for OSSE skill ranking.
+4. **Sparsity** (thin 50 %) shrinks the gain but still beats free (2.018 < 2.025).
+5. **Obs-error inflation is the effective long-lead RMSE stabiliser**: `sweep_noise03` (sigma_obs 0.3)
+   gives the best summary RMSE (1.985) and the best long lead (L100 2.169 vs free 2.201; L119 2.647 vs
+   `enkf_full` 2.726) — higher assumed obs-error damps over-fitting to spurious covariance.
+6. **Prior inflation 1.08 trades RMSE for calibration** — best CRPS (0.863) and best spread/err
+   (0.26→0.41, much less under-dispersed), but **worse RMSE, especially long lead** (L119 2.726→3.265):
+   widening the ensemble amplifies the spurious-covariance error. *Not* the long-lead fix.
+
+**Headline**: under realistic OCO-2 sparsity, FM-DA still improves the 3-D field over free
+(lead-averaged RMSE −2 %, CRPS −5 %), with **gains concentrated at short/medium lead** and a
+**long-lead degradation** traced to small-ensemble spurious covariance. Obs-error inflation, not
+ensemble inflation, stabilises long lead; larger ensembles + stronger localization are the P4 levers.
 
 **Key files**: `neural_transport/inference/orbit_obs.py` (`OrbitObsProvider`), `inference/
 generation.py` (`_build_orbit_enkf_obs` + `orbit_obs` path), `forward_model.effective_column_kernel`
 (P1), `carbonbench/.../27_mip_style_osse/{eval_mip_osse.py, run_mip_osse.slurm, summarize.py,
 README.md}`, `tests/test_orbit_obs.py` (+12). **Deliverable**: MIP-like OSSE runs with known-truth
-scores ✅ (machinery + smoke); full stats + sweep in progress. **Gate**: stable runs ✅; skill under
-realistic sampling quantified ✅; synthetic→idealised gap measured (sweep).
+scores ✅ (machinery, smoke, full stats + 5-config realism sweep). **Gate**: stable runs ✅; skill
+under realistic sampling quantified ✅; synthetic→idealised gap measured ✅.
+
+> **Forward note for P4**: the long-lead EnKF degradation (lead 119: −9 % vs free) is the headline
+> shortcoming to dissect. Levers to test in P4: (a) **larger ensemble** `n_samples` (n=10 → 20/40) to
+> cut spurious covariance — the most likely real fix; (b) **stronger/adaptive localization**
+> (`loc_sigma`, currently 4); (c) **obs-error inflation** (already shown to help: `sweep_noise03`);
+> (d) **EnKS** (smoother) vs EnKF. Also fold in the idealised SOTA OSSE (30 % coverage, 2.54 ppm) as
+> the dense-obs reference point on the obs-density saturation curve, and add FMPS/D-Flow to the
+> sampler table on the *realistic* obs (orbit_obs path is pure-EnKF today — wiring FMPS to orbit obs
+> is a P4 task). Calibration angle: prior inflation buys spread/err 0.26→0.41 at an RMSE cost — the
+> FM residual head's native dispersion vs inflation is a calibration story for P4/P8.
 
 ---
 
