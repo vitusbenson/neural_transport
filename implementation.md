@@ -259,10 +259,63 @@ re-download + assimilate/validate freeze is only for the **real** assimilation (
 **long-lead degradation** traced to small-ensemble spurious covariance. Obs-error inflation, not
 ensemble inflation, stabilises long lead; larger ensembles + stronger localization are the P4 levers.
 
+### P3.5 — Why is the global gain only a few %? (diagnostic, `analyze_da_gain.py`)
+
+A few-% *global-field* gain looked suspicious, so we decomposed it. **The DA is in fact very
+effective — the small headline is a metric-dilution artifact**, from three stacked effects:
+
+| RMSE locus (EnKF, all leads) | free → EnKF | gain |
+|---|---|---|
+| 3-D field, **global** | 2.043 → 2.012 | +1.5 % ← headline |
+| 3-D field, **at observed cells** | 1.918 → 1.462 | **+23.8 %** |
+| XCO2 column, **global** | 0.837 → 0.746 | +10.8 % |
+| XCO2 column, **at observed cells** | 0.890 → 0.449 | **+49.6 %** |
+| 3-D field, at *un*observed cells | 2.009 → 1.971 | +1.9 % |
+
+1. **Spatial dilution (dominant)**: OCO-2 sees **~2 %/step, 16.7 % ever** (30 d). DA **halves the
+   column error where it observes** (−49.6 %); averaging that over the ~98 % unconstrained domain
+   yields the +1.5 % global number. *Info barely reaches unobserved cells (+1.9 %)* — the real limit.
+2. **Vertical dilution**: XCO2 is a column integral; the 3-D RMSE (~2 ppm) is dominated by
+   vertical-structure error the column obs can't see (global *column* RMSE is only ~0.84 ppm).
+3. **Identical-twin**: truth = CarbonTracker and the model is *trained on* CarbonTracker → free XCO2
+   error is only 0.15 ppm @ lead 0 → 1.36 @ lead 119; the forecast is near-perfect, so there is
+   structurally little *global* error to correct. (Real-data P6 will have a far larger model-reality
+   gap where DA matters more.)
+
+**Implication for the MIP comparison (P7/P8)**: the MIP validates *at obs locations*, so the relevant
+skill is the **−24 % 3-D / −50 % column at observed cells**, not the diluted global field.
+
+### P3.6 — FMPS vs EnKF on the realistic OSSE (the user's question)
+
+Wired FMPS/D-Flow to the orbit-obs path (`generate_trajectory_ensemble_batched` `orbit_obs`) and ran
+the flow-matching posterior sampler with the corrected operator. **FMPS underperforms both free and
+EnKF here** (matched 8×80; full 20×120 agrees):
+
+| method | RMSE | CRPS | spread/err |
+|---|---|---|---|
+| free | 1.802 | 0.805 | 0.24 |
+| **EnKF (loc=4)** | **1.770** | **0.760** | 0.24 |
+| FMPS (smooth=0.5) | 1.907 | 0.900 | 0.30 |
+| FMPS (smooth=0.0) | 1.930 | 0.902 | 0.30 |
+
+- Not a tuning artifact: with **no spatial smoothing** (correction applied *only* at obs cells), FMPS
+  is **still 53.7 % worse than free *at the observed cells*** (XCO2 0.613 → 0.942). It degrades from
+  lead 0 onward.
+- **Mechanism**: FMPS *replaces* the near-perfect deterministic forecast with a **generative sample**
+  (residual-FM head, noise_scale 1.05) nudged toward obs. At ~2 % coverage the generative variance
+  dominates the weak obs constraint, pushing even observed cells away from truth. The EnKF instead
+  *keeps* the deterministic ensemble and applies a **targeted linear Kalman update** → halves obs-cell
+  error. FMPS's only edge is higher spread (0.30 vs 0.24, better dispersion) — at a large RMSE/CRPS cost.
+- **Caveat**: FMPS was designed/tuned for the *dense* idealised regime (SOTA-competitive there). The
+  realistic-sparse + identical-twin setting is adversarial for a generative sampler; FMPS may regain
+  value with **denser obs** or a **larger forecast-model error (real data, P6)**. **For the OSSE,
+  EnKF is the method of choice.**
+
 **Key files**: `neural_transport/inference/orbit_obs.py` (`OrbitObsProvider`), `inference/
 generation.py` (`_build_orbit_enkf_obs` + `orbit_obs` path), `forward_model.effective_column_kernel`
-(P1), `carbonbench/.../27_mip_style_osse/{eval_mip_osse.py, run_mip_osse.slurm, summarize.py,
-README.md}`, `tests/test_orbit_obs.py` (+12). **Deliverable**: MIP-like OSSE runs with known-truth
+(P1), `inference/generation.py` (`generate_trajectory_ensemble_batched` orbit path for FMPS),
+`carbonbench/.../27_mip_style_osse/{eval_mip_osse.py, analyze_da_gain.py, run_mip_osse.slurm,
+summarize.py, README.md}`, `tests/test_orbit_obs.py` (+12). **Deliverable**: MIP-like OSSE runs with known-truth
 scores ✅ (machinery, smoke, full stats + 5-config realism sweep). **Gate**: stable runs ✅; skill
 under realistic sampling quantified ✅; synthetic→idealised gap measured ✅.
 
@@ -271,10 +324,12 @@ under realistic sampling quantified ✅; synthetic→idealised gap measured ✅.
 > cut spurious covariance — the most likely real fix; (b) **stronger/adaptive localization**
 > (`loc_sigma`, currently 4); (c) **obs-error inflation** (already shown to help: `sweep_noise03`);
 > (d) **EnKS** (smoother) vs EnKF. Also fold in the idealised SOTA OSSE (30 % coverage, 2.54 ppm) as
-> the dense-obs reference point on the obs-density saturation curve, and add FMPS/D-Flow to the
-> sampler table on the *realistic* obs (orbit_obs path is pure-EnKF today — wiring FMPS to orbit obs
-> is a P4 task). Calibration angle: prior inflation buys spread/err 0.26→0.41 at an RMSE cost — the
-> FM residual head's native dispersion vs inflation is a calibration story for P4/P8.
+> the dense-obs reference point on the obs-density saturation curve. **FMPS/D-Flow now run on the
+> realistic orbit obs** (P3.6) and FMPS loses to EnKF here — a key P4 result is *when* the generative
+> sampler is worth its variance (obs-density crossover where FMPS overtakes EnKF; and the real-data
+> P6 regime). Calibration angle: prior inflation buys spread/err 0.26→0.41 at an RMSE cost, and FMPS
+> is natively better-dispersed (0.30) but less accurate — the dispersion-vs-accuracy trade is a
+> calibration story for P4/P8.
 
 ---
 
