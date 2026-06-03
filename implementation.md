@@ -351,13 +351,32 @@ research synthesised in this session — DPS/ΠGDM/TMPD, FlowDPS, Score-based DA
   data, P6)**, or **multimodal posteriors**.
 
 **Strategic implication**: the per-step generative *filter* is intrinsically variance-limited here —
-confirmed, not cheaply fixable. The remaining route to a generative win is the **window/4-D
-approach** (joint constraint over K steps controls effective variance + adds upwind propagation):
-either the existing `generate_trajectory_window_dflow` (optimization-based, expensive — test as a
-proof-of-concept) or the single-pass SDA-style window smoother (Phase-2 build, adapts the same
-window/chain scaffolding, swaps Adam for one guidance grad/step). A low-risk linear alternative is the
-**EnKS** (already implemented, no variance injection). **Open decision** (session): test window-D-Flow
-PoC → SDA build, vs EnKS, vs ship EnKF-n40.
+confirmed, not cheaply fixable. The route to a generative win is the **window/4-D approach** (joint
+constraint over K steps controls effective variance + adds upwind propagation).
+
+**Window/4-D PoC — window-D-Flow on orbit obs (`generate_trajectory_window_dflow` + `orbit_obs`)**:
+the 4-D approach **rescues the generative method to EnKF parity, better-calibrated** (8×120):
+
+| method | RMSE | CRPS | spread/err | obs-cell XCO2 | never-obs gain |
+|---|---|---|---|---|---|
+| free | 1.954 | 0.807 | 0.25 | 0.88 | — |
+| EnKF | 1.882 | 0.794 | 0.26 | ~0.62 | +11 % @18d |
+| FMPS / FlowDPS (per-step) | 1.93 / 2.12 | 0.90 / 1.03 | 0.50 | 0.94 / 1.22 (worse!) | — |
+| **window-D-Flow w=4** | **1.877** | **0.762** | 0.29 | **0.62 (+30 %)** | +13 % @18d |
+| window-D-Flow w=8 | 1.912 | **0.730** | 0.36 | — | **+20 % @12d** (collapses @30d) |
+
+- The window smoother **improves observed cells** (+30 %, vs per-step generative which *degraded*
+  them) and **propagates to unobserved cells ≥ EnKF** (w=8 reaches +20 % @12d vs EnKF ~8 %).
+- Matches EnKF RMSE with **better CRPS** (0.762/0.730 vs 0.794). Confirms the generative model *can*
+  do good DA — with the 4-D framing, not greedy per-step filtering.
+- **Caveat**: w=8 collapses at the very last lead (last-window/boundary instability); w=4 is stable.
+  And window-D-Flow uses an **expensive inner Adam loop** — motivating the single-pass SDA version.
+
+**Phase-2 build (next)**: single-pass **SDA-style window smoother** — same window/chain scaffolding
+as window-D-Flow, but swap the per-window Adam optimization for **one obs-guidance gradient per
+reverse-flow step** (DPS/SDA), so inference is ~1 generation pass instead of an optimization loop.
+Expected: window-D-Flow-level skill at filter-level cost. (Low-risk linear alternative still
+available: **EnKS**, already implemented.)
 
 **Key files (P3.5–3.7)**: `inference/samplers/{base,fmps,flowdps,sde,mcg,pcfm}.py`,
 `carbonbench/.../27_mip_style_osse/{diag_propagation.py, analyze_da_gain.py}`, eval runner `--sampler`.
