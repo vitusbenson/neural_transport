@@ -1531,6 +1531,10 @@ def generate_trajectory_window_dflow(
     lr=1e-2,
     sigma_obs=0.1,
     reg_weight=0.0,
+    orbit_obs=None,
+    obs_noise=0.0,
+    ak_mode="real",
+    thin_fraction=1.0,
     target_var="co2massmix",
     chunk_size=None,
     device="cuda",
@@ -1621,6 +1625,7 @@ def generate_trajectory_window_dflow(
     ak_10 = obs_kwargs.get("ak_10", None)
     soft_boundary_sigma = obs_kwargs.get("soft_boundary_sigma", 0.0)
     noise_scale = float(obs_kwargs.get("noise_scale", 1.0))
+    wdflow_rng = torch.Generator(device=device).manual_seed(seed + 3)  # orbit obs noise/thinning
 
     # Free generate_kwargs used for the inner model.forward calls during opt
     # — we want unconditional generation per step (no internal posterior
@@ -1680,20 +1685,48 @@ def generate_trajectory_window_dflow(
         )
         return batch, gt_next
 
-    def _build_obs(batch, gt_next):
+    def _build_obs(batch, gt_next, k):
         """Build forward_model + obs_values_norm + obs_weight_or_mask for this step."""
         obs_batch = {kk: vv for kk, vv in batch.items()}
         obs_batch[target_var] = gt_next
-        om, ov = create_column_mask(
-            obs_batch,
-            target_var=target_var,
-            obs_fraction=obs_fraction,
-            mask_pattern=mask_pattern,
-            nlat=nlat,
-            nlon=nlon,
-            ak_10=ak_10,
-            soft_boundary_sigma=soft_boundary_sigma,
-        )
+        if orbit_obs is not None:
+            # MIP-realistic obs: real OCO-2 orbit + corrected P1 operator g.
+            gt_grid = gt_next[::n_samples].reshape(n_inits, N, C)
+            pb = batch["p_bottom"][::n_samples].reshape(n_inits, N, C)
+            pt = batch["p_top"][::n_samples].reshape(n_inits, N, C)
+            obs_ts = [times_axis[init_indices[i] + k + 1] for i in range(n_inits)]
+            m_grid, y_grid_i, g_grid_i = _build_orbit_enkf_obs(
+                orbit_obs,
+                obs_ts,
+                gt_grid,
+                pb,
+                pt,
+                nlat,
+                nlon,
+                ak_mode=ak_mode,
+                thin_fraction=thin_fraction,
+                obs_noise=obs_noise,
+                rng=wdflow_rng,
+                device=device,
+            )
+            om = m_grid.repeat_interleave(n_samples, 0).view(BATCH, 1, N, 1)
+            ov = y_grid_i.repeat_interleave(n_samples, 0).view(BATCH, 1, N, 1)
+            g_b = g_grid_i.repeat_interleave(n_samples, 0)
+            obs_batch["xco2_averaging_kernel"] = g_b.view(BATCH, 1, N, C)
+            obs_batch["pressure_weight"] = torch.ones(BATCH, 1, N, C, device=device)
+            obs_batch["xco2_apriori"] = torch.zeros(BATCH, 1, N, 1, device=device)
+            obs_batch["co2_profile_apriori"] = torch.zeros(BATCH, 1, N, C, device=device)
+        else:
+            om, ov = create_column_mask(
+                obs_batch,
+                target_var=target_var,
+                obs_fraction=obs_fraction,
+                mask_pattern=mask_pattern,
+                nlat=nlat,
+                nlon=nlon,
+                ak_10=ak_10,
+                soft_boundary_sigma=soft_boundary_sigma,
+            )
         obs_batch["obs_mask"] = om
         obs_batch["obs_values"] = ov
         ov_norm = inner.normalize_observations(ov, obs_batch, target_var=target_var, targshift=False)
@@ -1821,7 +1854,7 @@ def generate_trajectory_window_dflow(
             step_gt.append(gtw)
             if obs_present[k]:
                 with torch.no_grad():
-                    step_obs.append(_build_obs(bw, gtw))
+                    step_obs.append(_build_obs(bw, gtw, k))
             else:
                 step_obs.append(None)
 
