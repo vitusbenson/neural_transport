@@ -311,6 +311,47 @@ EnKF here** (matched 8×80; full 20×120 agrees):
   value with **denser obs** or a **larger forecast-model error (real data, P6)**. **For the OSSE,
   EnKF is the method of choice.**
 
+### P3.7 — Making DA "translate to the global field": diagnosis + single-pass posterior samplers
+
+**Motivating concern (correct)**: DA halves obs-cell error but the global gain is small. Does the
+signal propagate to the rest of the field via transport/mass-balance?
+
+**Propagation diagnostic** (`diag_propagation.py`, never-observed-cell gain vs lead): the signal
+**does** propagate — never-observed XCO2 gain grows **+2.7 % @1d → +11.7 % @18d** — then **collapses
+at long lead** (−16.5 % @30d) under the small (n=10) ensemble's spurious covariance.
+- **Larger ensemble (n=40)** cures the collapse (clean, monotone, +12 % stable through 30d), better
+  spread/err (0.32), RMSE 1.860 vs 1.882 (n=10). Propagation strengthens modestly but stays bounded
+  (~12 % unobserved vs ~40 % observed) — the per-cell filter has no flow-dependent horizontal
+  covariance, so it can only spread via isotropic localization + transport over cycles.
+
+**Single-pass posterior-sampler study** (Phase-1 of the "make the generative model work" plan; web
+research synthesised in this session — DPS/ΠGDM/TMPD, FlowDPS, Score-based DA Rozet & Louppe 2023):
+- We already have a proper sampler suite (`FMPSSampler`, `FlowDPSSampler`=closed-form PGDM column
+  projection `forward_model.project`, DPS-`sde`, `mcg`, `pcfm`); FMPS already does Tweedie-at-`x̂₀` +
+  decaying guidance schedule (so it is *not* the naive "gradient-at-noisy-xₜ" bug).
+- **Robust negative result**: BOTH generative per-step samplers underperform free *and* EnKF on the
+  realistic orbit OSSE (8×120): free 1.954, EnKF 1.882, EnKF-n40 1.860; **FMPS ≈1.93, FlowDPS ≈2.12
+  (σ_obs-insensitive, spread/err 0.50)** — worse even *at observed cells* (FlowDPS XCO2 0.88→1.22).
+- **Mechanism**: in this regime (near-perfect deterministic forecast + sparse *linear-Gaussian* obs)
+  the problem is essentially linear-Gaussian. Generative samplers re-sample the field with the
+  prior's variance, which 2 % obs cannot constrain → injected variance degrades the excellent
+  forecast. The EnKF keeps the deterministic state and adds a small linear increment → near-optimal.
+  Generative flexibility (non-Gaussian posterior) has no payoff here; expected to matter only with
+  **denser obs**, **larger forecast error (real data, P6)**, or **multimodal posteriors**.
+- There is **no "anchor-to-forecast" knob** (generation starts from pure noise; `refine_start` only
+  reshapes the time grid) — SDEdit-style anchoring would be a code change.
+
+**Strategic implication**: the generative *filter* is the wrong tool in this regime. To get the
+4-D/upwind propagation the OSSE wants, the low-risk move is the **EnKS** (linear ensemble smoother,
+already implemented `generate_trajectory_enks`) — it propagates obs info backward in time via
+cross-covariance with **no generative variance injection**. Test EnKS on orbit obs first; the
+generative SDA window-smoother (Phase-2) is the non-linear upgrade, but carries the same variance
+risk and needs forecast-anchoring to be viable. **Open decision** (see session): EnKS-first vs
+generative window-smoother vs ship EnKF-n40.
+
+**Key files (P3.5–3.7)**: `inference/samplers/{base,fmps,flowdps,sde,mcg,pcfm}.py`,
+`carbonbench/.../27_mip_style_osse/{diag_propagation.py, analyze_da_gain.py}`, eval runner `--sampler`.
+
 **Key files**: `neural_transport/inference/orbit_obs.py` (`OrbitObsProvider`), `inference/
 generation.py` (`_build_orbit_enkf_obs` + `orbit_obs` path), `forward_model.effective_column_kernel`
 (P1), `inference/generation.py` (`generate_trajectory_ensemble_batched` orbit path for FMPS),
