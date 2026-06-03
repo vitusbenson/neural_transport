@@ -332,22 +332,32 @@ research synthesised in this session — DPS/ΠGDM/TMPD, FlowDPS, Score-based DA
 - **Robust negative result**: BOTH generative per-step samplers underperform free *and* EnKF on the
   realistic orbit OSSE (8×120): free 1.954, EnKF 1.882, EnKF-n40 1.860; **FMPS ≈1.93, FlowDPS ≈2.12
   (σ_obs-insensitive, spread/err 0.50)** — worse even *at observed cells* (FlowDPS XCO2 0.88→1.22).
-- **Mechanism**: in this regime (near-perfect deterministic forecast + sparse *linear-Gaussian* obs)
-  the problem is essentially linear-Gaussian. Generative samplers re-sample the field with the
-  prior's variance, which 2 % obs cannot constrain → injected variance degrades the excellent
-  forecast. The EnKF keeps the deterministic state and adds a small linear increment → near-optimal.
-  Generative flexibility (non-Gaussian posterior) has no payoff here; expected to matter only with
-  **denser obs**, **larger forecast error (real data, P6)**, or **multimodal posteriors**.
-- There is **no "anchor-to-forecast" knob** (generation starts from pure noise; `refine_start` only
-  reshapes the time grid) — SDEdit-style anchoring would be a code change.
+- **Obs application is CORRECT (not the bug)** — `diag_obs_fit.py` isolation test (one conditioned
+  step, no rollout): the conditioned ensemble **mean fits the obs 35 % better than free** at obs
+  cells (FlowDPS 0.67→0.43, FMPS 0.67→0.43). So obs+prior *do* constrain the posterior mean in a
+  single step; the failure is **not** a normalization/operator misapplication.
+- **The failure is autoregressive process-variance accumulation**: the conditioned samplers run a
+  higher-variance sampling process (spread/err **0.50 vs free's 0.26**) and feed their own
+  spread-0.50 output back in for 120 steps → the nonlinearly-evolved ensemble mean drifts. Each step's
+  conditioning helps locally, but the accumulated process variance corrupts the long-run mean.
+  - **Not fixable cheaply**: `fresh_noise=False` (deterministic re-noise) changes nothing (variance
+    is from per-member `x_init`, not the renoise); **lowering `noise_scale` is catastrophic** (RMSE
+    7.7–9.2, diverges) — `noise_scale≈1.05` is the residual-FM model's **stability** point, not a
+    dispersion dial. The conditioned-sampler variance is intrinsic.
+- **Mechanism summary**: near-perfect forecast + sparse linear-Gaussian obs ⇒ ~linear-Gaussian
+  problem; the EnKF (minimal linear increment on a *stable* forecast) is near-optimal, while any
+  per-step *generative* filter re-samples the field with intrinsic process variance that accumulates.
+  Generative flexibility expected to pay only with **denser obs**, **larger forecast error (real
+  data, P6)**, or **multimodal posteriors**.
 
-**Strategic implication**: the generative *filter* is the wrong tool in this regime. To get the
-4-D/upwind propagation the OSSE wants, the low-risk move is the **EnKS** (linear ensemble smoother,
-already implemented `generate_trajectory_enks`) — it propagates obs info backward in time via
-cross-covariance with **no generative variance injection**. Test EnKS on orbit obs first; the
-generative SDA window-smoother (Phase-2) is the non-linear upgrade, but carries the same variance
-risk and needs forecast-anchoring to be viable. **Open decision** (see session): EnKS-first vs
-generative window-smoother vs ship EnKF-n40.
+**Strategic implication**: the per-step generative *filter* is intrinsically variance-limited here —
+confirmed, not cheaply fixable. The remaining route to a generative win is the **window/4-D
+approach** (joint constraint over K steps controls effective variance + adds upwind propagation):
+either the existing `generate_trajectory_window_dflow` (optimization-based, expensive — test as a
+proof-of-concept) or the single-pass SDA-style window smoother (Phase-2 build, adapts the same
+window/chain scaffolding, swaps Adam for one guidance grad/step). A low-risk linear alternative is the
+**EnKS** (already implemented, no variance injection). **Open decision** (session): test window-D-Flow
+PoC → SDA build, vs EnKS, vs ship EnKF-n40.
 
 **Key files (P3.5–3.7)**: `inference/samplers/{base,fmps,flowdps,sde,mcg,pcfm}.py`,
 `carbonbench/.../27_mip_style_osse/{diag_propagation.py, analyze_da_gain.py}`, eval runner `--sampler`.
