@@ -372,11 +372,35 @@ the 4-D approach **rescues the generative method to EnKF parity, better-calibrat
 - **Caveat**: w=8 collapses at the very last lead (last-window/boundary instability); w=4 is stable.
   And window-D-Flow uses an **expensive inner Adam loop** — motivating the single-pass SDA version.
 
-**Phase-2 build (next)**: single-pass **SDA-style window smoother** — same window/chain scaffolding
-as window-D-Flow, but swap the per-window Adam optimization for **one obs-guidance gradient per
-reverse-flow step** (DPS/SDA), so inference is ~1 generation pass instead of an optimization loop.
-Expected: window-D-Flow-level skill at filter-level cost. (Low-risk linear alternative still
-available: **EnKS**, already implemented.)
+### P3.8 — ROOT CAUSE of per-step generative failure: residual-vs-state forward operator
+
+Investigating the residual-FM internals revealed *why* the per-step samplers (FMPS/FlowDPS) fail —
+a concrete, fixable bug, **not** a fundamental limit:
+
+- The residual-FM generates a **residual** `r` (unit-variance); the state is `x = f_det(x_prev) +
+  σ_res·r`. But `prepare_masking_config` passes **no `f_det` prediction and no `σ_res`** to the
+  sampler's `XCO2ForwardModel`. So the per-step samplers condition the **residual `r` as if it were
+  the full state** — `H` is applied to `r`, comparing `g·r` to obs `g·x_state`.
+- Consequence: the obs guidance forces the *small* residual to absorb the **entire** observed
+  signal (most of which `f_det` already explains) → the residual is **over-inflated** → spread/err
+  0.50 and the rollout degradation. (Single-step obs-fit still improved because inflating `r` does
+  reduce the obs error — at the cost of huge variance that accumulates over the AR rollout.)
+- **Window-D-Flow works precisely because it applies `H` to the full state** (`x_next_phys` from the
+  AR chain), not the residual — which is why it reached EnKF parity while per-step lost.
+
+**The fix (next, well-scoped ~40 lines + unit test)**: make the conditioning **state-aware** —
+`XCO2ForwardModel` gains `det_pred_phys` + `residual_scale` so that, for the residual-FM, the
+"physical x" used in `forward`/`project`/likelihood-gradient is `x_phys = f_det + σ_res·r` (and the
+adjoint kernel is `h_ak·σ_res`), instead of the current `r·target_std+target_mean`. Inject
+`det_pred_phys`/`σ_res` into `prepare_masking_config` for `ResidualFlowMatching`. **Expected**: the
+same obs-fit achieved with a *much smaller* residual → low variance → **per-step FMPS/FlowDPS may
+become competitive (cheap win)**, and it is the correct foundation the SDA build needs (building SDA
+on the current residual-conditioned path would inherit this bug).
+
+**Phase-2 build (after the fix)**: single-pass **SDA-style window smoother** — same window/chain
+scaffolding as window-D-Flow, but swap the per-window Adam optimization for **one obs-guidance
+gradient per reverse-flow step** (DPS/SDA), on the *state-aware* forward operator. Expected:
+window-D-Flow-level skill at ~filter cost. (Low-risk linear alternative still available: **EnKS**.)
 
 **Key files (P3.5–3.7)**: `inference/samplers/{base,fmps,flowdps,sde,mcg,pcfm}.py`,
 `carbonbench/.../27_mip_style_osse/{diag_propagation.py, analyze_da_gain.py}`, eval runner `--sampler`.
