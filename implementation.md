@@ -396,36 +396,50 @@ obs and target share normalization so the std factors cancel in state mode). `Re
 injects `det_pred_phys`/`σ_res` into `masking_config`; all sampler callers
 (`base`/`ictm`/`fig`/`MaskedVelocityWrapper`) use `effective_kernel`. Full suite 154 green.
 
-**Result — the fix is confirmed (8 inits × 120 leads, orbit OSSE):**
+**Result — the fix is confirmed, and the full method comparison (8 inits × 120 leads, orbit OSSE):**
 
 | method | RMSE | spread | CRPS | SER | note |
 |---|---|---|---|---|---|
 | free (no DA) | 1.9537 | 0.489 | 0.8070 | 0.251 | baseline |
-| **EnKF** | 1.8823 | 0.489 | 0.7937 | 0.260 | best filter, −3.7 % RMSE |
-| **EnKS** lag24 | **1.8794** | 0.486 | 0.7974 | 0.259 | smoother ≈ filter (+0.002) |
-| FMPS — **fixed** | 1.9402 | 0.465 | 0.7949 | 0.240 | helpful (was harmful), CRPS ≈ EnKF |
+| EnKF | 1.8823 | 0.489 | 0.7937 | 0.260 | best linear filter |
+| EnKS lag24 | 1.8794 | 0.486 | 0.7974 | 0.259 | linear smoother ≈ filter |
+| **window-D-Flow w4** | **1.8766** | — | 0.7616 | 0.294 | **best RMSE** (generative 4-D smoother) |
+| **window-D-Flow w8** | 1.9117 | — | **0.7297** | 0.355 | **best CRPS** (−8 % vs EnKF) |
+| FMPS — fixed, σ=0.02 | 1.9158 | 0.459 | 0.7795 | 0.240 | best *single-pass*; CRPS < EnKF |
+| FMPS — fixed, σ=0.05 | 1.9402 | 0.465 | 0.7949 | 0.240 | helpful (was harmful) |
 | FMPS — **buggy** | 2.1179 | **1.088** | 1.0255 | **0.497** | residual over-inflated |
 | FlowDPS — fixed | 2.0572 | 0.993 | 0.9947 | 0.473 | over-disperses via fresh-noise renoise |
+| SDA-Langevin (stable) | 2.0349 | 0.452 | 0.8634 | 0.220 | stable but weak optimiser (< D-Flow) |
 
 The state-aware operator eliminates the residual over-inflation exactly as diagnosed: FMPS spread
-1.088→0.465, SER 0.497→0.240, RMSE 2.118→1.940 (from *worse than free* to *better than free*, CRPS
-0.795 ≈ EnKF). FlowDPS still over-disperses — not the operator but its **fresh-noise renoise** (variance
-re-injected every step); the cure is `fresh_noise=False`, not the kernel.
+1.088→0.465, SER 0.497→0.240, RMSE 2.118→1.916 (from *worse than free* to *better than free*). FlowDPS
+still over-disperses — not the operator but its **fresh-noise renoise** (`--no-fresh-noise` gave an
+identical curve, confirming the renoise per se isn't the driver; FlowDPS's project→renoise dynamics
+amplify member spread regardless). FMPS is the better per-step sampler; σ=0.02 is its sweet spot
+(σ=0.01 starts over-fitting, SER 0.240→0.291).
 
-**Two regime findings (the honest story):** (1) **a proper smoother adds ~nothing here** — EnKS lag24
-(1.8794) barely beats the EnKF filter (1.8823) because the identical-twin forecast is already
-near-perfect, so correcting past states with future obs has little value. (2) With the operator fixed,
-all methods cluster within ±3 % of free; **EnKF/EnKS remain best (−3.8 %)**. The "few-percent" gain is
-**real and fundamental** to this regime (identical-twin + ~2 % coverage + column-vs-3-D dilution), not
-an algorithm bug — the one genuine bug (per-step generative being *harmful*) is now removed.
+**The honest final story.** (1) On **RMSE** all DA methods cluster tightly (1.877–1.954): the
+"few-percent" gain is **real and fundamental** to this regime (identical-twin + ~2 % coverage +
+column-vs-3-D dilution), not an algorithm bug — the one genuine bug (per-step generative being
+*harmful*) is now removed. (2) On **CRPS (probabilistic skill) the generative methods clearly win**:
+window-D-Flow w8 0.730, w4 0.762, FMPS-σ0.02 0.780 all beat EnKF 0.794 and free 0.807 — the FM
+posterior is better-calibrated. (3) **Linear vs generative smoother**: the *linear* ensemble smoother
+(EnKS) ≈ filter (the near-perfect forecast leaves little for a linear past-state correction), but the
+*generative* 4-D smoother (window-D-Flow) edges out EnKF on RMSE (1.877) and clearly on CRPS — the
+nonlinear 4-D fit captures structure the linear update cannot. **Recommended product**: window-D-Flow
+(best RMSE + CRPS) when compute allows; **FMPS σ=0.02** as the cheap single-pass option (best-in-class
+CRPS, ~filter cost).
 
-**SDA build (DONE)**: `generate_trajectory_window_sda` — single-pass SDA-style smoother: a short
-annealed **Langevin** sweep in the FM latent `z` (prior score `−z`, since the FM latent is N(0,I)) with
-**DPS** likelihood guidance from all window obs, implemented as `inner_sampler="sda_langevin"` inside
-the tested window-D-Flow scaffolding (shared chain rollout + `_window_misfit` closure). No
-optimise-to-convergence loop; temperature (annealed to 0) injects noise for posterior/ensemble
-sampling. Wired as `--method window_sda` (+`--sda-*` knobs). Smoke + full runs green. Given EnKS≈EnKF,
-SDA is not expected to beat EnKF here either — it completes the generative-smoother story.
+**SDA build (DONE; negative-but-useful result)**: `generate_trajectory_window_sda` — single-pass
+SDA-style smoother: an annealed **Langevin** sweep in the FM latent `z` (prior score `−z`, FM latent is
+N(0,I)) with **DPS** window-obs guidance, as `inner_sampler="sda_langevin"` in the tested window-D-Flow
+scaffolding (shared chain rollout + `_window_misfit`). Aggressive settings (`temp=1, eps=0.2`) diverge
+over long rollouts (latent over-shrinks ~0.9⁸× + noise accumulates → RMSE 3.03); a conservative config
+(`temp=0, eps=0.05, 6 steps`) is stable but only reaches **RMSE 2.035** — a *weaker optimiser* than
+D-Flow's Adam at equal NFEs, so it does not beat the baselines here. Wired as `--method window_sda`
+(+`--sda-*` knobs). The takeaway: for this linear-Gaussian-likelihood window problem, **Adam (D-Flow)
+> crude Langevin**; SDA's advantage would show with a true trajectory score model (not a one-step FM)
+or a strongly nonlinear likelihood — a P4/real-data lever, not a win here.
 
 **Key files (P3.5–3.7)**: `inference/samplers/{base,fmps,flowdps,sde,mcg,pcfm}.py`,
 `carbonbench/.../27_mip_style_osse/{diag_propagation.py, analyze_da_gain.py}`, eval runner `--sampler`.
