@@ -1531,6 +1531,12 @@ def generate_trajectory_window_dflow(
     lr=1e-2,
     sigma_obs=0.1,
     reg_weight=0.0,
+    inner_sampler="dflow",
+    langevin_steps=8,
+    langevin_step_size=0.2,
+    langevin_prior_weight=1.0,
+    langevin_temperature=1.0,
+    guidance_scale=1.0,
     orbit_obs=None,
     obs_noise=0.0,
     ak_mode="real",
@@ -1542,7 +1548,20 @@ def generate_trajectory_window_dflow(
     use_checkpointing=True,
     verbose=False,
 ):
-    """Window D-Flow auto-regressive sampler (Phase 25h).
+    """Window auto-regressive smoother (Phase 25h / P3.8).
+
+    Two inner solvers over each window of ``window_size`` AR steps, both sharing
+    the same 4-D scaffolding (chain rollout ``residual_FM(z[w]) -> f_det`` with
+    obs from all W steps):
+
+    * ``inner_sampler="dflow"`` (default): D-Flow -- optimise the per-window noise
+      ``z`` with ``n_opt_steps`` Adam iterations to fit the window obs.
+    * ``inner_sampler="sda_langevin"``: single-pass SDA-style smoother -- a short
+      annealed Langevin sweep in the FM latent ``z`` (whose prior is exactly
+      N(0,I), so the prior score is ``-z``) with DPS likelihood guidance from the
+      window obs. No optimise-to-convergence loop; ``langevin_steps`` is small and
+      ``langevin_temperature`` injects noise for proper posterior (ensemble)
+      sampling, annealed to 0 on the last step.
 
     For each window of ``window_size`` AR steps, optimize a per-window noise
     tensor ``z[W,BATCH,N,C]`` to fit observations across all W steps jointly.
@@ -1929,34 +1948,59 @@ def generate_trajectory_window_dflow(
 
             chunk_init_state = current_co2[s_:e_]
 
-            if any_obs and n_opt_steps > 0:
+            def _window_misfit(z_cur):
+                """Sum of normalized obs misfits over the window for noise z_cur.
+                Rolls the chain residual_FM(z[w]) -> f_det with grad enabled."""
+                loss_total = z_cur.new_zeros(())
+                state = chunk_init_state
+                for w in range(W_eff):
+                    state = _checkpointed_step(chunk_step_batches[w], state, z_cur[w])
+                    if chunk_step_obs[w] is not None:
+                        fm_, ov_, om_, ow_, _tm, _ts = chunk_step_obs[w]
+                        x_grid = _state_to_grid_norm(state, _tm, _ts)
+                        xco2_pred = fm_.forward(x_grid)
+                        if ow_ is not None:
+                            resid = ow_ * (xco2_pred - ov_)
+                        else:
+                            resid = torch.where(om_.bool(), xco2_pred - ov_, torch.zeros_like(xco2_pred))
+                        loss_total = loss_total + resid.pow(2).sum() / (2.0 * sigma_obs**2 * chunk_B)
+                return loss_total
+
+            if any_obs and inner_sampler == "dflow" and n_opt_steps > 0:
                 inner.enable_det_grad = True
                 with torch.enable_grad():
                     for _ in range(n_opt_steps):
                         opt.zero_grad()
-                        loss_total = z_param.new_zeros(())
-                        state = chunk_init_state
-                        for w in range(W_eff):
-                            state = _checkpointed_step(chunk_step_batches[w], state, z_param[w])
-                            if chunk_step_obs[w] is not None:
-                                fm_, ov_, om_, ow_, _tm, _ts = chunk_step_obs[w]
-                                x_grid = _state_to_grid_norm(state, _tm, _ts)
-                                xco2_pred = fm_.forward(x_grid)
-                                if ow_ is not None:
-                                    resid = ow_ * (xco2_pred - ov_)
-                                else:
-                                    resid = torch.where(
-                                        om_.bool(),
-                                        xco2_pred - ov_,
-                                        torch.zeros_like(xco2_pred),
-                                    )
-                                loss_total = loss_total + resid.pow(2).sum() / (2.0 * sigma_obs**2 * chunk_B)
+                        loss_total = _window_misfit(z_param)
                         if reg_weight > 0:
                             loss_total = loss_total + reg_weight * z_param.pow(2).sum() / (
                                 chunk_B * z_param[0, 0].numel()
                             )
                         loss_total.backward()
                         opt.step()
+                inner.enable_det_grad = prev_det_grad
+            elif any_obs and inner_sampler == "sda_langevin" and langevin_steps > 0:
+                # Single-pass SDA-style smoother: annealed Langevin in the FM
+                # latent z. Prior score is -z (latent ~ N(0,I)); the DPS term is
+                # the gradient of the window obs misfit. Temperature anneals to 0
+                # so the last step sharpens onto the posterior mode.
+                inner.enable_det_grad = True
+                lgen = torch.Generator(device=device).manual_seed(seed + 7000 + 1000 * k0 + s_)
+                eps = langevin_step_size
+                z_cur = z_param.detach()
+                with torch.enable_grad():
+                    for it in range(langevin_steps):
+                        z_cur = z_cur.detach().requires_grad_(True)
+                        loss_total = _window_misfit(z_cur)
+                        grad = torch.autograd.grad(loss_total, z_cur)[0]
+                        temp = langevin_temperature * (1.0 - it / max(langevin_steps - 1, 1))
+                        noise = torch.randn(z_cur.shape, device=device, generator=lgen)
+                        z_cur = (
+                            z_cur
+                            - 0.5 * eps * (langevin_prior_weight * z_cur + guidance_scale * grad)
+                            + (eps**0.5) * temp * noise
+                        )
+                z_param = z_cur.detach()
                 inner.enable_det_grad = prev_det_grad
 
             # Final no-grad forward; record per-step states for this chunk.
@@ -2009,6 +2053,77 @@ def generate_trajectory_window_dflow(
         },
     )
     return ds
+
+
+def generate_trajectory_window_sda(
+    model,
+    data_loader,
+    *,
+    init_indices,
+    n_samples,
+    n_steps,
+    obs_kwargs,
+    free_kwargs=None,
+    obs_every=1,
+    obs_offset=0,
+    window_size=4,
+    window_stride=None,
+    sigma_obs=0.1,
+    langevin_steps=8,
+    langevin_step_size=0.2,
+    langevin_prior_weight=1.0,
+    langevin_temperature=1.0,
+    guidance_scale=1.0,
+    orbit_obs=None,
+    obs_noise=0.0,
+    ak_mode="real",
+    thin_fraction=1.0,
+    target_var="co2massmix",
+    chunk_size=None,
+    device="cuda",
+    seed=42,
+    use_checkpointing=True,
+    verbose=False,
+):
+    """Single-pass SDA-style window smoother (P3.8).
+
+    Thin wrapper over :func:`generate_trajectory_window_dflow` with
+    ``inner_sampler="sda_langevin"``: a short annealed Langevin sweep in the FM
+    latent ``z`` (prior score ``-z``) with DPS likelihood guidance from all obs
+    in the window. Unlike D-Flow there is no optimise-to-convergence loop; the
+    obs signal enters the generation directly and ``langevin_temperature``
+    injects (annealed) noise for proper posterior/ensemble sampling.
+    """
+    return generate_trajectory_window_dflow(
+        model,
+        data_loader,
+        init_indices=init_indices,
+        n_samples=n_samples,
+        n_steps=n_steps,
+        obs_kwargs=obs_kwargs,
+        free_kwargs=free_kwargs,
+        obs_every=obs_every,
+        obs_offset=obs_offset,
+        window_size=window_size,
+        window_stride=window_stride,
+        sigma_obs=sigma_obs,
+        inner_sampler="sda_langevin",
+        langevin_steps=langevin_steps,
+        langevin_step_size=langevin_step_size,
+        langevin_prior_weight=langevin_prior_weight,
+        langevin_temperature=langevin_temperature,
+        guidance_scale=guidance_scale,
+        orbit_obs=orbit_obs,
+        obs_noise=obs_noise,
+        ak_mode=ak_mode,
+        thin_fraction=thin_fraction,
+        target_var=target_var,
+        chunk_size=chunk_size,
+        device=device,
+        seed=seed,
+        use_checkpointing=use_checkpointing,
+        verbose=verbose,
+    )
 
 
 def _build_orbit_enkf_obs(
