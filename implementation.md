@@ -388,19 +388,44 @@ a concrete, fixable bug, **not** a fundamental limit:
 - **Window-D-Flow works precisely because it applies `H` to the full state** (`x_next_phys` from the
   AR chain), not the residual — which is why it reached EnKF parity while per-step lost.
 
-**The fix (next, well-scoped ~40 lines + unit test)**: make the conditioning **state-aware** —
-`XCO2ForwardModel` gains `det_pred_phys` + `residual_scale` so that, for the residual-FM, the
-"physical x" used in `forward`/`project`/likelihood-gradient is `x_phys = f_det + σ_res·r` (and the
-adjoint kernel is `h_ak·σ_res`), instead of the current `r·target_std+target_mean`. Inject
-`det_pred_phys`/`σ_res` into `prepare_masking_config` for `ResidualFlowMatching`. **Expected**: the
-same obs-fit achieved with a *much smaller* residual → low variance → **per-step FMPS/FlowDPS may
-become competitive (cheap win)**, and it is the correct foundation the SDA build needs (building SDA
-on the current residual-conditioned path would inherit this bug).
+**The fix (DONE — `XCO2ForwardModel` state-aware, ~60 lines + 4 unit tests)**: the operator gains
+`det_pred_phys` + `residual_scale`; for the residual-FM the "physical x" used in
+`forward`/`project`/`jacobian_transpose`/likelihood-gradient is `x_phys = det_pred + σ_res·r`, and the
+projection/guidance kernel folds in the chain-rule gain `h_ak·σ_res/target_std` (`effective_kernel`;
+obs and target share normalization so the std factors cancel in state mode). `ResidualFlowMatching`
+injects `det_pred_phys`/`σ_res` into `masking_config`; all sampler callers
+(`base`/`ictm`/`fig`/`MaskedVelocityWrapper`) use `effective_kernel`. Full suite 154 green.
 
-**Phase-2 build (after the fix)**: single-pass **SDA-style window smoother** — same window/chain
-scaffolding as window-D-Flow, but swap the per-window Adam optimization for **one obs-guidance
-gradient per reverse-flow step** (DPS/SDA), on the *state-aware* forward operator. Expected:
-window-D-Flow-level skill at ~filter cost. (Low-risk linear alternative still available: **EnKS**.)
+**Result — the fix is confirmed (8 inits × 120 leads, orbit OSSE):**
+
+| method | RMSE | spread | CRPS | SER | note |
+|---|---|---|---|---|---|
+| free (no DA) | 1.9537 | 0.489 | 0.8070 | 0.251 | baseline |
+| **EnKF** | 1.8823 | 0.489 | 0.7937 | 0.260 | best filter, −3.7 % RMSE |
+| **EnKS** lag24 | **1.8794** | 0.486 | 0.7974 | 0.259 | smoother ≈ filter (+0.002) |
+| FMPS — **fixed** | 1.9402 | 0.465 | 0.7949 | 0.240 | helpful (was harmful), CRPS ≈ EnKF |
+| FMPS — **buggy** | 2.1179 | **1.088** | 1.0255 | **0.497** | residual over-inflated |
+| FlowDPS — fixed | 2.0572 | 0.993 | 0.9947 | 0.473 | over-disperses via fresh-noise renoise |
+
+The state-aware operator eliminates the residual over-inflation exactly as diagnosed: FMPS spread
+1.088→0.465, SER 0.497→0.240, RMSE 2.118→1.940 (from *worse than free* to *better than free*, CRPS
+0.795 ≈ EnKF). FlowDPS still over-disperses — not the operator but its **fresh-noise renoise** (variance
+re-injected every step); the cure is `fresh_noise=False`, not the kernel.
+
+**Two regime findings (the honest story):** (1) **a proper smoother adds ~nothing here** — EnKS lag24
+(1.8794) barely beats the EnKF filter (1.8823) because the identical-twin forecast is already
+near-perfect, so correcting past states with future obs has little value. (2) With the operator fixed,
+all methods cluster within ±3 % of free; **EnKF/EnKS remain best (−3.8 %)**. The "few-percent" gain is
+**real and fundamental** to this regime (identical-twin + ~2 % coverage + column-vs-3-D dilution), not
+an algorithm bug — the one genuine bug (per-step generative being *harmful*) is now removed.
+
+**SDA build (DONE)**: `generate_trajectory_window_sda` — single-pass SDA-style smoother: a short
+annealed **Langevin** sweep in the FM latent `z` (prior score `−z`, since the FM latent is N(0,I)) with
+**DPS** likelihood guidance from all window obs, implemented as `inner_sampler="sda_langevin"` inside
+the tested window-D-Flow scaffolding (shared chain rollout + `_window_misfit` closure). No
+optimise-to-convergence loop; temperature (annealed to 0) injects noise for posterior/ensemble
+sampling. Wired as `--method window_sda` (+`--sda-*` knobs). Smoke + full runs green. Given EnKS≈EnKF,
+SDA is not expected to beat EnKF here either — it completes the generative-smoother story.
 
 **Key files (P3.5–3.7)**: `inference/samplers/{base,fmps,flowdps,sde,mcg,pcfm}.py`,
 `carbonbench/.../27_mip_style_osse/{diag_propagation.py, analyze_da_gain.py}`, eval runner `--sampler`.
