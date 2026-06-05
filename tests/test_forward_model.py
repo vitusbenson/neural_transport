@@ -818,3 +818,84 @@ class TestOperatorDiscrepancyRealSoundings:
         bias = float(np.mean(d))
         print(f"\n[P1] down-agg vs interp: bias={bias:.3f} ppm  RMSE={rmse:.3f} ppm  max|d|={np.abs(d).max():.3f} ppm")
         assert rmse > 0.5, f"Expected a decision-relevant discrepancy; got RMSE={rmse:.3f} ppm"
+
+
+# ---------------------------------------------------------------------------
+# P3.8: state-aware residual operator
+# ---------------------------------------------------------------------------
+class TestResidualStateAwareOperator:
+    """For a residual-FM the sampler variable is the residual r and the physical
+    state is x_phys = det_pred + sigma_res * r. The forward model must apply H,
+    the projection, and the likelihood kernel to the *state*, not the residual.
+    """
+
+    def _make(self, B=2, C=5, Nlat=4, Nlon=4, seed=0):
+        torch.manual_seed(seed)
+        target_std = 6.0
+        # Effective model-grid kernel g (passed as ak with pressure_weights=ones),
+        # mimicking the orbit MIP setup.
+        g = (0.1 + 0.8 * torch.rand(1, C, 1, 1)).expand(B, C, Nlat, Nlon).clone()
+        pw = torch.ones(B, C, Nlat, Nlon)
+        sigma_res = 0.2 + 0.6 * torch.rand(1, C, 1, 1)  # physical ppm per level
+        det_pred = 400.0 + 3.0 * torch.randn(B, C, Nlat, Nlon)
+        r_true = torch.randn(B, C, Nlat, Nlon)
+        x_phys_true = det_pred + sigma_res * r_true
+        obs_mean = torch.full((B, 1, 1, 1), 400.0)
+        obs_std = torch.full((B, 1, 1, 1), target_std)
+        # obs = normalized column of the true state
+        xco2_true = (g * x_phys_true).sum(1, keepdim=True)
+        obs_values = (xco2_true - obs_mean) / obs_std
+        mc = {
+            "obs_mask": torch.ones(B, 1, Nlat, Nlon, dtype=torch.bool),
+            "obs_values": obs_values,
+            "obs_mean": obs_mean,
+            "obs_std": obs_std,
+            "target_mean": torch.full((B, 1, 1, 1), 400.0),
+            "target_std": torch.full((B, 1, 1, 1), target_std),
+            "ak": g,
+            "pressure_weights": pw,
+            "xco2_prior": torch.zeros(B, 1, Nlat, Nlon),
+            "co2_profile_prior": torch.zeros(B, C, Nlat, Nlon),
+            "det_pred_phys": det_pred,
+            "residual_scale": sigma_res,
+        }
+        return mc, r_true, x_phys_true, obs_values, g, sigma_res, target_std
+
+    def test_forward_maps_residual_to_state_column(self):
+        mc, r_true, x_phys_true, obs, g, _, _ = self._make()
+        fm = XCO2ForwardModel.from_masking_config(mc)
+        y = fm.forward(r_true)  # forward(residual) should reproduce the obs
+        assert torch.allclose(y, obs, atol=1e-4), (y - obs).abs().max().item()
+
+    def test_effective_kernel_folds_sigma_over_std(self):
+        mc, r_true, *_, g, sigma_res, ts = self._make()
+        fm = XCO2ForwardModel.from_masking_config(mc)
+        k = fm.effective_kernel(r_true)
+        expected = g * (sigma_res / ts)
+        assert torch.allclose(k, expected, atol=1e-6)
+
+    def test_project_recovers_residual_in_one_step(self):
+        # Column projection is a per-cell pseudoinverse; from r0=0 (x=det_pred) a
+        # single project with tiny sigma should drive the column to the obs.
+        mc, r_true, x_phys_true, obs, g, _, _ = self._make()
+        fm = XCO2ForwardModel.from_masking_config(mc)
+        r0 = torch.zeros_like(r_true)
+        before = (fm.forward(r0) - obs).abs().mean()
+        r_proj = fm.project(r0, obs, mc["obs_mask"], sigma=1e-3)
+        after = (fm.forward(r_proj) - obs).abs().mean()
+        assert after < 0.05 * before, f"before={before:.4f} after={after:.4f}"
+
+    def test_state_mode_unchanged_when_no_residual_scale(self):
+        # Without residual_scale, behaviour must be identical to the legacy path.
+        mc, r_true, *_ = self._make()
+        mc_state = dict(mc)
+        mc_state.pop("det_pred_phys")
+        mc_state.pop("residual_scale")
+        fm = XCO2ForwardModel.from_masking_config(mc_state)
+        x = torch.randn_like(r_true)
+        # legacy x_phys = x*target_std + target_mean
+        x_phys = x * mc["target_std"] + mc["target_mean"]
+        xco2 = (mc["ak"] * x_phys).sum(1, keepdim=True)
+        expected = (xco2 - mc["obs_mean"]) / mc["obs_std"]
+        assert torch.allclose(fm.forward(x), expected, atol=1e-4)
+        assert torch.allclose(fm.effective_kernel(x), mc["ak"], atol=1e-6)

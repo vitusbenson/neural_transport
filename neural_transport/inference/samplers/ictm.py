@@ -99,7 +99,7 @@ class ICTMSampler(PosteriorSampler):
         """
         r_t = self.r(t)
         fm = self.forward_model
-        h_ak = fm._get_h_ak_for_x(x_hat)
+        h_ak = fm.effective_kernel(x_hat)
 
         x = x_hat.clone()
 

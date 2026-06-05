@@ -68,7 +68,7 @@ class FIGSampler(PosteriorSampler):
         Note: FIG uses H(x) - y_t (positive error sign), so cannot use project() directly.
         """
         fm = self.forward_model
-        h_ak = fm._get_h_ak_for_x(x)
+        h_ak = fm.effective_kernel(x)
 
         # Forward model: H(x)
         xco2_x = fm.forward(x)  # [B, 1, Nlat, Nlon]

@@ -209,11 +209,16 @@ class ResidualFlowMatching(FlowMatching):
         if "obs_mask" in batch and "obs_values" in batch:
             obs_var = self.generate_kwargs.get("obs_var", "co2massmix")
             masking_config = self.prepare_masking_config(batch, B, C, obs_var)
-            if hasattr(self.submodel, "targshift") and self.submodel.targshift:
-                target_var_ = self.target_vars[0]
-                batch_norm = (batch[target_var_] - batch[f"{target_var_}_offset"]) / batch[f"{target_var_}_scale"]
-                targshift_mean = batch_norm.mean(dim=(1, 2), keepdim=True)
-                masking_config["targshift_mean"] = targshift_mean.unsqueeze(-1)
+            # State-aware conditioning (P3.8): the sampler variable is the residual
+            # r, and the physical state is x_phys = det_pred + sigma_res * r. Hand
+            # the forward model det_pred_phys (on the grid) and sigma_res so that
+            # H, the projection, and the likelihood gradient act on the *state*,
+            # not on the residual. Without this the obs guidance forces the tiny
+            # residual to absorb the full observed signal and over-inflates it.
+            det_phys_grid = det_pred_phys.reshape(B, self.nlat, self.nlon, C).permute(0, 3, 1, 2)
+            masking_config["det_pred_phys"] = det_phys_grid
+            masking_config["residual_scale"] = self._sigma_res_for_grid(det_phys_grid)
+            # Residual lives in its own unit-variance space: no targshift here.
         else:
             masking_config = {}
 

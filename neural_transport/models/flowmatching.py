@@ -201,7 +201,7 @@ class MaskedVelocityWrapper(VelocityWrapper):
         v = super().forward(x, t)
 
         if self.ak is not None:
-            h_ak = self.forward_model._get_h_ak_for_x(x)
+            h_ak = self.forward_model.effective_kernel(x)
             xco2 = self.forward_model.forward(x)
             if self.obs_weight is not None:
                 column_error = self.obs_weight * (xco2 - self.obs_values.detach())

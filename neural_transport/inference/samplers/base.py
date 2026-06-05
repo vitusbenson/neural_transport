@@ -145,7 +145,7 @@ class PosteriorSampler(BaseSampler):
             Gradient [B, C, Nlat, Nlon] pointing away from observations.
         """
         fm = self.forward_model
-        h_ak = fm._get_h_ak_for_x(x_hat)
+        h_ak = fm.effective_kernel(x_hat)
         xco2_hat = fm.forward(x_hat)
 
         if self.obs_weight is not None:

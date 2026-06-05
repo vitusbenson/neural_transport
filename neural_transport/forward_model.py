@@ -168,6 +168,8 @@ class XCO2ForwardModel:
         targshift_mean: Tensor | None = None,
         nlev: int | None = None,
         column_offset: Tensor | None = None,
+        det_pred_phys: Tensor | None = None,
+        residual_scale: Tensor | None = None,
     ) -> None:
         self.pressure_weights = pressure_weights
         self.ak = ak
@@ -183,6 +185,16 @@ class XCO2ForwardModel:
         # H(x_phys) = column_offset + sum_l (h_ak_eff_l * x_phys_l), where
         # h_ak_eff already encodes W^T(h*a) on the model grid. Shape [B,1,Nlat,Nlon].
         self.column_offset = column_offset
+        # State-aware residual mode (P3.8): for a residual-FM the sampler variable
+        # ``r`` is the *residual*, and the physical state is
+        # ``x_phys = det_pred_phys + residual_scale * r`` (residual_scale = sigma_res,
+        # physical ppm per level). When ``residual_scale`` is set, ``forward`` maps
+        # ``r -> x_phys`` this way (instead of ``r*target_std+target_mean``), and the
+        # projection/likelihood kernel becomes ``h_ak * residual_scale/target_std``
+        # (the chain-rule gain dy_norm/dr). Shapes: det_pred_phys [B,C,Nlat,Nlon],
+        # residual_scale [1,C,1,1] (broadcastable).
+        self.det_pred_phys = det_pred_phys
+        self.residual_scale = residual_scale
 
         # Eagerly compute h_ak if possible
         self._h_ak = self._compute_h_ak()
@@ -230,6 +242,35 @@ class XCO2ForwardModel:
         else:
             return torch.full((1, nlev, 1, 1), 1.0 / nlev, device=x.device, dtype=x.dtype)
 
+    def _to_phys(self, x: Tensor) -> Tensor:
+        """Map the sampler variable ``x`` to a physical CO2 field [B,C,Nlat,Nlon].
+
+        Residual mode (``residual_scale`` set): ``x`` is the residual ``r`` and
+        ``x_phys = det_pred_phys + residual_scale * r`` (no targshift/std applied --
+        the residual lives in its own unit-variance space). State mode: the usual
+        ``x_phys = (x + targshift_mean) * target_std + target_mean``.
+        """
+        if self.residual_scale is not None:
+            dp = self.det_pred_phys if self.det_pred_phys is not None else 0.0
+            return dp + self.residual_scale * x
+        x_corrected = x + self.targshift_mean if self.targshift_mean is not None else x
+        ts = self.target_std if self.target_std is not None else 1.0
+        tm = self.target_mean if self.target_mean is not None else 0.0
+        return x_corrected * ts + tm
+
+    def effective_kernel(self, x: Tensor) -> Tensor:
+        """Kernel for projection / likelihood-gradient: dy_norm/d(sampler var).
+
+        State mode: ``h_ak`` (since obs and target share normalization, the
+        target_std/obs_std factors cancel). Residual mode: ``h_ak * residual_scale
+        / target_std`` -- the chain-rule gain through ``x_phys = det + sigma_res*r``.
+        """
+        h_ak = self._get_h_ak_for_x(x)
+        if self.residual_scale is not None:
+            ts = self.target_std if self.target_std is not None else 1.0
+            return h_ak * (self.residual_scale / ts)
+        return h_ak
+
     def forward(self, x: Tensor) -> Tensor:
         """H(x): [B,C,Nlat,Nlon] -> [B,1,Nlat,Nlon].
 
@@ -246,18 +287,14 @@ class XCO2ForwardModel:
             # Affine "interpolate-then-apply" operator (P1). h_ak already holds
             # the model-grid effective kernel W^T(h*a); column_offset holds
             # xco2_prior - sum(h*a*x_apriori). Linear & differentiable in x.
-            x_corrected = x + self.targshift_mean if self.targshift_mean is not None else x
-            ts = self.target_std if self.target_std is not None else 1.0
-            tm = self.target_mean if self.target_mean is not None else 0.0
-            x_phys = x_corrected * ts + tm
+            x_phys = self._to_phys(x)
             h_ak = self._get_h_ak_for_x(x)
             xco2 = self.column_offset + (h_ak * x_phys).sum(dim=1, keepdim=True)
             om = self.obs_mean if self.obs_mean is not None else 0.0
             os_ = self.obs_std if self.obs_std is not None else 1.0
             return (xco2 - om) / os_
         elif self.has_priors:
-            x_corrected = x + self.targshift_mean if self.targshift_mean is not None else x
-            x_phys = x_corrected * self.target_std + self.target_mean
+            x_phys = self._to_phys(x)
             xco2 = self.xco2_prior + (h * self.ak * (x_phys - self.co2_profile_prior)).sum(dim=1, keepdim=True)
             return (xco2 - self.obs_mean) / self.obs_std
         else:
@@ -306,8 +343,14 @@ class XCO2ForwardModel:
         """J^T * error: [B,1,Nlat,Nlon] -> [B,C,Nlat,Nlon].
 
         For H(x) = sum_k h_k a_k x_k, the Jacobian transpose is h_k * a_k * error.
+        In residual mode the gain folds in residual_scale/target_std (see
+        ``effective_kernel``).
         """
-        return self.h_ak * col_error
+        h_ak = self.h_ak
+        if self.residual_scale is not None:
+            ts = self.target_std if self.target_std is not None else 1.0
+            h_ak = h_ak * (self.residual_scale / ts)
+        return h_ak * col_error
 
     def project(
         self,
@@ -343,7 +386,7 @@ class XCO2ForwardModel:
         """
         from neural_transport.tools.spatial import gaussian_smooth_2d as _gaussian_smooth_2d
 
-        h_ak = self._get_h_ak_for_x(x_hat)
+        h_ak = self.effective_kernel(x_hat)
 
         # Forward model: H(x_hat)
         xco2_hat = self.forward(x_hat)  # [B, 1, Nlat, Nlon]
@@ -381,6 +424,8 @@ class XCO2ForwardModel:
         target_mean: Tensor | None = None,
         target_std: Tensor | None = None,
         targshift_mean: Tensor | None = None,
+        det_pred_phys: Tensor | None = None,
+        residual_scale: Tensor | None = None,
         log_pressure: bool = True,
     ) -> XCO2ForwardModel:
         """MIP-correct "interpolate-then-apply" operator (P1).
@@ -422,6 +467,8 @@ class XCO2ForwardModel:
             target_std=target_std,
             targshift_mean=targshift_mean,
             column_offset=column_offset,
+            det_pred_phys=det_pred_phys,
+            residual_scale=residual_scale,
         )
 
     @classmethod
@@ -461,6 +508,8 @@ class XCO2ForwardModel:
                 target_mean=masking_config.get("target_mean", None),
                 target_std=masking_config.get("target_std", None),
                 targshift_mean=masking_config.get("targshift_mean", None),
+                det_pred_phys=masking_config.get("det_pred_phys", None),
+                residual_scale=masking_config.get("residual_scale", None),
                 log_pressure=masking_config.get("log_pressure", True),
             )
         return cls(
@@ -473,4 +522,6 @@ class XCO2ForwardModel:
             target_mean=masking_config.get("target_mean", None),
             target_std=masking_config.get("target_std", None),
             targshift_mean=masking_config.get("targshift_mean", None),
+            det_pred_phys=masking_config.get("det_pred_phys", None),
+            residual_scale=masking_config.get("residual_scale", None),
         )

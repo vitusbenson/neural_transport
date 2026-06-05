@@ -2508,6 +2508,10 @@ def generate_trajectory_enks(
     loc_min_presence=0.05,
     lag=24,
     damping=1.0,
+    orbit_obs=None,
+    obs_noise=0.0,
+    ak_mode="real",
+    thin_fraction=1.0,
     target_var="co2massmix",
     device="cuda",
     seed=42,
@@ -2659,26 +2663,54 @@ def generate_trajectory_enks(
                 pg = m_pre + prior_inflation * (pg - m_pre)
                 pred_co2 = pg.view(*pred_co2.shape)
 
-            gt_next = [data_loader.get_batch(init_indices[i] + k + 1, device=device) for i in range(n_inits)]
-            gt_stacked = torch.cat(
-                [b[target_var].expand(n_samples, *b[target_var].shape[1:]) for b in gt_next],
-                dim=0,
-            )
-            obs_batch = {kk: vv for kk, vv in batch.items()}
-            obs_batch[target_var] = gt_stacked
-            om, ov = create_column_mask(
-                obs_batch,
-                target_var=target_var,
-                obs_fraction=obs_fraction,
-                mask_pattern=mask_pattern,
-                nlat=nlat,
-                nlon=nlon,
-                ak_10=ak_10,
-                soft_boundary_sigma=soft_boundary_sigma,
-            )
-            hak = (obs_batch["pressure_weight"] * obs_batch["xco2_averaging_kernel"]).squeeze(1)  # [BATCH,N,C]
-            mask_full = om.squeeze(-1).squeeze(1)  # [BATCH, N]
-            y_full = ov.squeeze(-1).squeeze(1)  # [BATCH, N]
+            if orbit_obs is not None:
+                # MIP-realistic obs: real OCO-2 orbit + 20-level AKs from truth
+                # via the corrected (P1) effective model-grid kernel g (mirrors
+                # the EnKF orbit branch). The smoother below consumes exactly the
+                # same (mask_full, y_full, hak) interface.
+                gt_next = [data_loader.get_batch(init_indices[i] + k + 1, device=device) for i in range(n_inits)]
+                gt_grid = torch.cat([b[target_var] for b in gt_next], dim=0).view(n_inits, N, C)
+                pb = torch.cat([b["p_bottom"] for b in gt_next], dim=0).view(n_inits, N, C)
+                pt = torch.cat([b["p_top"] for b in gt_next], dim=0).view(n_inits, N, C)
+                obs_ts = [times_axis[init_indices[i] + k + 1] for i in range(n_inits)]
+                m_grid, y_grid_i, g_grid_i = _build_orbit_enkf_obs(
+                    orbit_obs,
+                    obs_ts,
+                    gt_grid,
+                    pb,
+                    pt,
+                    nlat,
+                    nlon,
+                    ak_mode=ak_mode,
+                    thin_fraction=thin_fraction,
+                    obs_noise=obs_noise,
+                    rng=enkf_rng,
+                    device=device,
+                )
+                mask_full = m_grid.repeat_interleave(n_samples, dim=0)  # [BATCH, N]
+                y_full = y_grid_i.repeat_interleave(n_samples, dim=0)  # [BATCH, N]
+                hak = g_grid_i.repeat_interleave(n_samples, dim=0)  # [BATCH, N, C]
+            else:
+                gt_next = [data_loader.get_batch(init_indices[i] + k + 1, device=device) for i in range(n_inits)]
+                gt_stacked = torch.cat(
+                    [b[target_var].expand(n_samples, *b[target_var].shape[1:]) for b in gt_next],
+                    dim=0,
+                )
+                obs_batch = {kk: vv for kk, vv in batch.items()}
+                obs_batch[target_var] = gt_stacked
+                om, ov = create_column_mask(
+                    obs_batch,
+                    target_var=target_var,
+                    obs_fraction=obs_fraction,
+                    mask_pattern=mask_pattern,
+                    nlat=nlat,
+                    nlon=nlon,
+                    ak_10=ak_10,
+                    soft_boundary_sigma=soft_boundary_sigma,
+                )
+                hak = (obs_batch["pressure_weight"] * obs_batch["xco2_averaging_kernel"]).squeeze(1)  # [BATCH,N,C]
+                mask_full = om.squeeze(-1).squeeze(1)  # [BATCH, N]
+                y_full = ov.squeeze(-1).squeeze(1)  # [BATCH, N]
 
             x_grid = pred_co2.view(n_inits, n_samples, N, C)
 
