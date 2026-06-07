@@ -2134,6 +2134,150 @@ def generate_trajectory_window_sda(
     )
 
 
+def generate_trajectory_amortized(
+    model,
+    data_loader,
+    *,
+    init_indices,
+    n_samples,
+    n_steps,
+    obs_every=1,
+    obs_offset=0,
+    orbit_obs=None,
+    dense_obs=False,
+    obs_noise=0.0,
+    noise_scale=1.0,
+    init_perturb=None,
+    target_var="co2massmix",
+    device="cuda",
+    seed=42,
+    chunk_size=None,
+    verbose=False,
+):
+    """AR rollout for the amortized conditional FM (P3.8).
+
+    At each obs step, synthesise the *nominal column* observation of the truth
+    (the same operator the amortized model was trained with — ``column_weights``,
+    uniform AK) at the observed cells (real OCO-2 orbit mask, or every cell when
+    ``dense_obs``), set ``batch["obs_mask"]/["obs_values"]``, and let the model
+    condition on them in a single generation pass (no sampler / guidance).
+    """
+    import numpy as _np
+
+    torch.manual_seed(seed)
+    if device.startswith("cuda"):
+        torch.cuda.manual_seed_all(seed)
+    model.eval()
+    model.to(device)
+    inner = getattr(model, "model", model)
+    prev_generating = getattr(inner, "generating", False)
+    inner.generating = True
+    inner.generate_kwargs = {"n_samples": n_samples, "masking": False, "noise_scale": noise_scale}
+
+    dataset = data_loader.dataset
+    n_inits = len(init_indices)
+    times_axis = dataset.ds.time.values
+    T_total = len(data_loader)
+    nlat, nlon = data_loader.grid_info.nlat, data_loader.grid_info.nlon
+    sample0 = dataset[init_indices[0]][target_var]
+    N, C = (sample0.shape[-2], sample0.shape[-1]) if sample0.ndim >= 2 else (sample0.shape[0], sample0.shape[1])
+    N = nlat * nlon
+    BATCH = n_inits * n_samples
+    if chunk_size is None or chunk_size >= BATCH:
+        chunk_size = BATCH
+
+    hl = inner.column_weights.to(device)  # [C] nominal column weights
+    obs_rng = torch.Generator(device=device).manual_seed(seed + 2)
+
+    init_batches = [data_loader.get_batch(i, device=device) for i in init_indices]
+    co2_shape = init_batches[0][target_var].shape[1:]
+    current_co2 = torch.empty(BATCH, *co2_shape, device=device, dtype=init_batches[0][target_var].dtype)
+    for i, ib in enumerate(init_batches):
+        current_co2[i * n_samples : (i + 1) * n_samples] = ib[target_var]
+    if init_perturb:
+        current_co2 = _apply_init_perturb(
+            current_co2, init_perturb, generator=torch.Generator(device=device).manual_seed(seed + 5)
+        )
+
+    obs_present = _np.zeros(n_steps, dtype=bool)
+    for k in range(n_steps):
+        obs_present[k] = ((k - obs_offset) >= 0) and ((k - obs_offset) % obs_every == 0)
+
+    all_preds = _np.full((n_inits, n_samples, n_steps, nlat, nlon, C), _np.nan, dtype=_np.float32)
+    time_coord = _np.empty((n_inits, n_steps), dtype=times_axis.dtype)
+
+    iters = tqdm(range(n_steps), desc="Amortized rollout", total=n_steps) if verbose else range(n_steps)
+    for k in iters:
+        batches_per_init = []
+        for i_pos, init_idx in enumerate(init_indices):
+            idx = init_idx + k
+            if idx + 1 >= T_total:
+                batches_per_init.append(None)
+                continue
+            batches_per_init.append(data_loader.get_batch(idx, device=device))
+            time_coord[i_pos, k] = times_axis[idx + 1]
+        if any(b is None for b in batches_per_init):
+            break
+        batch = {}
+        for key, v in batches_per_init[0].items():
+            if isinstance(v, torch.Tensor):
+                batch[key] = torch.cat(
+                    [bb[key].expand(n_samples, *bb[key].shape[1:]) for bb in batches_per_init], dim=0
+                )
+            else:
+                batch[key] = v
+        batch[target_var] = current_co2
+        if f"{target_var}_next" in batch:
+            batch[f"{target_var}_next"] = current_co2.clone()
+
+        # Strip any stale obs keys (so non-obs steps generate unconditionally).
+        for key in ("obs_mask", "obs_values"):
+            batch.pop(key, None)
+
+        if obs_present[k]:
+            gt_next = [data_loader.get_batch(init_indices[i] + k + 1, device=device) for i in range(n_inits)]
+            gt_grid = torch.cat([b[target_var] for b in gt_next], dim=0).view(n_inits, N, C)
+            y_full = (gt_grid * hl).sum(-1)  # [n_inits, N] nominal column of truth
+            if obs_noise > 0:
+                y_full = y_full + obs_noise * torch.randn(y_full.shape, device=device, generator=obs_rng)
+            if dense_obs:
+                m_full = torch.ones(n_inits, N, dtype=torch.bool, device=device)
+            else:
+                m_full = torch.zeros(n_inits, N, dtype=torch.bool, device=device)
+                obs_ts = [times_axis[init_indices[i] + k + 1] for i in range(n_inits)]
+                for i in range(n_inits):
+                    rec = orbit_obs.get(obs_ts[i]) if orbit_obs is not None else None
+                    if rec is not None and rec["n_obs"] > 0:
+                        m_full[i] = torch.as_tensor(rec["mask"], device=device).reshape(-1)
+            om = m_full.repeat_interleave(n_samples, 0).view(BATCH, 1, N, 1)
+            ov = y_full.repeat_interleave(n_samples, 0).view(BATCH, 1, N, 1)
+            ov = inner.normalize_observations(ov, batch, target_var=target_var, targshift=False)
+            batch["obs_mask"] = om
+            batch["obs_values"] = torch.nan_to_num(ov, nan=0.0)
+
+        preds = _model_call_chunked(model, batch, chunk_size, BATCH, no_grad=True)
+        current_co2 = preds[target_var].detach()
+        all_preds[:, :, k] = current_co2.cpu().numpy().reshape(n_inits, n_samples, nlat, nlon, C)
+
+    inner.generating = prev_generating
+    lat_vals, lon_vals, levels = data_loader.grid_info.lat, data_loader.grid_info.lon, data_loader.grid_info.levels
+    return xr.Dataset(
+        {
+            target_var: (("init", "sample", "lead", "lat", "lon", "level"), all_preds),
+            "obs_present": (("lead",), obs_present),
+        },
+        coords={
+            "init": _np.array(init_indices),
+            "sample": _np.arange(n_samples),
+            "lead": _np.arange(n_steps),
+            "lat": lat_vals,
+            "lon": lon_vals,
+            "level": levels,
+            "time": (("init", "lead"), time_coord),
+        },
+    )
+
+
 def _build_orbit_enkf_obs(
     orbit_obs,
     obs_timestamps,
