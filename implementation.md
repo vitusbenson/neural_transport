@@ -520,8 +520,30 @@ floor) and on **real data** (model error).
 - orbit (2 %): RMSE **1.971** ≈ free 1.954 (no help — as P3.9 predicts, no headroom at 2 %).
 - dense (100 %): RMSE **2.327** — *worse* than free, and far above dense-EnKF (1.756). The model was
   trained only up to 30 % coverage, so 100 % dense obs is **out-of-distribution** → it misreads the
-  obs-value/mask channels. Confirms: the dense de-aliasing test needs a model trained for dense
-  coverage. **Retraining with 0–100 % coverage** to give the de-aliasing hypothesis a fair test.
+  obs-value/mask channels.
+
+**Second result (retrained 0–100 % coverage, val 0.797).** Dense is now in-distribution. 8×120:
+- orbit (2 %): RMSE **1.9525** ≈ free 1.954 (no help — no headroom at 2 %, as P3.9 predicts).
+- dense (100 %): RMSE **1.9632** — barely better than free and **clearly loses to dense-EnKF
+  (1.756)**.
+
+**Verdict — generative de-aliasing (as built) does NOT beat the linear EnKF.** The amortized model is
+≈free at *both* coverages: it **under-uses the observations**. EnKF's explicit Kalman update extracts
+far more from the same dense column obs (1.756 vs 1.963). Likely cause: 2 concatenated obs channels are
+a weak conditioning signal next to the rich dynamics conditioning (f_det + forcings), and the
+flow-matching velocity loss only weakly rewards obs-fit (the column under-determines the full residual),
+so the network largely learns to ignore the obs (FM val barely moved, 0.805→0.797). Making amortized
+conditioning competitive would need a **stronger obs pathway** (cross-attention to observations; an
+explicit obs-fit auxiliary loss; or a hybrid that keeps the FM prior but applies an explicit
+EnKF/PGDM update) — a P5/real-data direction, not a win in this OSSE.
+
+**Net P3.8–3.10 conclusion for "use the obs to get a really good constraint":** at OCO-2 sparse
+coverage the result is a **physics ceiling** (oracle 1.854; EnKF 1.882 nearly optimal) — no inference
+trick helps. The real levers are **more observations** (coverage) and **forecast error** (real-data /
+model-error regime where DA gains jump to −18.5 %). Among methods, **EnKF/EnKS** give the best RMSE,
+**window-D-Flow** (generative 4-D smoother) gives the best CRPS (−8 % vs EnKF), and **naive amortized
+conditioning under-uses obs**. Recommended product: window-D-Flow (best RMSE+CRPS) or FMPS σ=0.02
+(cheap, best-in-class CRPS).
 
 ---
 
