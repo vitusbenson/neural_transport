@@ -2251,8 +2251,8 @@ def generate_trajectory_amortized(
                         m_full[i] = torch.as_tensor(rec["mask"], device=device).reshape(-1)
             om = m_full.repeat_interleave(n_samples, 0).view(BATCH, 1, N, 1)
             ov = y_full.repeat_interleave(n_samples, 0).view(BATCH, 1, N, 1)
+            batch["obs_mask"] = om  # normalize_observations reads batch["obs_mask"]
             ov = inner.normalize_observations(ov, batch, target_var=target_var, targshift=False)
-            batch["obs_mask"] = om
             batch["obs_values"] = torch.nan_to_num(ov, nan=0.0)
 
         preds = _model_call_chunked(model, batch, chunk_size, BATCH, no_grad=True)

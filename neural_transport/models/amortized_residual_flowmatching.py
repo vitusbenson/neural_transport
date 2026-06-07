@@ -78,10 +78,11 @@ class AmortizedResidualFlowMatching(ResidualFlowMatching):
 
     def _infer_obs_channels(self, batch, B):
         """Build obs channels from batch obs_mask / obs_values (normalised)."""
+        dev = self.column_weights.device
         if "obs_mask" not in batch or "obs_values" not in batch:
-            return torch.zeros(B, self.n_obs_channels, self.nlat, self.nlon, device=self.device)
-        m = batch["obs_mask"].reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2).to(self.device)
-        y = batch["obs_values"].reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2).to(self.device)
+            return torch.zeros(B, self.n_obs_channels, self.nlat, self.nlon, device=dev)
+        m = batch["obs_mask"].reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2).to(dev)
+        y = batch["obs_values"].reshape(B, self.nlat, self.nlon, 1).permute(0, 3, 1, 2).to(dev)
         y = torch.nan_to_num(y, nan=0.0)
         return self._obs_channels_from_grid(y.float(), m.float())
 
