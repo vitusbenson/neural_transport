@@ -514,7 +514,14 @@ operator.
 
 **Expectation set by P3.9:** the amortized model will *not* beat EnKF at 2 % coverage (nothing can —
 oracle ceiling 1.854); its value is in the **dense regime** (vertical de-aliasing toward the 0.706
-floor) and on **real data** (model error). Eval pending the fine-tune.
+floor) and on **real data** (model error).
+
+**First result (fine-tune, random masks 0–30 % coverage, val 0.793 < base 0.805).** 8×120:
+- orbit (2 %): RMSE **1.971** ≈ free 1.954 (no help — as P3.9 predicts, no headroom at 2 %).
+- dense (100 %): RMSE **2.327** — *worse* than free, and far above dense-EnKF (1.756). The model was
+  trained only up to 30 % coverage, so 100 % dense obs is **out-of-distribution** → it misreads the
+  obs-value/mask channels. Confirms: the dense de-aliasing test needs a model trained for dense
+  coverage. **Retraining with 0–100 % coverage** to give the de-aliasing hypothesis a fair test.
 
 ---
 
