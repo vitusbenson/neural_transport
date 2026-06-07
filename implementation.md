@@ -464,6 +464,58 @@ under realistic sampling quantified ✅; synthetic→idealised gap measured ✅.
 > is natively better-dispersed (0.30) but less accurate — the dispersion-vs-accuracy trade is a
 > calibration story for P4/P8.
 
+### P3.9 — Ceiling diagnostics: *why* the skill is "unimpressive" (the binding constraint)
+
+Before chasing better samplers, we measured the achievable ceiling by feeding the EnKF
+**oracle** information (`generate_trajectory_enkf` gains `perfect_obs` = replace the 3-D state
+with truth at obs cells, `dense_obs` = observe the column at *every* cell, `init_perturb` =
+corrupt the IC). 8 inits × 120 leads:
+
+| experiment | RMSE | vs its free |
+|---|---|---|
+| free (good IC) | 1.9537 | — |
+| EnKF (good IC) | 1.8823 | −3.7 % |
+| **perfect 3-D truth @ 2 % orbit cells** | **1.8539** | −5.1 % ← coverage ceiling |
+| dense column @ 100 % cells | 1.7559 | −10.1 % |
+| dense + perfect-3-D @ 100 % | 0.7062 | −63.9 % (1–3-step forecast floor) |
+| free (climatology IC) | 9.4120 | — |
+| **EnKF (climatology IC)** | **7.6560** | **−18.5 %** ← DA works when the forecast is wrong |
+
+**Three decisive findings:**
+1. **Coverage is the binding constraint at OCO-2 density.** Even *perfect 3-D truth* inserted at
+   the ~2 % observed cells each step reaches only 1.854 — and EnKF (1.882) is already within 1.5 %
+   of that oracle. **No sampler/amortization can meaningfully beat ~1.85 at 2 % coverage**; the
+   field is information-starved and transport propagates the constraint only slowly. The
+   "few-percent" gain is a *physics ceiling*, not an algorithm failure.
+2. **Headroom lives at higher coverage + in the vertical.** 2 %→100 % column drops 1.88→1.756;
+   column→perfect-3-D at 100 % drops 1.756→0.706. So (a) **more observations** (denser networks,
+   multi-instrument, temporal super-obs) is the dominant lever, and (b) **vertical de-aliasing**
+   (`p(profile|column)`) is a large lever *only once coverage is high* — exactly where a
+   generative prior should win over the linear EnKF.
+3. **DA value scales with forecast error.** Good IC → −3.7 %; climatology IC → −18.5 %. The
+   identical-twin forecast is so good there is little to correct; the unimpressive headline is the
+   twin ceiling. The impressive-DA demonstration lives in a **model-error / real-data** regime.
+
+### P3.10 — Amortized conditional FM (learn p(state|obs), one-pass)
+
+Built `AmortizedResidualFlowMatching` (registered): the velocity UNet gains 2 input channels
+(obs_value, obs_mask; `in_chans` 51→53) and trains with a randomly-masked (0–30 % coverage)
+nominal-column observation of the target, learning `p(x_next | x_t, f_det, y)` so observations are
+baked into a **single generation pass** — no test-time guidance/optimisation. Fine-tuned from a
+surgically channel-expanded phase-2p checkpoint (`make_init_ckpt.py`; the time channel moves 50→52,
+obs channels zero-init). Eval via `generate_trajectory_amortized` / `eval_mip_osse --method
+amortized`, at orbit (2 %) or `--dense-obs` (100 %) coverage with the training-consistent column
+operator.
+
+> **Bug fixed en route (affects all `pretrained_ckptpath` fine-tunes):** the litmodule used
+> `k.replace("model.","")`, which mangles `submodel.`→`sub` and silently drops every FM-head weight
+> on load (amortized step-0 loss 36 vs base 0.8). Fixed to strip only the leading prefix → step-0
+> loss 0.57.
+
+**Expectation set by P3.9:** the amortized model will *not* beat EnKF at 2 % coverage (nothing can —
+oracle ceiling 1.854); its value is in the **dense regime** (vertical de-aliasing toward the 0.706
+floor) and on **real data** (model error). Eval pending the fine-tune.
+
 ---
 
 ## P4 — OSSE skill & shortcoming analysis
