@@ -48,9 +48,10 @@ class NeuralTransport(pl.LightningModule):
             self.model = model
         if pretrained_ckptpath is not None:
             ckpt = torch.load(pretrained_ckptpath, map_location="cpu", weights_only=False)
-            model_state_dict = {
-                k.replace("model.", ""): v for k, v in ckpt["state_dict"].items() if k.startswith("model.")
-            }
+            # Strip only the leading "model." prefix. NB: str.replace("model.","")
+            # would also mangle "submodel." -> "sub" (it contains "model."),
+            # silently dropping every FM-head weight on load.
+            model_state_dict = {k[len("model.") :]: v for k, v in ckpt["state_dict"].items() if k.startswith("model.")}
             for key in [
                 "multiscale_encoder.position_feats",
                 "multiscale_decoder.position_feats",

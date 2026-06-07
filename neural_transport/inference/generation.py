@@ -1277,6 +1277,7 @@ def generate_trajectory_ensemble_batched(
     obs_noise=0.0,
     ak_mode="real",
     thin_fraction=1.0,
+    init_perturb=None,
     target_var="co2massmix",
     device="cuda",
     seed=42,
@@ -1285,6 +1286,9 @@ def generate_trajectory_ensemble_batched(
 ):
     """Batched (init × sample) auto-regressive ensemble rollout with optional
     per-step posterior conditioning.
+
+    ``init_perturb`` (str|None): corrupt the initial state for the wrong-IC
+    (twin-ceiling) diagnostic — see ``_apply_init_perturb``.
 
     ``orbit_obs`` (an OrbitObsProvider): if given, the synthetic obs are sampled
     at the *real* OCO-2 orbit footprints with the corrected P1 operator
@@ -1348,6 +1352,10 @@ def generate_trajectory_ensemble_batched(
     current_co2 = torch.empty(BATCH, *co2_shape, device=device, dtype=init_batches[0][target_var].dtype)
     for i, ib in enumerate(init_batches):
         current_co2[i * n_samples : (i + 1) * n_samples] = ib[target_var]
+
+    if init_perturb:
+        ic_rng = torch.Generator(device=device).manual_seed(seed + 5)
+        current_co2 = _apply_init_perturb(current_co2, init_perturb, generator=ic_rng)
 
     obs_present = _np.zeros(n_steps, dtype=bool)
     for k in range(n_steps):
@@ -2217,6 +2225,51 @@ def _build_orbit_enkf_obs(
     return mask_grid, y_grid, g_grid
 
 
+def _apply_init_perturb(x, spec, *, generator=None):
+    """Perturb the initial state for the wrong-IC (twin-ceiling) diagnostic.
+
+    ``x`` is ``[B, N, C]`` physical co2massmix. ``spec`` is ``"type:value"``:
+      * ``anom_scale:a`` — keep the spatial mean, scale anomalies by ``a``
+        (a=0 → climatology / no spatial structure; a=1 → unchanged).
+      * ``bias:x``       — add a uniform offset ``x``.
+      * ``gauss_noise:s``— add iid N(0, s²) noise.
+    """
+    if not spec:
+        return x
+    typ, _, val = spec.partition(":")
+    val = float(val) if val else 0.0
+    if typ == "anom_scale":
+        # Spatial mean over every axis between batch(0) and channel(-1), so this
+        # works for both [B, N, C] and [B, T=1, N, C] layouts (the time axis is
+        # size 1 and averaging over it is a no-op).
+        dims = tuple(range(1, x.dim() - 1))
+        m = x.mean(dim=dims, keepdim=True)
+        return m + val * (x - m)
+    if typ == "bias":
+        return x + val
+    if typ == "gauss_noise":
+        return x + val * torch.randn(x.shape, device=x.device, generator=generator)
+    raise ValueError(f"unknown init_perturb spec: {spec!r}")
+
+
+def _build_dense_column_obs(gt_grid, p_bottom, p_top, *, obs_noise=0.0, generator=None):
+    """Dense column obs at *every* cell (vertical-dilution ceiling diagnostic).
+
+    Column operator with uniform AK=1 and real layer-thickness pressure weights
+    ``g_l = (p_bot_l - p_top_l)/p_surf`` (rows ~sum to 1). Returns the same
+    ``(mask[n_inits,N] all-True, y[n_inits,N], g[n_inits,N,C])`` interface as
+    ``_build_orbit_enkf_obs`` so the EnKF update consumes it unchanged.
+    """
+    n_inits, N, C = gt_grid.shape
+    dp = (p_bottom - p_top).clamp_min(0.0)
+    g = dp / p_bottom[:, :, :1].clamp_min(1e-6)  # [n_inits, N, C]
+    y = (g * gt_grid).sum(-1)  # [n_inits, N]
+    if obs_noise > 0:
+        y = y + obs_noise * torch.randn(y.shape, device=y.device, generator=generator)
+    mask = torch.ones(n_inits, N, dtype=torch.bool, device=gt_grid.device)
+    return mask, y, g
+
+
 def generate_trajectory_enkf(
     model,
     data_loader,
@@ -2239,6 +2292,9 @@ def generate_trajectory_enkf(
     obs_noise=0.0,
     ak_mode="real",
     thin_fraction=1.0,
+    init_perturb=None,
+    perfect_obs=False,
+    dense_obs=False,
     target_var="co2massmix",
     device="cuda",
     seed=42,
@@ -2246,6 +2302,11 @@ def generate_trajectory_enkf(
     verbose=False,
 ):
     """Phase 25i: Free-running ensemble + per-cell vertical EnKF post-hoc update.
+
+    Ceiling diagnostics (orbit path only): ``perfect_obs`` replaces the state at
+    observed cells with the 3-D truth (coverage ceiling); ``dense_obs`` observes
+    the column at *every* cell (vertical-dilution ceiling); ``init_perturb``
+    corrupts the initial state (twin ceiling — see ``_apply_init_perturb``).
 
     At each AR step, run the unconditional model to obtain a predicted ensemble.
     At observation steps, apply a stochastic (perturbed-obs) Ensemble Kalman
@@ -2350,6 +2411,10 @@ def generate_trajectory_enkf(
 
     enkf_rng = torch.Generator(device=device).manual_seed(seed + 1)
 
+    if init_perturb:
+        ic_rng = torch.Generator(device=device).manual_seed(seed + 5)
+        current_co2 = _apply_init_perturb(current_co2, init_perturb, generator=ic_rng)
+
     for k in iters:
         batches_per_init = []
         for i_pos, init_idx in enumerate(init_indices):
@@ -2442,20 +2507,26 @@ def generate_trajectory_enkf(
                 pb = torch.cat([b["p_bottom"] for b in gt_next], dim=0).view(n_inits, N, C)
                 pt = torch.cat([b["p_top"] for b in gt_next], dim=0).view(n_inits, N, C)
                 obs_ts = [times_axis[init_indices[i] + k + 1] for i in range(n_inits)]
-                m_grid, y_grid_i, g_grid_i = _build_orbit_enkf_obs(
-                    orbit_obs,
-                    obs_ts,
-                    gt_grid,
-                    pb,
-                    pt,
-                    nlat,
-                    nlon,
-                    ak_mode=ak_mode,
-                    thin_fraction=thin_fraction,
-                    obs_noise=obs_noise,
-                    rng=enkf_rng,
-                    device=device,
-                )
+                if dense_obs:
+                    # Vertical-dilution ceiling: column at EVERY cell.
+                    m_grid, y_grid_i, g_grid_i = _build_dense_column_obs(
+                        gt_grid, pb, pt, obs_noise=obs_noise, generator=enkf_rng
+                    )
+                else:
+                    m_grid, y_grid_i, g_grid_i = _build_orbit_enkf_obs(
+                        orbit_obs,
+                        obs_ts,
+                        gt_grid,
+                        pb,
+                        pt,
+                        nlat,
+                        nlon,
+                        ak_mode=ak_mode,
+                        thin_fraction=thin_fraction,
+                        obs_noise=obs_noise,
+                        rng=enkf_rng,
+                        device=device,
+                    )
                 # Expand per-init rows across the n_samples ensemble axis so the
                 # per-init slicing below (i * n_samples) selects the right init.
                 mask_full = m_grid.repeat_interleave(n_samples, dim=0)  # [BATCH, N]
@@ -2498,6 +2569,12 @@ def generate_trajectory_enkf(
                 hak_i = hak[i * n_samples]  # [N, C]
                 obs_idx = mask_i.nonzero(as_tuple=True)[0]
                 if obs_idx.numel() == 0:
+                    continue
+                if perfect_obs:
+                    # Coverage ceiling: replace the full 3-D state at obs cells
+                    # with the truth (zero analysis error there). orbit path only.
+                    truth_cells = gt_grid[i, obs_idx, :].unsqueeze(0)  # [1, M, C]
+                    x_grid[i, :, obs_idx, :] = truth_cells.expand(n_samples, -1, -1)
                     continue
                 col = x_grid[i, :, obs_idx, :]  # [n_samples, M, C]
                 hak_obs = hak_i[obs_idx]  # [M, C]
