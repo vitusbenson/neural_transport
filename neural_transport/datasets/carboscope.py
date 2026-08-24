@@ -19,10 +19,10 @@ from neural_transport.datasets.grids import (
     CARBOSCOPE_79_LONLAT,
     OBSPACK_287_LONLAT,
 )
+from neural_transport.models.gnn.mesh import ICONGrid
 from neural_transport.neural_transport.datasets.solar_radiation import (
     get_toa_incident_solar_radiation_for_xarray,
 )
-from neural_transport.models.gnn.mesh import ICONGrid
 from neural_transport.tools.conversion import *
 
 

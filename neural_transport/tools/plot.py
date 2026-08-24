@@ -5,12 +5,12 @@ from pathlib import Path
 
 import cartopy.crs as ccrs
 import matplotlib as mpl
-import matplotlib.colors as colors
 import matplotlib.pyplot as plt
 import matplotlib.style as mplstyle
 import numpy as np
 import xarray as xr
 import xrft
+from matplotlib import colors
 from torch.utils.tensorboard.writer import figure_to_image
 
 from neural_transport.tools.conversion import *

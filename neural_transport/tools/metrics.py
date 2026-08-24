@@ -1,9 +1,8 @@
-import torch
-import torch.nn as nn
-from torchmetrics.functional import pearson_corrcoef, r2_score
 import numpy as np
+import torch
 import xarray as xr
-from typing import Tuple
+from torch import nn
+from torchmetrics.functional import pearson_corrcoef, r2_score
 
 from neural_transport.tools.conversion import (
     density_to_mass,
@@ -186,7 +185,7 @@ class ManyMetrics(nn.Module):
         return metrics
 
 
-def crps(preds, tests) -> Tuple[xr.DataArray | np.ndarray, float]:
+def crps(preds, tests) -> tuple[xr.DataArray | np.ndarray, float]:
     """
     Compute the Continuous Ranked Probability Score (CRPS)
     for ensemble predictions vs. ground truth.

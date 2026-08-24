@@ -10,14 +10,14 @@ import seaborn as sns
 import xarray as xr
 from matplotlib.animation import FuncAnimation
 
+from neural_transport.plots.utilities.cmaps import get_cmap_list
 from neural_transport.plots.utilities.plot_utils import (
+    PROJECTION_MAP,
     decorate_earth,
     normalize_minmax,
-    PROJECTION_MAP,
     parse_projections,
     save_animation,
 )
-from neural_transport.plots.utilities.cmaps import get_cmap_list
 
 sns.set_theme()
 sns.color_palette("crest", as_cmap=True)

@@ -8,8 +8,12 @@ from ecmwfapi import ECMWFService
 from tqdm import tqdm
 from tqdm.contrib.concurrent import process_map
 
-from neural_transport.tools.conversion import massmix_to_density, massmix_to_molemix, M_CH4, M_CO
-
+from neural_transport.tools.conversion import (
+    M_CH4,
+    M_CO,
+    massmix_to_density,
+    massmix_to_molemix,
+)
 
 CAMS_MODEL_RUNS = [
     {

@@ -1,16 +1,18 @@
 from pathlib import Path
 
 import cartopy.crs as ccrs
-from matplotlib import gridspec
 import matplotlib as mpl
-from matplotlib.lines import Line2D
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+import torch
 import xarray as xr
 import xrft
 import xskillscore
+from matplotlib import gridspec
+from matplotlib.lines import Line2D
+from sklearn.decomposition import PCA
 from xmovie import Movie
 from xmovie.core import convert_gif
 
@@ -18,15 +20,11 @@ from neural_transport.inference.analyse import freq_mean
 from neural_transport.tools.conversion import (
     compute_xco2_via_ak,
     density_to_massmix,
+    km_per_gridcell,
     massmix_to_molemix,
     zonal_wavenumber_to_wavelength,
-    km_per_gridcell,
 )
 from neural_transport.tools.metrics import crps
-
-from sklearn.decomposition import PCA
-
-import torch
 
 mpl_rc_params = {
     "xtick.labelsize": 8,

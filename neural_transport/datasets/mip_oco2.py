@@ -1,8 +1,8 @@
 """Prepare MIP OCO-2 dataset: download, filter, regrid, write, stats."""
 
-from pathlib import Path
-import urllib.request
 import tarfile
+import urllib.request
+from pathlib import Path
 
 import dask
 import numpy as np

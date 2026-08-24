@@ -1,6 +1,6 @@
 import torch
-import torch.nn as nn
 import torch_harmonics
+from torch import nn
 
 
 class MAE(nn.Module):

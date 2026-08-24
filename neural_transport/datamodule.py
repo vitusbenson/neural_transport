@@ -13,7 +13,9 @@ import zarr
 from torch.utils.data import Dataset
 
 from neural_transport.datasets.grids import (
-    LATLON_PROTOTYPE_COORDS, VERTICAL_LAYERS_PROTOTYPE_COORDS, DEFAULT_GRIDS,
+    DEFAULT_GRIDS,
+    LATLON_PROTOTYPE_COORDS,
+    VERTICAL_LAYERS_PROTOTYPE_COORDS,
 )
 from neural_transport.datasets.vars import *
 from neural_transport.models.gnn.mesh import get_gridnc_from_grid

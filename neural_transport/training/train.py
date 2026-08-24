@@ -7,18 +7,23 @@ import pytorch_lightning as pl
 import xarray as xr
 
 from neural_transport.datamodule import CarbonDataModule, CarbonDataset
-from neural_transport.inference.analyse import compute_local_scores, compute_score_df, compute_score_df_generate
+from neural_transport.inference.analyse import (
+    compute_local_scores,
+    compute_score_df,
+    compute_score_df_generate,
+)
 from neural_transport.inference.forecast import iterative_forecast
 from neural_transport.inference.generative import (
-    iterative_generate, iterative_generate_oco2,
+    iterative_generate,
+    iterative_generate_oco2,
 )
+from neural_transport.litmodule import NeuralTransport
 from neural_transport.plots.plot_results import (
     animate_predictions,
     plot_metrics,
     plot_obspack_stations,
     plot_samples,
 )
-from neural_transport.litmodule import NeuralTransport
 from neural_transport.tools.conversion import massmix_to_molemix
 
 

@@ -2,7 +2,6 @@ import numpy as np
 import torch
 import xarray as xr
 
-
 R_EARTH = 6.371e3  # km
 
 M_CO2 = 44.009e-3

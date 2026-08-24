@@ -1,16 +1,19 @@
+import json
 import tempfile
 from pathlib import Path
 
 import numpy as np
 import torch
-from tqdm import tqdm
 import xarray as xr
 from cdo import Cdo
+from tqdm import tqdm
 
 from neural_transport.plots.plot_results import (
-    plot_noise_diagnostics, plot_masking_diagnostics
+    plot_masking_diagnostics,
+    plot_noise_diagnostics,
 )
 from neural_transport.tools.conversion import molemix_to_massmix
+
 
 def get_zarrpath_obspath(out_path, rollout, freq, zarr_filename=None, zero_surfflux=False):
     if zarr_filename is None:
@@ -464,7 +467,7 @@ def iterative_generate_oco2(
     target_vars_2d=[],
     **generate_kwargs,
 ):
-    # n_timesteps = generate_kwargs.get("n_timesteps", 5) # just for testing/debugging with fewer steps
+    n_timesteps = generate_kwargs.get("n_timesteps", 5) # just for testing/debugging with fewer steps
     n_samples = generate_kwargs.get("n_samples", 10)
     masking = generate_kwargs.get("masking", True)
     mask_pattern = generate_kwargs.get("mask_pattern", None)
@@ -477,7 +480,18 @@ def iterative_generate_oco2(
 
     nlat, nlon = model.model.in_nlat, model.model.in_nlon
 
+    ckpt_gen_path = Path(outpath) / "checkpoint_gen.json"
+
     zarrpath, obspath = get_zarrpath_obspath(outpath, rollout, freq, zarr_filename, zero_surfflux = zero_surfflux)
+
+    found_good_sample = False
+    if Path(zarrpath).exists():
+        existing_ds = xr.open_zarr(zarrpath)
+        start_t_idx = len(existing_ds)
+        print(f"Existing zarr found with {start_t_idx} timesteps, resuming generation there.")
+        found_good_sample = True
+    else:
+        start_t_idx = 0
 
     prototype_zarr = dataset.create_prototype_zarr(
         zarrpath,
@@ -489,28 +503,31 @@ def iterative_generate_oco2(
     model = model.eval().to(device)
     model.return_intermediates = True
     model.model.generate_kwargs = generate_kwargs
-
-    dss = []
     
     if mask_pattern is None:
-        # T = min(n_timesteps, len(dataset_gen))  # just for testing/debugging with fewer steps
-        # print(f"Using only first {T} timesteps for generation (for testing/debugging)")
-        T = len(dataset_gen)
-        print(f"Using full dataset with {T} timesteps for generation")
-        raise Exception("Stop here for debugging")
+        T = min(n_timesteps, len(dataset_gen))  # just for testing/debugging with fewer steps
+        print(f"Using only first {T} timesteps for generation (for testing/debugging)")
+        # T = len(dataset_gen)
+        # print(f"Using full dataset with {T} timesteps for generation")
     else:
         T = min(len(dataset), len(dataset_gen))
     offset = align_time(dataset.ds.time.values, dataset_gen.ds.time.values)
     print(f"Time alignment offset: {offset} timesteps")
     window_steps = max(1, window_hours // freq_int)
     print(f"Using observation window: {window_hours} hours = {window_steps} timesteps")
+    time_range = range(start_t_idx, T)
 
     if analyze_masking and masking:
         batch_analyze_list = []
         condition_analyze_list = []
         time_indices = np.linspace(0, T-1, 3, dtype=int)
 
-    for t_idx in tqdm(range(T), desc="Generating") if verbose else range(T):
+    if start_t_idx > 0:
+        prev_good_ds = existing_ds.isel(time=-1)
+    else:
+        prev_good_ds = None
+
+    for t_idx in tqdm(time_range, desc="Generating") if verbose else time_range:
         t = t_idx
         # batches: dict of tensors [B T N C]
         batch, batch_gen = get_batches(t, offset, dataset, dataset_gen, window_steps, device)
@@ -601,24 +618,13 @@ def iterative_generate_oco2(
         if remap:
             ds = remap_with_cdo(dataset, prototype_zarr.isel(time=0), ds)
 
-        dss.append(ds)
-
-        if analyze_masking and masking:
-            if t_idx in time_indices:
-                batch_analyze_list.append(batch)
-                condition_analyze_list.append(condition_batch)
-
-    ### !!! Caution: need to fix this properly!!!
-    good_dss = []
-    obss = []
-
-    for i, ds in enumerate(dss):
+        ### !!! Caution: need to fix this properly!!!
         bad_mask = is_bad_sample(ds["co2massmix"])
         if bad_mask.all():  # all samples bad
             print(f"All samples bad at time {ds.time.values}, creating fake sample")
             ds_good = ds.copy()
-            if i > 0:
-                prev_ds = good_dss[-1]
+            if t_idx > 0:
+                prev_ds = prev_good_ds
                 ds_good["co2massmix"] = (
                     prev_ds["co2massmix"]
                     .mean(dim="sample", skipna=True)
@@ -629,27 +635,39 @@ def iterative_generate_oco2(
         else:
             sample_mask = xr.DataArray(~bad_mask, dims=["sample"])
             ds_good = ds.where(sample_mask)
-        good_dss.append(ds_good)
+            found_good_sample = True
+
+        prev_good_ds = ds_good
+
+        ds_good.to_zarr(
+            zarrpath,
+            mode="a" if Path(zarrpath).exists() else "w",
+            append_dim="time",
+        )
 
         if save_obs:
             ds_obs = (
                 ds_good.isel(trajectory_steps=-1).mean(dim="sample")
             )
             obs = dataset.readout_stations(ds_obs, grid="default" if remap else None)
-            ds = ds.drop_vars(["gph_bottom", "gph_top"])
-            obss.append(obs)
+            obs.to_zarr(
+                obspath,
+                mode="a" if Path(obspath).exists() else "w",
+                append_dim="time",
+            )
 
-    if all(ds["co2massmix"].isnull().all() for ds in good_dss):
+        if analyze_masking and masking:
+            if t_idx in time_indices:
+                batch_analyze_list.append(batch)
+                condition_analyze_list.append(condition_batch)
+
+        with open(ckpt_gen_path, "w") as f:
+            json.dump({"next_t_idx": t_idx + 1}, f) # checkpoint after each time step, so if interrupted can resume from next time step
+
+    if not found_good_sample:
         raise RuntimeError("All generated samples were bad")
 
-    ds_all = xr.concat(good_dss, dim="time")
-    ### !!!
-
-    if save_obs:
-        obs_all = xr.concat(obss, dim="time").fillna({"obs_filename": ""})
-        obs_all.to_zarr(obspath, mode="w")
-
-    ds_all.to_zarr(zarrpath, mode="w")
+    ds_all = xr.open_zarr(zarrpath)
 
     if analyze_masking and masking:
         plot_masking_diagnostics(batch_analyze_list,

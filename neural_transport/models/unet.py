@@ -1,4 +1,4 @@
-import torch.nn as nn
+from torch import nn
 
 from neural_transport.models.layers import ACTIVATIONS
 from neural_transport.models.regulargrid import RegularGridModel

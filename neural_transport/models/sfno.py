@@ -36,7 +36,7 @@ from functools import partial
 import tensorly as tl
 import torch
 import torch.fft
-import torch.nn as nn
+from torch import nn
 from torch.cuda import amp
 from torch.utils.checkpoint import checkpoint
 from torch_harmonics import *

@@ -8,8 +8,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import xarray as xr
 
-from neural_transport.plots.utilities.plot_utils import mpl_rc_params, save_figure
 from neural_transport.plots.utilities.cmaps import get_cmap_list
+from neural_transport.plots.utilities.plot_utils import mpl_rc_params, save_figure
 
 sns.set_theme()  # Optional, for consistent style
 sns.color_palette("crest", as_cmap=True)

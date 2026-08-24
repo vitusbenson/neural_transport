@@ -12,11 +12,16 @@ import torch
 import xarray as xr
 from matplotlib import gridspec
 
-from neural_transport.plots.utilities.plot_utils import (
-    decorate_earth, load_carbontracker_tests, normalize_minmax,
-    normalize_tests, save_figure, PROJECTION_MAP, parse_projections
-)
 from neural_transport.plots.utilities.cmaps import get_cmap_list
+from neural_transport.plots.utilities.plot_utils import (
+    PROJECTION_MAP,
+    decorate_earth,
+    load_carbontracker_tests,
+    normalize_minmax,
+    normalize_tests,
+    parse_projections,
+    save_figure,
+)
 
 sns.set_theme()
 sns.color_palette("crest", as_cmap=True)

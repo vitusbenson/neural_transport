@@ -18,7 +18,7 @@ from neural_transport.datasets.grids import VERTICAL_LAYERS_PROTOTYPE_COORDS
 from neural_transport.datasets.solar_radiation import (
     get_toa_incident_solar_radiation_for_xarray,
 )
-from neural_transport.tools.conversion import molemix_to_massmix, M_CO2
+from neural_transport.tools.conversion import M_CO2, molemix_to_massmix
 from neural_transport.tools.obspack_helper import extract_obspack_locs_from_xarray
 
 dask.config.set(scheduler="threads")

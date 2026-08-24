@@ -1,22 +1,18 @@
-from typing import Optional
 import inspect
+from typing import Optional
 
-# torch
 import torch
-import torch.nn as nn
-
-# flow_matching
-from flow_matching.path.scheduler import CondOTScheduler
 from flow_matching.path import AffineProbPath
+from flow_matching.path.scheduler import CondOTScheduler
 from flow_matching.solver import ODESolver
+from torch import nn
 
-# neural_transport
 from neural_transport.datasets.grids import VERTICAL_LAYERS_PROTOTYPE_COORDS
 from neural_transport.models import MODELS
 from neural_transport.models.regulargrid import RegularGridModel
 from neural_transport.tools.conversion import massmix_to_molemix, molemix_to_massmix
-from neural_transport.tools.guidance import XCO2Guidance
 from neural_transport.tools.developement import _print_stats_torch
+from neural_transport.tools.guidance import XCO2Guidance
 
 
 class VelocityWrapper(nn.Module):

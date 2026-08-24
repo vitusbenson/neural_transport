@@ -6,26 +6,24 @@ from pathlib import Path
 import cartopy.crs as ccrs
 import xarray as xr
 
+from neural_transport.plots.plotting.animate_trajectory import animate_trajectory
+from neural_transport.plots.plotting.plot_cmaps import plot_cmaps
+from neural_transport.plots.plotting.plot_projections import plot_samples_projection
+from neural_transport.plots.plotting.plot_samples import plot_samples
+from neural_transport.plots.plotting.plot_samples_and_ground_truth import (
+    plot_samples_and_ground_truth,
+)
+from neural_transport.plots.plotting.plot_samples_comparison import (
+    plot_samples_with_comparison,
+)
+from neural_transport.plots.plotting.plot_trajectories import plot_trajectories
+from neural_transport.plots.plotting.plot_trajectory import plot_trajectory_timeseries
+from neural_transport.plots.utilities.cmaps import get_cmap_list
 from neural_transport.plots.utilities.plot_utils import (
     load_carbontracker_tests,
     parse_projections,
     save_animation,
     save_figure,
-)
-from neural_transport.plots.utilities.cmaps import get_cmap_list
-from neural_transport.plots.plotting.animate_trajectory import (
-    animate_trajectory
-)
-from neural_transport.plots.plotting.plot_samples_comparison import (
-    plot_samples_with_comparison
-)
-from neural_transport.plots.plotting.plot_trajectory import plot_trajectory_timeseries
-from neural_transport.plots.plotting.plot_samples_and_ground_truth import plot_samples_and_ground_truth
-from neural_transport.plots.plotting.plot_trajectories import plot_trajectories
-from neural_transport.plots.plotting.plot_cmaps import plot_cmaps
-from neural_transport.plots.plotting.plot_samples import plot_samples
-from neural_transport.plots.plotting.plot_projections import (
-    plot_samples_projection
 )
 
 

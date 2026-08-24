@@ -10,8 +10,13 @@ import numpy as np
 import seaborn as sns
 import xarray as xr
 
-from neural_transport.plots.utilities.plot_utils import decorate_earth, save_figure, PROJECTION_MAP, parse_projections
 from neural_transport.plots.utilities.cmaps import get_cmap_list
+from neural_transport.plots.utilities.plot_utils import (
+    PROJECTION_MAP,
+    decorate_earth,
+    parse_projections,
+    save_figure,
+)
 
 sns.set_theme()  # Optional seaborn style
 sns.color_palette("crest", as_cmap=True)
